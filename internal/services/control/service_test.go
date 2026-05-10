@@ -37,11 +37,29 @@ func (s *streamStub) StopForEntrypoint(_ context.Context, entrypointID string) e
 	return s.stopErr
 }
 
+type callStub struct {
+	answerCalls int
+	hangupCalls int
+	answerErr   error
+	hangupErr   error
+}
+
+func (c *callStub) Answer(context.Context) error {
+	c.answerCalls++
+	return c.answerErr
+}
+
+func (c *callStub) Hangup(context.Context) error {
+	c.hangupCalls++
+	return c.hangupErr
+}
+
 func TestServiceUnlockEntrypoint(t *testing.T) {
 	unlock := &unlockStub{}
 	stream := &streamStub{}
+	call := &callStub{}
 	var events []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, call, func(ev event.Envelope) {
 		events = append(events, ev)
 	})
 
@@ -59,7 +77,8 @@ func TestServiceUnlockEntrypoint(t *testing.T) {
 func TestServiceStreamStartUsesEntrypointDevAddr(t *testing.T) {
 	unlock := &unlockStub{}
 	stream := &streamStub{}
-	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, nil)
+	call := &callStub{}
+	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, call, nil)
 
 	if err := svc.StartEntrypointStream(context.Background(), "gate2"); err != nil {
 		t.Fatalf("stream start failed: %v", err)
@@ -69,5 +88,28 @@ func TestServiceStreamStartUsesEntrypointDevAddr(t *testing.T) {
 	}
 	if stream.startEntrypID != "gate2" {
 		t.Fatalf("unexpected stream entrypoint id: %s", stream.startEntrypID)
+	}
+}
+
+func TestServiceCallAnswerHangup(t *testing.T) {
+	unlock := &unlockStub{}
+	stream := &streamStub{}
+	call := &callStub{}
+	var emitted []event.Envelope
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, func(ev event.Envelope) {
+		emitted = append(emitted, ev)
+	})
+
+	if err := svc.AnswerCall(context.Background()); err != nil {
+		t.Fatalf("answer failed: %v", err)
+	}
+	if err := svc.HangupCall(context.Background()); err != nil {
+		t.Fatalf("hangup failed: %v", err)
+	}
+	if call.answerCalls != 1 || call.hangupCalls != 1 {
+		t.Fatalf("unexpected call driver invocations answer=%d hangup=%d", call.answerCalls, call.hangupCalls)
+	}
+	if len(emitted) != 2 || emitted[0].Type != event.TypeCallAnswered || emitted[1].Type != event.TypeCallEnded {
+		t.Fatalf("unexpected emitted events: %+v", emitted)
 	}
 }

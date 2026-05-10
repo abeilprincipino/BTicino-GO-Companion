@@ -54,6 +54,34 @@ func (r *Router) handleEntrypointStreamStop(w http.ResponseWriter, req *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "entrypoint_id": entrypointID, "action": "stream_stop"})
 }
 
+func (r *Router) handleCallAnswer(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.AnswerCall(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "call_answer"})
+}
+
+func (r *Router) handleCallHangup(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.HangupCall(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "call_hangup"})
+}
+
 func contextWithTimeout(req *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(req.Context(), 8*time.Second)
 }
@@ -64,6 +92,10 @@ func handleControlError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "entrypoint_not_found", err.Error())
 	case errors.Is(err, control.ErrCapabilityNotEnabled):
 		writeError(w, http.StatusConflict, "capability_disabled", err.Error())
+	case errors.Is(err, control.ErrNoIncomingCall):
+		writeError(w, http.StatusConflict, "no_incoming_call", err.Error())
+	case errors.Is(err, control.ErrNoActiveCall):
+		writeError(w, http.StatusConflict, "no_active_call", err.Error())
 	default:
 		writeError(w, http.StatusBadGateway, "control_failed", err.Error())
 	}

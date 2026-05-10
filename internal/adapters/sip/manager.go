@@ -20,7 +20,8 @@ import (
 )
 
 var (
-	ErrNoActiveCall = errors.New("no active call")
+	ErrNoIncomingCall = errors.New("no incoming call")
+	ErrNoActiveCall   = errors.New("no active call")
 )
 
 const sipAnswerTimeout = 8 * time.Second
@@ -252,6 +253,32 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	return nil
 }
 
+func (m *Manager) Answer(ctx context.Context) error {
+	if !m.enabled {
+		return ErrNoIncomingCall
+	}
+	_ = ctx
+
+	m.mu.Lock()
+	incoming := m.incoming
+	m.mu.Unlock()
+	if incoming == nil {
+		return ErrNoIncomingCall
+	}
+
+	if err := incoming.RespondSDP([]byte(m.answerSDP())); err != nil {
+		return fmt.Errorf("answer incoming failed: %w", err)
+	}
+	m.mu.Lock()
+	if m.incoming == incoming {
+		m.incoming = nil
+	}
+	m.activeIn = incoming
+	m.mu.Unlock()
+	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
+	return nil
+}
+
 func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	if !m.enabled {
 		return ErrNoActiveCall
@@ -283,17 +310,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	}()
 
 	if incoming != nil {
-		if err := incoming.RespondSDP([]byte(m.answerSDP())); err != nil {
-			return fmt.Errorf("answer incoming for stream failed: %w", err)
-		}
-		m.mu.Lock()
-		if m.incoming == incoming {
-			m.incoming = nil
-		}
-		m.activeIn = incoming
-		m.mu.Unlock()
-		m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
-		return nil
+		return m.Answer(ctx)
 	}
 
 	inviteReq := sip.NewRequest(sip.INVITE, target.URI)

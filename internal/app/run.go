@@ -13,11 +13,13 @@ import (
 	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/protocol/openwebnet"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
+	"bticino-go-companion/internal/services/trace"
 )
 
 func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
@@ -32,6 +34,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
+	traceBroker := trace.New(1024)
 	normalizer := events.NewNormalizer(cfg.Entrypoints)
 	validator := events.NewValidator()
 	runtimeStatus := runtime.New(cfg.MediaSIPEnabled, cfg.OpenWebNetEnabled)
@@ -84,6 +87,16 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	}()
 
 	commandClient := openwebnet.NewCommandClient(cfg)
+	commandClient.SetTraceSink(func(direction string, payload map[string]any) {
+		rec := trace.Record{
+			Direction: direction,
+			Transport: "tcp_command",
+		}
+		if frame, ok := payload["frame"].(string); ok {
+			rec.Frame = frame
+		}
+		traceBroker.Publish(rec)
+	})
 	mediaService := media.NewService(sipManager)
 
 	if cfg.MediaRTSPEnabled {
@@ -93,16 +106,32 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
-	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, func(ev event.Envelope) {
+	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, func(ev event.Envelope) {
 		publish(ev)
 	})
 	runtimeStatus.SetControlReady(true, "")
 
-	router := v2.NewRouter(projector, controlService, eventBroker, runtimeStatus)
+	router := v2.NewRouter(projector, controlService, eventBroker, runtimeStatus, traceBroker)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
 		listener := openwebnet.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)
+		listener.SetTraceSink(func(msg openwebnetproto.Message, mapped []event.Envelope) {
+			rec := trace.Record{
+				Direction: "rx",
+				Transport: "udp_multicast",
+				System:    msg.System,
+				Frame:     msg.Raw,
+				Mapped:    len(mapped) > 0,
+			}
+			if len(mapped) > 0 {
+				rec.DecodedEventType = make([]string, 0, len(mapped))
+				for _, mappedEvent := range mapped {
+					rec.DecodedEventType = append(rec.DecodedEventType, mappedEvent.Type)
+				}
+			}
+			traceBroker.Publish(rec)
+		})
 		runtimeStatus.SetOpenWebNetReady(true, "")
 		go func() {
 			if err := listener.Run(ctx, func(ev event.Envelope) { publish(ev) }); err != nil {

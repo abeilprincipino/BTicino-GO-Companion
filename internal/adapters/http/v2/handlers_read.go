@@ -36,6 +36,8 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 			"entrypoints_v2",
 			"events_v2",
 			"control_entrypoints_v2",
+			"control_call_v2",
+			"trace_openwebnet_v2",
 		},
 	})
 }

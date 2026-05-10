@@ -14,6 +14,8 @@ import (
 var (
 	ErrEntrypointNotFound   = errors.New("entrypoint not found")
 	ErrCapabilityNotEnabled = errors.New("entrypoint capability not enabled")
+	ErrNoIncomingCall       = errors.New("no incoming call")
+	ErrNoActiveCall         = errors.New("no active call")
 )
 
 type UnlockDriver interface {
@@ -25,14 +27,20 @@ type StreamDriver interface {
 	StopForEntrypoint(ctx context.Context, entrypointID string) error
 }
 
+type CallDriver interface {
+	Answer(ctx context.Context) error
+	Hangup(ctx context.Context) error
+}
+
 type Service struct {
 	entrypoints map[string]entrypoint.Model
 	stream      StreamDriver
 	unlock      UnlockDriver
+	call        CallDriver
 	emit        func(event.Envelope)
 }
 
-func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDriver, emit func(event.Envelope)) *Service {
+func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDriver, call CallDriver, emit func(event.Envelope)) *Service {
 	index := make(map[string]entrypoint.Model, len(entrypoints))
 	for _, ep := range entrypoints {
 		id := strings.TrimSpace(ep.ID)
@@ -45,6 +53,7 @@ func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDrive
 		entrypoints: index,
 		stream:      stream,
 		unlock:      unlock,
+		call:        call,
 		emit:        emit,
 	}
 }
@@ -94,6 +103,28 @@ func (s *Service) StopEntrypointStream(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Service) AnswerCall(ctx context.Context) error {
+	if s.call == nil {
+		return ErrNoIncomingCall
+	}
+	if err := s.call.Answer(ctx); err != nil {
+		return mapCallError(err)
+	}
+	s.publish(event.TypeCallAnswered, "", map[string]any{"source": "api"})
+	return nil
+}
+
+func (s *Service) HangupCall(ctx context.Context) error {
+	if s.call == nil {
+		return ErrNoActiveCall
+	}
+	if err := s.call.Hangup(ctx); err != nil {
+		return mapCallError(err)
+	}
+	s.publish(event.TypeCallEnded, "", map[string]any{"source": "api", "reason": "hangup_requested"})
+	return nil
+}
+
 func (s *Service) entrypoint(id string) (entrypoint.Model, error) {
 	ep, ok := s.entrypoints[strings.TrimSpace(id)]
 	if !ok {
@@ -113,4 +144,19 @@ func (s *Service) publish(kind string, entrypointID string, payload map[string]a
 		EntrypointID: entrypointID,
 		Payload:      payload,
 	})
+}
+
+func mapCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(msg, "incoming"):
+		return ErrNoIncomingCall
+	case strings.Contains(msg, "active call"), strings.Contains(msg, "no active call"):
+		return ErrNoActiveCall
+	default:
+		return err
+	}
 }

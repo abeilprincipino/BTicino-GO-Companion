@@ -16,6 +16,8 @@ type Listener struct {
 	buffer int
 	parser *openwebnetproto.Parser
 	mapper *openwebnetproto.Mapper
+
+	traceSink func(openwebnetproto.Message, []event.Envelope)
 }
 
 func NewListener(group string, port int, buffer int) *Listener {
@@ -29,6 +31,10 @@ func NewListener(group string, port int, buffer int) *Listener {
 		parser: openwebnetproto.NewParser(),
 		mapper: openwebnetproto.NewMapper(),
 	}
+}
+
+func (l *Listener) SetTraceSink(sink func(openwebnetproto.Message, []event.Envelope)) {
+	l.traceSink = sink
 }
 
 func (l *Listener) Run(ctx context.Context, sink func(event.Envelope)) error {
@@ -62,7 +68,11 @@ func (l *Listener) Run(ctx context.Context, sink func(event.Envelope)) error {
 		if parseErr != nil {
 			continue
 		}
-		for _, ev := range l.mapper.Map(msg) {
+		mapped := l.mapper.Map(msg)
+		if l.traceSink != nil {
+			l.traceSink(msg, mapped)
+		}
+		for _, ev := range mapped {
 			sink(ev)
 		}
 	}

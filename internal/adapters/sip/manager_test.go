@@ -32,6 +32,16 @@ func TestManagerDisabledHangupReturnsNoActiveCall(t *testing.T) {
 	}
 }
 
+func TestManagerDisabledAnswerReturnsNoIncomingCall(t *testing.T) {
+	cfg := config.Default()
+	cfg.MediaSIPEnabled = false
+	m := NewManager(cfg, log.New(io.Discard, "", 0))
+
+	if err := m.Answer(context.Background()); err != ErrNoIncomingCall {
+		t.Fatalf("expected ErrNoIncomingCall, got %v", err)
+	}
+}
+
 func TestInviteAuthUserFallbacksToFromUser(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaSIPAuthUser = ""

@@ -26,6 +26,7 @@ type CommandClient struct {
 	port        int
 	timeout     time.Duration
 	unlockDelay time.Duration
+	traceSink   func(string, map[string]any)
 }
 
 type frameReader struct {
@@ -46,12 +47,16 @@ func NewCommandClient(cfg config.Config) *CommandClient {
 	}
 }
 
+func (c *CommandClient) SetTraceSink(sink func(string, map[string]any)) {
+	c.traceSink = sink
+}
+
 func (c *CommandClient) Unlock(ctx context.Context, devAddr string) error {
 	if strings.TrimSpace(devAddr) == "" {
 		return errors.New("empty devaddr")
 	}
 	return c.exec(ctx, func(reader *frameReader) error {
-		if err := sendAndExpect(reader, openwebnetproto.BuildUnlockOpen(devAddr)); err != nil {
+		if err := c.sendAndExpect(reader, openwebnetproto.BuildUnlockOpen(devAddr)); err != nil {
 			return fmt.Errorf("unlock open: %w", err)
 		}
 		timer := time.NewTimer(c.unlockDelay)
@@ -61,7 +66,7 @@ func (c *CommandClient) Unlock(ctx context.Context, devAddr string) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-		if err := sendAndExpect(reader, openwebnetproto.BuildUnlockClose(devAddr)); err != nil {
+		if err := c.sendAndExpect(reader, openwebnetproto.BuildUnlockClose(devAddr)); err != nil {
 			return fmt.Errorf("unlock close: %w", err)
 		}
 		return nil
@@ -80,20 +85,24 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 	}
 
 	reader := &frameReader{conn: conn}
-	if _, err := conn.Write([]byte("*99*0##")); err != nil {
+	handshake := "*99*0##"
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "frame": handshake})
+	if _, err := conn.Write([]byte(handshake)); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}
 	resp, err := reader.readFrame()
 	if err != nil {
 		return fmt.Errorf("read handshake: %w", err)
 	}
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "frame": resp, "mapped": false})
 	if !openwebnetproto.IsACK(resp) {
 		return fmt.Errorf("%w: %s", ErrHandshakeFailed, strings.TrimSpace(resp))
 	}
 	return fn(reader)
 }
 
-func sendAndExpect(reader *frameReader, frame string) error {
+func (c *CommandClient) sendAndExpect(reader *frameReader, frame string) error {
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "frame": frame})
 	if _, err := reader.conn.Write([]byte(frame)); err != nil {
 		return err
 	}
@@ -101,6 +110,7 @@ func sendAndExpect(reader *frameReader, frame string) error {
 	if err != nil {
 		return err
 	}
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "frame": resp, "mapped": false})
 	if !openwebnetproto.IsACK(resp) {
 		return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(resp))
 	}
@@ -136,4 +146,11 @@ func applyDeadline(ctx context.Context, conn net.Conn, fallback time.Duration) e
 		return fmt.Errorf("set conn deadline: %w", err)
 	}
 	return nil
+}
+
+func (c *CommandClient) emitTrace(direction string, payload map[string]any) {
+	if c.traceSink == nil {
+		return
+	}
+	c.traceSink(direction, payload)
 }
