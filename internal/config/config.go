@@ -27,6 +27,11 @@ type Config struct {
 	MediaSIPDomain        string             `json:"media_sip_domain"`
 	MediaSIPAuthUser      string             `json:"media_sip_auth_user"`
 	MediaSIPAuthPass      string             `json:"media_sip_auth_pass"`
+	MediaRTSPEnabled      bool               `json:"media_rtsp_enabled"`
+	MediaRTSPAddress      string             `json:"media_rtsp_address"`
+	MediaRTSPPathMain     string             `json:"media_rtsp_path_main"`
+	MediaRTPAudioPort     int                `json:"media_rtp_audio_port"`
+	MediaRTPVideoPort     int                `json:"media_rtp_video_port"`
 	Entrypoints           []entrypoint.Model `json:"entrypoints"`
 }
 
@@ -49,6 +54,11 @@ func Default() Config {
 		MediaSIPDomain:        "",
 		MediaSIPAuthUser:      "",
 		MediaSIPAuthPass:      "",
+		MediaRTSPEnabled:      true,
+		MediaRTSPAddress:      ":8554",
+		MediaRTSPPathMain:     "doorbell",
+		MediaRTPAudioPort:     5000,
+		MediaRTPVideoPort:     5007,
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -131,6 +141,18 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.MediaSIPTo) == "" {
 		c.MediaSIPTo = "c300x@127.0.0.1"
+	}
+	if strings.TrimSpace(c.MediaRTSPAddress) == "" {
+		c.MediaRTSPAddress = ":8554"
+	}
+	if strings.TrimSpace(c.MediaRTSPPathMain) == "" {
+		c.MediaRTSPPathMain = "doorbell"
+	}
+	if c.MediaRTPAudioPort <= 0 || c.MediaRTPAudioPort > 65535 {
+		c.MediaRTPAudioPort = 5000
+	}
+	if c.MediaRTPVideoPort <= 0 || c.MediaRTPVideoPort > 65535 {
+		c.MediaRTPVideoPort = 5007
 	}
 	if len(c.Entrypoints) == 0 {
 		c.Entrypoints = Default().Entrypoints

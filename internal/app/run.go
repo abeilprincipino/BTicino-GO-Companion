@@ -9,6 +9,7 @@ import (
 
 	"bticino-go-companion/internal/adapters/http/v2"
 	"bticino-go-companion/internal/adapters/openwebnet"
+	"bticino-go-companion/internal/adapters/rtsp"
 	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
@@ -84,6 +85,14 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 
 	commandClient := openwebnet.NewCommandClient(cfg)
 	mediaService := media.NewService(sipManager)
+
+	if cfg.MediaRTSPEnabled {
+		rtspServer := rtspadapter.NewServer(cfg, logger, mediaService)
+		if err := rtspServer.Start(ctx); err != nil {
+			return fmt.Errorf("start rtsp server: %w", err)
+		}
+	}
+
 	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, func(ev event.Envelope) {
 		publish(ev)
 	})

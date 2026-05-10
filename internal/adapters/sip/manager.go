@@ -369,8 +369,8 @@ func (m *Manager) offerSDP(includeDevAddr bool, devAddr string) string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
 	return sipprotocol.BuildOffer(sipprotocol.SDPConfig{
 		Host:           host,
-		AudioPort:      65000,
-		VideoPort:      65002,
+		AudioPort:      m.cfg.MediaRTPAudioPort,
+		VideoPort:      m.cfg.MediaRTPVideoPort,
 		IncludeDevAddr: includeDevAddr,
 		DevAddr:        strings.TrimSpace(devAddr),
 	})
@@ -380,8 +380,8 @@ func (m *Manager) answerSDP() string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
 	return sipprotocol.BuildAnswer(sipprotocol.SDPConfig{
 		Host:      host,
-		AudioPort: 65000,
-		VideoPort: 65002,
+		AudioPort: m.cfg.MediaRTPAudioPort,
+		VideoPort: m.cfg.MediaRTPVideoPort,
 	})
 }
 
