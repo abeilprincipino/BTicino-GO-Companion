@@ -10,23 +10,41 @@ import (
 )
 
 type Config struct {
-	ListenAddr           string             `json:"listen_addr"`
-	DataDir              string             `json:"data_dir"`
-	OpenWebNetEnabled    bool               `json:"openwebnet_enabled"`
-	OpenWebNetGroup      string             `json:"openwebnet_group"`
-	OpenWebNetListenPort int                `json:"openwebnet_listen_port"`
-	OpenWebNetReadBuffer int                `json:"openwebnet_read_buffer"`
-	Entrypoints          []entrypoint.Model `json:"entrypoints"`
+	ListenAddr            string             `json:"listen_addr"`
+	DataDir               string             `json:"data_dir"`
+	OpenWebNetEnabled     bool               `json:"openwebnet_enabled"`
+	OpenWebNetGroup       string             `json:"openwebnet_group"`
+	OpenWebNetListenPort  int                `json:"openwebnet_listen_port"`
+	OpenWebNetReadBuffer  int                `json:"openwebnet_read_buffer"`
+	MediaSIPEnabled       bool               `json:"media_sip_enabled"`
+	MediaSIPTransport     string             `json:"media_sip_transport"`
+	MediaSIPListen        string             `json:"media_sip_listen"`
+	MediaSIPFrom          string             `json:"media_sip_from"`
+	MediaSIPTo            string             `json:"media_sip_to"`
+	MediaSIPDomain        string             `json:"media_sip_domain"`
+	MediaSIPAuthUser      string             `json:"media_sip_auth_user"`
+	MediaSIPAuthPass      string             `json:"media_sip_auth_pass"`
+	MediaSIPStreamDevAddr string             `json:"media_sip_stream_devaddr"`
+	Entrypoints           []entrypoint.Model `json:"entrypoints"`
 }
 
 func Default() Config {
 	return Config{
-		ListenAddr:           "0.0.0.0:8080",
-		DataDir:              "/home/bticino/cfg/extra/companion/config",
-		OpenWebNetEnabled:    true,
-		OpenWebNetGroup:      "239.255.76.67",
-		OpenWebNetListenPort: 7667,
-		OpenWebNetReadBuffer: 65535,
+		ListenAddr:            "0.0.0.0:8080",
+		DataDir:               "/home/bticino/cfg/extra/companion/config",
+		OpenWebNetEnabled:     true,
+		OpenWebNetGroup:       "239.255.76.67",
+		OpenWebNetListenPort:  7667,
+		OpenWebNetReadBuffer:  65535,
+		MediaSIPEnabled:       true,
+		MediaSIPTransport:     "tcp",
+		MediaSIPListen:        "0.0.0.0:5070",
+		MediaSIPFrom:          "webrtc@127.0.0.1",
+		MediaSIPTo:            "c300x@127.0.0.1",
+		MediaSIPDomain:        "",
+		MediaSIPAuthUser:      "",
+		MediaSIPAuthPass:      "",
+		MediaSIPStreamDevAddr: "20",
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -88,6 +106,21 @@ func (c *Config) normalize() {
 	}
 	if c.OpenWebNetReadBuffer <= 0 {
 		c.OpenWebNetReadBuffer = 65535
+	}
+	if strings.TrimSpace(c.MediaSIPTransport) == "" {
+		c.MediaSIPTransport = "tcp"
+	}
+	if strings.TrimSpace(c.MediaSIPListen) == "" {
+		c.MediaSIPListen = "0.0.0.0:5070"
+	}
+	if strings.TrimSpace(c.MediaSIPFrom) == "" {
+		c.MediaSIPFrom = "webrtc@127.0.0.1"
+	}
+	if strings.TrimSpace(c.MediaSIPTo) == "" {
+		c.MediaSIPTo = "c300x@127.0.0.1"
+	}
+	if strings.TrimSpace(c.MediaSIPStreamDevAddr) == "" {
+		c.MediaSIPStreamDevAddr = "20"
 	}
 	if len(c.Entrypoints) == 0 {
 		c.Entrypoints = Default().Entrypoints

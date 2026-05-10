@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	v2 "bticino-go-companion/internal/adapters/http/v2"
-	owlistener "bticino-go-companion/internal/adapters/openwebnet"
+	"bticino-go-companion/internal/adapters/http/v2"
+	"bticino-go-companion/internal/adapters/openwebnet"
+	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/state"
@@ -41,8 +42,21 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	sipManager := sip.NewManager(cfg, log.Default())
+	sipManager.SetEventSink(func(ev event.Envelope) {
+		projector.Apply(ev)
+	})
+	if err := sipManager.Start(ctx); err != nil {
+		log.Fatalf("start sip manager: %v", err)
+	}
+	defer func() {
+		if err := sipManager.Close(); err != nil {
+			log.Printf("sip manager close warning: %v", err)
+		}
+	}()
+
 	if cfg.OpenWebNetEnabled {
-		listener := owlistener.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)
+		listener := openwebnet.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)
 		go func() {
 			err := listener.Run(ctx, func(ev event.Envelope) {
 				projector.Apply(ev)
