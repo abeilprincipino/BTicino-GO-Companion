@@ -7,15 +7,15 @@ import (
 	"net"
 
 	"bticino-go-companion/internal/domain/event"
-	protocol "bticino-go-companion/internal/protocol/openwebnet"
+	"bticino-go-companion/internal/protocol/openwebnet"
 )
 
 type Listener struct {
 	group  string
 	port   int
 	buffer int
-	parser *protocol.Parser
-	mapper *protocol.Mapper
+	parser *openwebnetproto.Parser
+	mapper *openwebnetproto.Mapper
 }
 
 func NewListener(group string, port int, buffer int) *Listener {
@@ -26,8 +26,8 @@ func NewListener(group string, port int, buffer int) *Listener {
 		group:  group,
 		port:   port,
 		buffer: buffer,
-		parser: protocol.NewParser(),
-		mapper: protocol.NewMapper(),
+		parser: openwebnetproto.NewParser(),
+		mapper: openwebnetproto.NewMapper(),
 	}
 }
 

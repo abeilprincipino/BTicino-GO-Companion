@@ -16,6 +16,9 @@ type Config struct {
 	OpenWebNetGroup       string             `json:"openwebnet_group"`
 	OpenWebNetListenPort  int                `json:"openwebnet_listen_port"`
 	OpenWebNetReadBuffer  int                `json:"openwebnet_read_buffer"`
+	OpenWebNetCommandHost string             `json:"openwebnet_command_host"`
+	OpenWebNetCommandPort int                `json:"openwebnet_command_port"`
+	OpenWebNetCommandSec  int                `json:"openwebnet_command_timeout_sec"`
 	MediaSIPEnabled       bool               `json:"media_sip_enabled"`
 	MediaSIPTransport     string             `json:"media_sip_transport"`
 	MediaSIPListen        string             `json:"media_sip_listen"`
@@ -36,6 +39,9 @@ func Default() Config {
 		OpenWebNetGroup:       "239.255.76.67",
 		OpenWebNetListenPort:  7667,
 		OpenWebNetReadBuffer:  65535,
+		OpenWebNetCommandHost: "127.0.0.1",
+		OpenWebNetCommandPort: 20000,
+		OpenWebNetCommandSec:  3,
 		MediaSIPEnabled:       true,
 		MediaSIPTransport:     "tcp",
 		MediaSIPListen:        "0.0.0.0:5070",
@@ -106,6 +112,15 @@ func (c *Config) normalize() {
 	}
 	if c.OpenWebNetReadBuffer <= 0 {
 		c.OpenWebNetReadBuffer = 65535
+	}
+	if strings.TrimSpace(c.OpenWebNetCommandHost) == "" {
+		c.OpenWebNetCommandHost = "127.0.0.1"
+	}
+	if c.OpenWebNetCommandPort <= 0 {
+		c.OpenWebNetCommandPort = 20000
+	}
+	if c.OpenWebNetCommandSec <= 0 {
+		c.OpenWebNetCommandSec = 3
 	}
 	if strings.TrimSpace(c.MediaSIPTransport) == "" {
 		c.MediaSIPTransport = "tcp"

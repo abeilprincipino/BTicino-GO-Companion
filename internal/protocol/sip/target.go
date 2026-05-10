@@ -1,4 +1,4 @@
-package sip
+package sipprotocol
 
 import (
 	"errors"
@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	gosip "github.com/emiago/sipgo/sip"
+	"github.com/emiago/sipgo/sip"
 )
 
 var ErrTargetUnset = errors.New("sip target not configured")
 
 type InviteTarget struct {
-	URI         gosip.Uri
+	URI         sip.Uri
 	Destination string
 	AddDevAddr  bool
 }
@@ -30,8 +30,8 @@ func ResolveInviteTarget(rawTarget string, domain string, addDevAddr bool) (Invi
 		raw = "sip:" + raw
 	}
 
-	var uri gosip.Uri
-	if err := gosip.ParseUri(raw, &uri); err != nil {
+	var uri sip.Uri
+	if err := sip.ParseUri(raw, &uri); err != nil {
 		return InviteTarget{}, fmt.Errorf("parse sip target: %w", err)
 	}
 
@@ -98,7 +98,7 @@ func ParseFromAddress(raw string) (string, string, int) {
 	return user, host, port
 }
 
-func hostPortFromURI(uri gosip.Uri) string {
+func hostPortFromURI(uri sip.Uri) string {
 	host := strings.TrimSpace(uri.Host)
 	if host == "" {
 		return ""

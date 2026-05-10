@@ -1,4 +1,4 @@
-package sip
+package sipadapter
 
 import (
 	"context"
@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/emiago/sipgo"
-	gosip "github.com/emiago/sipgo/sip"
+	"github.com/emiago/sipgo/sip"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
-	psip "bticino-go-companion/internal/protocol/sip"
+	"bticino-go-companion/internal/protocol/sip"
 )
 
 var (
@@ -65,7 +65,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 
-	fromUser, fromHost, _ := psip.ParseFromAddress(m.cfg.MediaSIPFrom)
+	fromUser, fromHost, _ := sipprotocol.ParseFromAddress(m.cfg.MediaSIPFrom)
 	uaOpts := make([]sipgo.UserAgentOption, 0, 2)
 	if fromUser != "" {
 		uaOpts = append(uaOpts, sipgo.WithUserAgent(fromUser))
@@ -122,10 +122,10 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 func (m *Manager) registerHandlers() {
-	m.srv.OnInvite(func(req *gosip.Request, tx gosip.ServerTransaction) {
+	m.srv.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		dlg, err := m.dialogs.ReadInvite(req, tx)
 		if err != nil {
-			_ = tx.Respond(gosip.NewResponseFromRequest(req, 500, "Server Error", nil))
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Error", nil))
 			return
 		}
 
@@ -148,8 +148,8 @@ func (m *Manager) registerHandlers() {
 		m.publish("call.incoming", map[string]any{"source": "sip", "raw": req.StartLine()})
 	})
 
-	m.srv.OnCancel(func(req *gosip.Request, tx gosip.ServerTransaction) {
-		_ = tx.Respond(gosip.NewResponseFromRequest(req, 200, "OK", nil))
+	m.srv.OnCancel(func(req *sip.Request, tx sip.ServerTransaction) {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
 		m.mu.Lock()
 		hadIncoming := m.incoming != nil
 		if m.incoming != nil {
@@ -162,11 +162,11 @@ func (m *Manager) registerHandlers() {
 		}
 	})
 
-	m.srv.OnAck(func(req *gosip.Request, tx gosip.ServerTransaction) {
+	m.srv.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
 		_ = m.dialogs.ReadAck(req, tx)
 	})
 
-	m.srv.OnBye(func(req *gosip.Request, tx gosip.ServerTransaction) {
+	m.srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
 		if m.out != nil {
 			if err := m.out.ReadBye(req, tx); err == nil {
 				m.mu.Lock()
@@ -181,7 +181,7 @@ func (m *Manager) registerHandlers() {
 		}
 
 		if err := m.dialogs.ReadBye(req, tx); err != nil {
-			_ = tx.Respond(gosip.NewResponseFromRequest(req, 200, "OK", nil))
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
 		}
 		m.mu.Lock()
 		if m.activeIn != nil {
@@ -287,7 +287,7 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) StreamStart(ctx context.Context) error {
+func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	if !m.enabled {
 		return ErrNoActiveCall
 	}
@@ -295,7 +295,7 @@ func (m *Manager) StreamStart(ctx context.Context) error {
 		return ErrNoActiveCall
 	}
 
-	target, err := psip.ResolveInviteTarget(m.cfg.MediaSIPTo, m.cfg.MediaSIPDomain, true)
+	target, err := sipprotocol.ResolveInviteTarget(m.cfg.MediaSIPTo, m.cfg.MediaSIPDomain, true)
 	if err != nil {
 		return err
 	}
@@ -328,13 +328,13 @@ func (m *Manager) StreamStart(ctx context.Context) error {
 		return nil
 	}
 
-	inviteReq := gosip.NewRequest(gosip.INVITE, target.URI)
+	inviteReq := sip.NewRequest(sip.INVITE, target.URI)
 	inviteReq.SetTransport(strings.ToUpper(normalizeTransport(m.cfg.MediaSIPTransport)))
 	if target.Destination != "" {
 		inviteReq.SetDestination(target.Destination)
 	}
-	inviteReq.AppendHeader(gosip.NewHeader("Content-Type", "application/sdp"))
-	inviteReq.SetBody([]byte(m.offerSDP(target.AddDevAddr)))
+	inviteReq.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	inviteReq.SetBody([]byte(m.offerSDP(target.AddDevAddr, devAddr)))
 
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()
@@ -397,20 +397,24 @@ func (m *Manager) publish(kind string, payload map[string]any) {
 	})
 }
 
-func (m *Manager) offerSDP(includeDevAddr bool) string {
+func (m *Manager) offerSDP(includeDevAddr bool, devAddr string) string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
-	return psip.BuildOffer(psip.SDPConfig{
+	selectedDevAddr := strings.TrimSpace(devAddr)
+	if selectedDevAddr == "" {
+		selectedDevAddr = strings.TrimSpace(m.cfg.MediaSIPStreamDevAddr)
+	}
+	return sipprotocol.BuildOffer(sipprotocol.SDPConfig{
 		Host:           host,
 		AudioPort:      65000,
 		VideoPort:      65002,
 		IncludeDevAddr: includeDevAddr,
-		DevAddr:        m.cfg.MediaSIPStreamDevAddr,
+		DevAddr:        selectedDevAddr,
 	})
 }
 
 func (m *Manager) answerSDP() string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
-	return psip.BuildAnswer(psip.SDPConfig{
+	return sipprotocol.BuildAnswer(sipprotocol.SDPConfig{
 		Host:      host,
 		AudioPort: 65000,
 		VideoPort: 65002,
@@ -427,8 +431,8 @@ func normalizeTransport(raw string) string {
 	}
 }
 
-func buildContactHeader(cfg config.Config) gosip.ContactHeader {
-	user, host, port := psip.ParseFromAddress(cfg.MediaSIPFrom)
+func buildContactHeader(cfg config.Config) sip.ContactHeader {
+	user, host, port := sipprotocol.ParseFromAddress(cfg.MediaSIPFrom)
 	if host == "" {
 		host, _ = hostFromListen(cfg.MediaSIPListen)
 	}
@@ -445,7 +449,7 @@ func buildContactHeader(cfg config.Config) gosip.ContactHeader {
 	if user == "" {
 		user = "webrtc"
 	}
-	return gosip.ContactHeader{Address: gosip.Uri{User: user, Host: host, Port: port}}
+	return sip.ContactHeader{Address: sip.Uri{User: user, Host: host, Port: port}}
 }
 
 func hostFromListen(raw string) (string, int) {

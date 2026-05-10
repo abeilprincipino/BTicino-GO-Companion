@@ -15,6 +15,7 @@ import (
 	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/state"
 )
 
@@ -29,11 +30,10 @@ func main() {
 	}
 
 	projector := state.NewProjector(cfg.Entrypoints)
-	router := v2.NewRouter(projector)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      router.Handler(),
+		Handler:      nil,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
@@ -42,7 +42,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	sipManager := sip.NewManager(cfg, log.Default())
+	sipManager := sipadapter.NewManager(cfg, log.Default())
 	sipManager.SetEventSink(func(ev event.Envelope) {
 		projector.Apply(ev)
 	})
@@ -54,6 +54,13 @@ func main() {
 			log.Printf("sip manager close warning: %v", err)
 		}
 	}()
+
+	commandClient := openwebnet.NewCommandClient(cfg)
+	controlService := control.New(cfg.Entrypoints, sipManager, commandClient, func(ev event.Envelope) {
+		projector.Apply(ev)
+	})
+	router := v2.NewRouter(projector, controlService)
+	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
 		listener := openwebnet.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)

@@ -1,4 +1,4 @@
-package openwebnet
+package openwebnetproto
 
 import "testing"
 

@@ -1,4 +1,4 @@
-package sip
+package sipprotocol
 
 import (
 	"strings"
