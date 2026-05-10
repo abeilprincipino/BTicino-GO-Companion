@@ -19,17 +19,21 @@ func (u *unlockStub) Unlock(_ context.Context, devAddr string) error {
 }
 
 type streamStub struct {
-	startDevAddr string
-	startErr     error
-	stopErr      error
+	startEntrypID string
+	startDevAddr  string
+	startErr      error
+	stopEntrypID  string
+	stopErr       error
 }
 
-func (s *streamStub) StreamStart(_ context.Context, devAddr string) error {
+func (s *streamStub) StartForEntrypoint(_ context.Context, entrypointID string, devAddr string) error {
+	s.startEntrypID = entrypointID
 	s.startDevAddr = devAddr
 	return s.startErr
 }
 
-func (s *streamStub) StreamStop(_ context.Context) error {
+func (s *streamStub) StopForEntrypoint(_ context.Context, entrypointID string) error {
+	s.stopEntrypID = entrypointID
 	return s.stopErr
 }
 
@@ -62,5 +66,8 @@ func TestServiceStreamStartUsesEntrypointDevAddr(t *testing.T) {
 	}
 	if stream.startDevAddr != "22" {
 		t.Fatalf("unexpected stream devaddr: %s", stream.startDevAddr)
+	}
+	if stream.startEntrypID != "gate2" {
+		t.Fatalf("unexpected stream entrypoint id: %s", stream.startEntrypID)
 	}
 }

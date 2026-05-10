@@ -17,6 +17,7 @@ import (
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
+	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
 )
@@ -87,7 +88,8 @@ func main() {
 	}()
 
 	commandClient := openwebnet.NewCommandClient(cfg)
-	controlService := control.New(cfg.Entrypoints, sipManager, commandClient, func(ev event.Envelope) {
+	mediaService := media.NewService(sipManager)
+	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, func(ev event.Envelope) {
 		publish(ev)
 	})
 	runtimeStatus.SetControlReady(true, "")

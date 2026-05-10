@@ -21,8 +21,8 @@ func (unlockNoop) Unlock(context.Context, string) error { return nil }
 
 type streamNoop struct{}
 
-func (streamNoop) StreamStart(context.Context, string) error { return nil }
-func (streamNoop) StreamStop(context.Context) error          { return nil }
+func (streamNoop) StartForEntrypoint(context.Context, string, string) error { return nil }
+func (streamNoop) StopForEntrypoint(context.Context, string) error          { return nil }
 
 func newTestRuntimeStatus() *runtime.Status {
 	rt := runtime.New(true, true)

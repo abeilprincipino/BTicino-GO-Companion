@@ -21,8 +21,8 @@ type UnlockDriver interface {
 }
 
 type StreamDriver interface {
-	StreamStart(ctx context.Context, devAddr string) error
-	StreamStop(ctx context.Context) error
+	StartForEntrypoint(ctx context.Context, entrypointID string, devAddr string) error
+	StopForEntrypoint(ctx context.Context, entrypointID string) error
 }
 
 type Service struct {
@@ -72,7 +72,7 @@ func (s *Service) StartEntrypointStream(ctx context.Context, id string) error {
 	if !ep.HasStream {
 		return fmt.Errorf("%w: stream", ErrCapabilityNotEnabled)
 	}
-	if err := s.stream.StreamStart(ctx, ep.DevAddr); err != nil {
+	if err := s.stream.StartForEntrypoint(ctx, ep.ID, ep.DevAddr); err != nil {
 		return err
 	}
 	s.publish(event.TypeStreamStarted, id, map[string]any{"channel": "video", "devaddr": ep.DevAddr})
@@ -87,7 +87,7 @@ func (s *Service) StopEntrypointStream(ctx context.Context, id string) error {
 	if !ep.HasStream {
 		return fmt.Errorf("%w: stream", ErrCapabilityNotEnabled)
 	}
-	if err := s.stream.StreamStop(ctx); err != nil {
+	if err := s.stream.StopForEntrypoint(ctx, ep.ID); err != nil {
 		return err
 	}
 	s.publish(event.TypeStreamStopped, id, map[string]any{"devaddr": ep.DevAddr})
