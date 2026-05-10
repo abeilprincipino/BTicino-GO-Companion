@@ -8,8 +8,7 @@ import (
 )
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
 	snap := r.state.Snapshot()
@@ -21,16 +20,14 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
 	writeJSON(w, http.StatusOK, r.state.Snapshot())
 }
 
 func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -44,8 +41,7 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleEntrypoints(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
 	snap := r.state.Snapshot()

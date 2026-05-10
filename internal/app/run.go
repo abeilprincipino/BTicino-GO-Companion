@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	httpv2 "bticino-go-companion/internal/adapters/http/v2"
+	"bticino-go-companion/internal/adapters/http/v2"
 	"bticino-go-companion/internal/adapters/openwebnet"
-	sipadapter "bticino-go-companion/internal/adapters/sip"
+	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/control"
@@ -89,7 +89,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	})
 	runtimeStatus.SetControlReady(true, "")
 
-	router := httpv2.NewRouter(projector, controlService, eventBroker, runtimeStatus)
+	router := v2.NewRouter(projector, controlService, eventBroker, runtimeStatus)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {

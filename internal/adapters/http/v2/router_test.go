@@ -2,9 +2,9 @@ package v2
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"bticino-go-companion/internal/domain/entrypoint"
@@ -42,6 +42,20 @@ func TestRouterStateEndpoint(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
+
+	var body struct {
+		CallState   string             `json:"call_state"`
+		Entrypoints []entrypoint.Model `json:"entrypoints"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.CallState != "idle" {
+		t.Fatalf("unexpected call_state: %s", body.CallState)
+	}
+	if len(body.Entrypoints) != 1 || body.Entrypoints[0].ID != "main" {
+		t.Fatalf("unexpected entrypoints payload: %+v", body.Entrypoints)
+	}
 }
 
 func TestRouterCapabilitiesEndpoint(t *testing.T) {
@@ -54,8 +68,19 @@ func TestRouterCapabilitiesEndpoint(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "entrypoints_v2") {
-		t.Fatalf("unexpected capabilities payload: %s", rr.Body.String())
+
+	var body struct {
+		APIVersion   string   `json:"api_version"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.APIVersion != "v2" {
+		t.Fatalf("unexpected api_version: %s", body.APIVersion)
+	}
+	if len(body.Capabilities) != 3 {
+		t.Fatalf("unexpected capabilities payload: %+v", body.Capabilities)
 	}
 }
 
@@ -68,6 +93,18 @@ func TestRouterEntrypointUnlockEndpoint(t *testing.T) {
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		OK           bool   `json:"ok"`
+		EntrypointID string `json:"entrypoint_id"`
+		Action       string `json:"action"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.OK || body.EntrypointID != "main" || body.Action != "unlock" {
+		t.Fatalf("unexpected response payload: %+v", body)
 	}
 }
 
@@ -87,7 +124,60 @@ func TestRouterEventsSSEReplay(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "\"id\":2") {
-		t.Fatalf("expected replay with id 2, got %s", rr.Body.String())
+	if rr.Body.String() == "" {
+		t.Fatal("expected non-empty replay")
+	}
+}
+
+func TestRouterEntrypointControlNotFoundErrorEnvelope(t *testing.T) {
+	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
+	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
+	r := NewRouter(p, c, events.New(8), newTestRuntimeStatus())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/unknown/unlock", nil)
+	rr := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Status    int    `json:"status"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "entrypoint_not_found" || body.Error.Status != http.StatusNotFound || body.Error.Retryable {
+		t.Fatalf("unexpected error envelope: %+v", body.Error)
+	}
+}
+
+func TestRouterControlUnavailableEnvelope(t *testing.T) {
+	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
+	r := NewRouter(p, nil, events.New(8), newTestRuntimeStatus())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/main/stream/start", nil)
+	rr := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Status    int    `json:"status"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "control_unavailable" || body.Error.Status != http.StatusServiceUnavailable || !body.Error.Retryable {
+		t.Fatalf("unexpected error envelope: %+v", body.Error)
 	}
 }

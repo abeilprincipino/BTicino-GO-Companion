@@ -44,3 +44,11 @@ func writeSSEEvent(w http.ResponseWriter, ev any) error {
 	_, err = fmt.Fprintf(w, "data: %s\n\n", body)
 	return err
 }
+
+func requireMethod(w http.ResponseWriter, req *http.Request, method string) bool {
+	if req.Method == method {
+		return true
+	}
+	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	return false
+}
