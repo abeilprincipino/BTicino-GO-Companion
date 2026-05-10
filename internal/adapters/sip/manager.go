@@ -64,6 +64,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 
+	resolvedCfg, err := resolveSIPConfig(m.cfg)
+	if err != nil {
+		return fmt.Errorf("resolve sip profile: %w", err)
+	}
+	m.cfg = resolvedCfg
+
 	fromUser, fromHost, _ := sipprotocol.ParseFromAddress(m.cfg.MediaSIPFrom)
 	uaOpts := make([]sipgo.UserAgentOption, 0, 2)
 	if fromUser != "" {
@@ -307,7 +313,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	}
 
 	opts := sipgo.AnswerOptions{
-		Username: strings.TrimSpace(m.cfg.MediaSIPAuthUser),
+		Username: inviteAuthUser(m.cfg),
 		Password: strings.TrimSpace(m.cfg.MediaSIPAuthPass),
 	}
 	if err := dlg.WaitAnswer(callCtx, opts); err != nil {
@@ -408,6 +414,14 @@ func buildContactHeader(cfg config.Config) sip.ContactHeader {
 		user = "webrtc"
 	}
 	return sip.ContactHeader{Address: sip.Uri{User: user, Host: host, Port: port}}
+}
+
+func inviteAuthUser(cfg config.Config) string {
+	if user := strings.TrimSpace(cfg.MediaSIPAuthUser); user != "" {
+		return user
+	}
+	fromUser, _, _ := sipprotocol.ParseFromAddress(cfg.MediaSIPFrom)
+	return fromUser
 }
 
 func hostFromListen(raw string) (string, int) {

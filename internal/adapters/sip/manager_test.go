@@ -31,3 +31,17 @@ func TestManagerDisabledHangupReturnsNoActiveCall(t *testing.T) {
 		t.Fatalf("expected ErrNoActiveCall, got %v", err)
 	}
 }
+
+func TestInviteAuthUserFallbacksToFromUser(t *testing.T) {
+	cfg := config.Default()
+	cfg.MediaSIPAuthUser = ""
+	cfg.MediaSIPFrom = "c300x@127.0.0.1"
+	if got := inviteAuthUser(cfg); got != "c300x" {
+		t.Fatalf("unexpected invite auth user: %s", got)
+	}
+
+	cfg.MediaSIPAuthUser = "explicit-user"
+	if got := inviteAuthUser(cfg); got != "explicit-user" {
+		t.Fatalf("unexpected explicit invite auth user: %s", got)
+	}
+}
