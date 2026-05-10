@@ -1,0 +1,91 @@
+package state
+
+import (
+	"sync"
+	"time"
+
+	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/domain/event"
+)
+
+type Snapshot struct {
+	BootTime      time.Time          `json:"boot_time"`
+	CallState     string             `json:"call_state"`
+	StreamActive  bool               `json:"stream_active"`
+	Ringing       bool               `json:"ringing"`
+	FloorRinging  bool               `json:"floor_ringing"`
+	LastEventType string             `json:"last_event_type,omitempty"`
+	LastEventTS   *time.Time         `json:"last_event_ts,omitempty"`
+	Entrypoints   []entrypoint.Model `json:"entrypoints"`
+}
+
+type Projector struct {
+	mu       sync.RWMutex
+	nextID   uint64
+	snapshot Snapshot
+}
+
+func NewProjector(entrypoints []entrypoint.Model) *Projector {
+	return &Projector{
+		nextID: 1,
+		snapshot: Snapshot{
+			BootTime:     time.Now().UTC(),
+			CallState:    "idle",
+			Entrypoints:  entrypoints,
+			StreamActive: false,
+			Ringing:      false,
+		},
+	}
+}
+
+func (p *Projector) Apply(ev event.Envelope) event.Envelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ev.ID = p.nextID
+	p.nextID++
+
+	s := &p.snapshot
+	s.LastEventType = ev.Type
+	ts := ev.TS
+	s.LastEventTS = &ts
+
+	switch ev.Type {
+	case "ring.started":
+		s.Ringing = true
+		s.CallState = "ringing"
+	case "ring.ended":
+		s.Ringing = false
+		if !s.StreamActive {
+			s.CallState = "idle"
+		}
+	case "ring.floor.started":
+		s.FloorRinging = true
+	case "ring.floor.ended":
+		s.FloorRinging = false
+	case "stream.started":
+		s.StreamActive = true
+		if s.CallState == "idle" {
+			s.CallState = "active"
+		}
+	case "stream.stopped":
+		s.StreamActive = false
+		s.CallState = "idle"
+	case "call.incoming":
+		s.CallState = "ringing"
+	case "call.ended":
+		if !s.StreamActive {
+			s.CallState = "idle"
+		}
+	}
+
+	return ev
+}
+
+func (p *Projector) Snapshot() Snapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	copy := p.snapshot
+	copy.Entrypoints = append([]entrypoint.Model(nil), p.snapshot.Entrypoints...)
+	return copy
+}
