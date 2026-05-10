@@ -40,10 +40,10 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 		m.floorRinging = true
 		return []event.Envelope{newEvent("ring.floor.started", map[string]any{"raw": raw, "entrance": "floor"})}
 	case IsRingStart(raw):
-		payload := map[string]any{"raw": raw, "entrance": "default"}
+		payload := map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)}
 		return []event.Envelope{newEvent("ring.started", payload), newEvent("call.incoming", payload)}
 	case IsViewRequest(raw):
-		return []event.Envelope{newEvent("call.view_requested", map[string]any{"raw": raw, "entrance": "default"})}
+		return []event.Envelope{newEvent("call.view_requested", map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)})}
 	case IsUnlockOpen(raw):
 		addr := ExtractAddress(raw)
 		return []event.Envelope{newEvent("unlock.pulse.started", map[string]any{"raw": raw, "devaddr": addr})}

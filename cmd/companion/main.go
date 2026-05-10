@@ -32,8 +32,10 @@ func main() {
 
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
+	normalizer := events.NewNormalizer(cfg.Entrypoints)
 	publish := func(ev event.Envelope) {
-		enriched := projector.Apply(ev)
+		normalized := normalizer.Normalize(ev)
+		enriched := projector.Apply(normalized)
 		eventBroker.Publish(enriched)
 	}
 
