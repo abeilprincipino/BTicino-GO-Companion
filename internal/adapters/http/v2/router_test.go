@@ -35,6 +35,21 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 }
 
+func TestRouterCapabilitiesEndpoint(t *testing.T) {
+	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
+	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
+	r := NewRouter(p, c, events.New(32))
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/capabilities", nil)
+	rr := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "entrypoints_v2") {
+		t.Fatalf("unexpected capabilities payload: %s", rr.Body.String())
+	}
+}
+
 func TestRouterEntrypointUnlockEndpoint(t *testing.T) {
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)

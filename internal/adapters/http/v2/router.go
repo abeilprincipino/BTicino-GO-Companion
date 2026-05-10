@@ -33,6 +33,7 @@ func (r *Router) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/health", r.handleHealth)
 	mux.HandleFunc("/api/v2/state", r.handleState)
+	mux.HandleFunc("/api/v2/capabilities", r.handleCapabilities)
 	mux.HandleFunc("/api/v2/entrypoints", r.handleEntrypoints)
 	mux.HandleFunc("GET /api/v2/events", r.handleEventsSSE)
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/unlock", r.handleEntrypointUnlock)
@@ -56,6 +57,21 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, r.state.Snapshot())
+}
+
+func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"api_version": "v2",
+		"capabilities": []string{
+			"entrypoints_v2",
+			"events_v2",
+			"control_entrypoints_v2",
+		},
+	})
 }
 
 func (r *Router) handleEntrypoints(w http.ResponseWriter, req *http.Request) {
