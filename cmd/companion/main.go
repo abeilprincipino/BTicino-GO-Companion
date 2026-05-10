@@ -16,6 +16,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/control"
+	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/state"
 )
 
@@ -30,6 +31,11 @@ func main() {
 	}
 
 	projector := state.NewProjector(cfg.Entrypoints)
+	eventBroker := events.New(512)
+	publish := func(ev event.Envelope) {
+		enriched := projector.Apply(ev)
+		eventBroker.Publish(enriched)
+	}
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
@@ -44,7 +50,7 @@ func main() {
 
 	sipManager := sipadapter.NewManager(cfg, log.Default())
 	sipManager.SetEventSink(func(ev event.Envelope) {
-		projector.Apply(ev)
+		publish(ev)
 	})
 	if err := sipManager.Start(ctx); err != nil {
 		log.Fatalf("start sip manager: %v", err)
@@ -57,16 +63,16 @@ func main() {
 
 	commandClient := openwebnet.NewCommandClient(cfg)
 	controlService := control.New(cfg.Entrypoints, sipManager, commandClient, func(ev event.Envelope) {
-		projector.Apply(ev)
+		publish(ev)
 	})
-	router := v2.NewRouter(projector, controlService)
+	router := v2.NewRouter(projector, controlService, eventBroker)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
 		listener := openwebnet.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)
 		go func() {
 			err := listener.Run(ctx, func(ev event.Envelope) {
-				projector.Apply(ev)
+				publish(ev)
 			})
 			if err != nil {
 				log.Printf("openwebnet listener stopped: %v", err)
