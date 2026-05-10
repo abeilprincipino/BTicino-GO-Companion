@@ -30,7 +30,7 @@ func NewProjector(entrypoints []entrypoint.Model) *Projector {
 		nextID: 1,
 		snapshot: Snapshot{
 			BootTime:     time.Now().UTC(),
-			CallState:    "idle",
+			CallState:    CallStateIdle,
 			Entrypoints:  entrypoints,
 			StreamActive: false,
 			Ringing:      false,
@@ -50,34 +50,7 @@ func (p *Projector) Apply(ev event.Envelope) event.Envelope {
 	ts := ev.TS
 	s.LastEventTS = &ts
 
-	switch ev.Type {
-	case event.TypeRingStarted:
-		s.Ringing = true
-		s.CallState = "ringing"
-	case event.TypeRingEnded:
-		s.Ringing = false
-		if !s.StreamActive {
-			s.CallState = "idle"
-		}
-	case event.TypeRingFloorStarted:
-		s.FloorRinging = true
-	case event.TypeRingFloorEnded:
-		s.FloorRinging = false
-	case event.TypeStreamStarted:
-		s.StreamActive = true
-		if s.CallState == "idle" {
-			s.CallState = "active"
-		}
-	case event.TypeStreamStopped:
-		s.StreamActive = false
-		s.CallState = "idle"
-	case event.TypeCallIncoming:
-		s.CallState = "ringing"
-	case event.TypeCallEnded:
-		if !s.StreamActive {
-			s.CallState = "idle"
-		}
-	}
+	applyTransition(s, ev.Type)
 
 	return ev
 }

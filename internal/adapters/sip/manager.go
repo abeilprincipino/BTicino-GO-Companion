@@ -299,6 +299,9 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	if err != nil {
 		return err
 	}
+	if target.AddDevAddr && strings.TrimSpace(devAddr) == "" {
+		return errors.New("empty stream devaddr")
+	}
 
 	m.mu.Lock()
 	incoming := m.incoming
@@ -399,16 +402,12 @@ func (m *Manager) publish(kind string, payload map[string]any) {
 
 func (m *Manager) offerSDP(includeDevAddr bool, devAddr string) string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
-	selectedDevAddr := strings.TrimSpace(devAddr)
-	if selectedDevAddr == "" {
-		selectedDevAddr = strings.TrimSpace(m.cfg.MediaSIPStreamDevAddr)
-	}
 	return sipprotocol.BuildOffer(sipprotocol.SDPConfig{
 		Host:           host,
 		AudioPort:      65000,
 		VideoPort:      65002,
 		IncludeDevAddr: includeDevAddr,
-		DevAddr:        selectedDevAddr,
+		DevAddr:        strings.TrimSpace(devAddr),
 	})
 }
 

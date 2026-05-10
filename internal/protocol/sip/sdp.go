@@ -25,10 +25,9 @@ func BuildOffer(cfg SDPConfig) string {
 	}
 	if cfg.IncludeDevAddr {
 		devaddr := strings.TrimSpace(cfg.DevAddr)
-		if devaddr == "" {
-			devaddr = "20"
+		if devaddr != "" {
+			audioLines = append([]string{"a=DEVADDR:" + devaddr}, audioLines...)
 		}
-		audioLines = append([]string{"a=DEVADDR:" + devaddr}, audioLines...)
 	}
 
 	lines := []string{

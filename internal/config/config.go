@@ -27,7 +27,6 @@ type Config struct {
 	MediaSIPDomain        string             `json:"media_sip_domain"`
 	MediaSIPAuthUser      string             `json:"media_sip_auth_user"`
 	MediaSIPAuthPass      string             `json:"media_sip_auth_pass"`
-	MediaSIPStreamDevAddr string             `json:"media_sip_stream_devaddr"`
 	Entrypoints           []entrypoint.Model `json:"entrypoints"`
 }
 
@@ -50,7 +49,6 @@ func Default() Config {
 		MediaSIPDomain:        "",
 		MediaSIPAuthUser:      "",
 		MediaSIPAuthPass:      "",
-		MediaSIPStreamDevAddr: "20",
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -133,9 +131,6 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.MediaSIPTo) == "" {
 		c.MediaSIPTo = "c300x@127.0.0.1"
-	}
-	if strings.TrimSpace(c.MediaSIPStreamDevAddr) == "" {
-		c.MediaSIPStreamDevAddr = "20"
 	}
 	if len(c.Entrypoints) == 0 {
 		c.Entrypoints = Default().Entrypoints

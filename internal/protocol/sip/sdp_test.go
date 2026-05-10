@@ -12,6 +12,13 @@ func TestBuildOfferIncludesDevAddr(t *testing.T) {
 	}
 }
 
+func TestBuildOfferOmitsEmptyDevAddr(t *testing.T) {
+	offer := BuildOffer(SDPConfig{Host: "127.0.0.1", AudioPort: 5000, VideoPort: 5007, IncludeDevAddr: true})
+	if strings.Contains(offer, "a=DEVADDR:") {
+		t.Fatalf("expected no DEVADDR when empty: %s", offer)
+	}
+}
+
 func TestBuildAnswerContainsSpeexAndH264(t *testing.T) {
 	answer := BuildAnswer(SDPConfig{})
 	if !strings.Contains(answer, "speex/8000") || !strings.Contains(answer, "H264/90000") {

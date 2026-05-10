@@ -13,7 +13,7 @@ func TestProjectorApply(t *testing.T) {
 	now := time.Now().UTC()
 	p.Apply(event.Envelope{Type: event.TypeRingStarted, TS: now})
 	s := p.Snapshot()
-	if !s.Ringing || s.CallState != "ringing" {
+	if !s.Ringing || s.CallState != CallStateRinging {
 		t.Fatalf("unexpected ring state: %+v", s)
 	}
 	p.Apply(event.Envelope{Type: event.TypeStreamStarted, TS: now})
@@ -21,9 +21,10 @@ func TestProjectorApply(t *testing.T) {
 	if !s.StreamActive {
 		t.Fatalf("stream should be active: %+v", s)
 	}
+	p.Apply(event.Envelope{Type: event.TypeRingEnded, TS: now})
 	p.Apply(event.Envelope{Type: event.TypeStreamStopped, TS: now})
 	s = p.Snapshot()
-	if s.StreamActive || s.CallState != "idle" {
+	if s.StreamActive || s.CallState != CallStateIdle {
 		t.Fatalf("stream stop not applied: %+v", s)
 	}
 }
