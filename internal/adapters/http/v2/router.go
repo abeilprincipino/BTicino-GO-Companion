@@ -12,6 +12,7 @@ import (
 	"bticino-go-companion/internal/observability"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
+	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
 )
 
@@ -19,13 +20,20 @@ type Router struct {
 	state   *state.Projector
 	control *control.Service
 	events  *events.Broker
+	runtime *runtime.Status
 }
 
-func NewRouter(projector *state.Projector, controlService *control.Service, eventBroker *events.Broker) *Router {
+func NewRouter(
+	projector *state.Projector,
+	controlService *control.Service,
+	eventBroker *events.Broker,
+	runtimeStatus *runtime.Status,
+) *Router {
 	return &Router{
 		state:   projector,
 		control: controlService,
 		events:  eventBroker,
+		runtime: runtimeStatus,
 	}
 }
 
@@ -48,7 +56,11 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	snap := r.state.Snapshot()
-	writeJSON(w, http.StatusOK, observability.New(snap.BootTime, true))
+	runtimeSnap := runtime.Snapshot{}
+	if r.runtime != nil {
+		runtimeSnap = r.runtime.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, observability.New(snap.BootTime, runtimeSnap))
 }
 
 func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
@@ -196,8 +208,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func writeError(w http.ResponseWriter, status int, code string, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
-			"code":    code,
-			"message": message,
+			"code":      code,
+			"message":   message,
+			"status":    status,
+			"retryable": status >= 500,
 		},
 	})
 }

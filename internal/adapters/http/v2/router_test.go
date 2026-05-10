@@ -11,6 +11,7 @@ import (
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
+	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
 )
 
@@ -23,10 +24,18 @@ type streamNoop struct{}
 func (streamNoop) StreamStart(context.Context, string) error { return nil }
 func (streamNoop) StreamStop(context.Context) error          { return nil }
 
+func newTestRuntimeStatus() *runtime.Status {
+	rt := runtime.New(true, true)
+	rt.SetSIPReady(true, "")
+	rt.SetOpenWebNetReady(true, "")
+	rt.SetControlReady(true, "")
+	return rt
+}
+
 func TestRouterStateEndpoint(t *testing.T) {
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
-	r := NewRouter(p, c, events.New(32))
+	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus())
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/state", nil)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
@@ -38,7 +47,7 @@ func TestRouterStateEndpoint(t *testing.T) {
 func TestRouterCapabilitiesEndpoint(t *testing.T) {
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
-	r := NewRouter(p, c, events.New(32))
+	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus())
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/capabilities", nil)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
@@ -53,7 +62,7 @@ func TestRouterCapabilitiesEndpoint(t *testing.T) {
 func TestRouterEntrypointUnlockEndpoint(t *testing.T) {
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
-	r := NewRouter(p, c, events.New(32))
+	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus())
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/main/unlock", nil)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
@@ -68,7 +77,7 @@ func TestRouterEventsSSEReplay(t *testing.T) {
 	b.Publish(event.Envelope{ID: 1, Type: "ring.started"})
 	b.Publish(event.Envelope{ID: 2, Type: "stream.started"})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
-	r := NewRouter(p, c, b)
+	r := NewRouter(p, c, b, newTestRuntimeStatus())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/events?last_event_id=1", nil).WithContext(ctx)

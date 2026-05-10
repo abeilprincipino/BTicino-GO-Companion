@@ -17,6 +17,7 @@ import (
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
+	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
 )
 
@@ -33,6 +34,7 @@ func main() {
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
 	normalizer := events.NewNormalizer(cfg.Entrypoints)
+	runtimeStatus := runtime.New(cfg.MediaSIPEnabled, cfg.OpenWebNetEnabled)
 	publish := func(ev event.Envelope) {
 		normalized := normalizer.Normalize(ev)
 		enriched := projector.Apply(normalized)
@@ -55,8 +57,10 @@ func main() {
 		publish(ev)
 	})
 	if err := sipManager.Start(ctx); err != nil {
+		runtimeStatus.SetSIPReady(false, err.Error())
 		log.Fatalf("start sip manager: %v", err)
 	}
+	runtimeStatus.SetSIPReady(true, "")
 	defer func() {
 		if err := sipManager.Close(); err != nil {
 			log.Printf("sip manager close warning: %v", err)
@@ -67,16 +71,19 @@ func main() {
 	controlService := control.New(cfg.Entrypoints, sipManager, commandClient, func(ev event.Envelope) {
 		publish(ev)
 	})
-	router := v2.NewRouter(projector, controlService, eventBroker)
+	runtimeStatus.SetControlReady(true, "")
+	router := v2.NewRouter(projector, controlService, eventBroker, runtimeStatus)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
 		listener := openwebnet.NewListener(cfg.OpenWebNetGroup, cfg.OpenWebNetListenPort, cfg.OpenWebNetReadBuffer)
+		runtimeStatus.SetOpenWebNetReady(true, "")
 		go func() {
 			err := listener.Run(ctx, func(ev event.Envelope) {
 				publish(ev)
 			})
 			if err != nil {
+				runtimeStatus.SetOpenWebNetReady(false, err.Error())
 				log.Printf("openwebnet listener stopped: %v", err)
 			}
 		}()
