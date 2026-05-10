@@ -86,7 +86,7 @@ func stringPayload(payload map[string]any, key string) string {
 
 func isFloorEvent(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case "ring.floor.started", "ring.floor.ended":
+	case event.TypeRingFloorStarted, event.TypeRingFloorEnded:
 		return true
 	default:
 		return false

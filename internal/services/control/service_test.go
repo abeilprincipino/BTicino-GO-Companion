@@ -47,7 +47,7 @@ func TestServiceUnlockEntrypoint(t *testing.T) {
 	if unlock.devAddr != "21" {
 		t.Fatalf("unexpected devaddr: %s", unlock.devAddr)
 	}
-	if len(events) != 1 || events[0].Type != "unlock.triggered" || events[0].EntrypointID != "main" {
+	if len(events) != 1 || events[0].Type != event.TypeUnlockTriggered || events[0].EntrypointID != "main" {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 }

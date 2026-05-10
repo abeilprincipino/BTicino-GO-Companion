@@ -60,7 +60,7 @@ func (s *Service) UnlockEntrypoint(ctx context.Context, id string) error {
 	if err := s.unlock.Unlock(ctx, ep.DevAddr); err != nil {
 		return err
 	}
-	s.publish("unlock.triggered", id, map[string]any{"devaddr": ep.DevAddr})
+	s.publish(event.TypeUnlockTriggered, id, map[string]any{"devaddr": ep.DevAddr})
 	return nil
 }
 
@@ -75,7 +75,7 @@ func (s *Service) StartEntrypointStream(ctx context.Context, id string) error {
 	if err := s.stream.StreamStart(ctx, ep.DevAddr); err != nil {
 		return err
 	}
-	s.publish("stream.started", id, map[string]any{"channel": "video", "devaddr": ep.DevAddr})
+	s.publish(event.TypeStreamStarted, id, map[string]any{"channel": "video", "devaddr": ep.DevAddr})
 	return nil
 }
 
@@ -90,7 +90,7 @@ func (s *Service) StopEntrypointStream(ctx context.Context, id string) error {
 	if err := s.stream.StreamStop(ctx); err != nil {
 		return err
 	}
-	s.publish("stream.stopped", id, map[string]any{"devaddr": ep.DevAddr})
+	s.publish(event.TypeStreamStopped, id, map[string]any{"devaddr": ep.DevAddr})
 	return nil
 }
 

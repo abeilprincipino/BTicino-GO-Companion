@@ -34,9 +34,28 @@ func main() {
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
 	normalizer := events.NewNormalizer(cfg.Entrypoints)
+	validator := events.NewValidator()
 	runtimeStatus := runtime.New(cfg.MediaSIPEnabled, cfg.OpenWebNetEnabled)
 	publish := func(ev event.Envelope) {
 		normalized := normalizer.Normalize(ev)
+		if err := validator.Validate(normalized); err != nil {
+			log.Printf("event validation warning: %v type=%s source=%s", err, normalized.Type, normalized.Source)
+			normalized = event.Envelope{
+				Type:   event.TypeEventInvalid,
+				TS:     normalized.TS,
+				Source: event.SourceSystem,
+				Payload: map[string]any{
+					"error": err.Error(),
+					"original": map[string]any{
+						"type":          normalized.Type,
+						"source":        normalized.Source,
+						"entrypoint_id": normalized.EntrypointID,
+						"raw":           normalized.Raw,
+					},
+				},
+				Raw: normalized.Raw,
+			}
+		}
 		enriched := projector.Apply(normalized)
 		eventBroker.Publish(enriched)
 	}

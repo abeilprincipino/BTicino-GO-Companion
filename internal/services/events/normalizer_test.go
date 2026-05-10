@@ -11,7 +11,7 @@ import (
 func TestNormalizerAssignsEntrypointFromDevAddrPayload(t *testing.T) {
 	n := NewNormalizer([]entrypoint.Model{{ID: "gate2", DevAddr: "21"}})
 	ev := n.Normalize(event.Envelope{
-		Type:    "unlock.pulse.started",
+		Type:    event.TypeUnlockPulseStart,
 		Source:  event.SourceOpenWebNet,
 		Payload: map[string]any{"devaddr": "21"},
 	})
@@ -23,7 +23,7 @@ func TestNormalizerAssignsEntrypointFromDevAddrPayload(t *testing.T) {
 func TestNormalizerAssignsEntrypointFromRawFrame(t *testing.T) {
 	n := NewNormalizer([]entrypoint.Model{{ID: "main", DevAddr: "20"}})
 	ev := n.Normalize(event.Envelope{
-		Type:   "ring.started",
+		Type:   event.TypeRingStarted,
 		Source: event.SourceOpenWebNet,
 		Raw:    "*8*1#1#4#10*20##",
 	})
@@ -37,7 +37,7 @@ func TestNormalizerAssignsEntrypointFromRawFrame(t *testing.T) {
 
 func TestNormalizerAssignsFloorEntrypoint(t *testing.T) {
 	n := NewNormalizer(nil)
-	ev := n.Normalize(event.Envelope{Type: "ring.floor.started", Source: event.SourceOpenWebNet})
+	ev := n.Normalize(event.Envelope{Type: event.TypeRingFloorStarted, Source: event.SourceOpenWebNet})
 	if ev.EntrypointID != "floor" {
 		t.Fatalf("expected floor, got %q", ev.EntrypointID)
 	}

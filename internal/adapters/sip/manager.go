@@ -145,7 +145,7 @@ func (m *Manager) registerHandlers() {
 		m.mu.Lock()
 		m.incoming = dlg
 		m.mu.Unlock()
-		m.publish("call.incoming", map[string]any{"source": "sip", "raw": req.StartLine()})
+		m.publish(event.TypeCallIncoming, map[string]any{"source": "sip", "raw": req.StartLine()})
 	})
 
 	m.srv.OnCancel(func(req *sip.Request, tx sip.ServerTransaction) {
@@ -158,7 +158,7 @@ func (m *Manager) registerHandlers() {
 		}
 		m.mu.Unlock()
 		if hadIncoming {
-			m.publish("call.ended", map[string]any{"source": "sip", "reason": "cancel"})
+			m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "cancel"})
 		}
 	})
 
@@ -175,7 +175,7 @@ func (m *Manager) registerHandlers() {
 				}
 				m.activeOut = nil
 				m.mu.Unlock()
-				m.publish("call.ended", map[string]any{"source": "sip", "reason": "remote_bye_outgoing"})
+				m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye_outgoing"})
 				return
 			}
 		}
@@ -190,7 +190,7 @@ func (m *Manager) registerHandlers() {
 		m.activeIn = nil
 		m.incoming = nil
 		m.mu.Unlock()
-		m.publish("call.ended", map[string]any{"source": "sip", "reason": "remote_bye"})
+		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye"})
 	})
 }
 
@@ -230,7 +230,7 @@ func (m *Manager) Answer(_ context.Context) error {
 	m.activeIn = dlg
 	m.incoming = nil
 	m.mu.Unlock()
-	m.publish("call.answered", map[string]any{"source": "sip", "mode": "incoming"})
+	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
 	return nil
 }
 
@@ -324,7 +324,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 		}
 		m.activeIn = incoming
 		m.mu.Unlock()
-		m.publish("call.answered", map[string]any{"source": "sip", "mode": "incoming"})
+		m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
 		return nil
 	}
 
@@ -360,7 +360,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	m.mu.Lock()
 	m.activeOut = dlg
 	m.mu.Unlock()
-	m.publish("call.answered", map[string]any{"source": "sip", "mode": "outgoing", "target": target.URI.String()})
+	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "outgoing", "target": target.URI.String()})
 	return nil
 }
 

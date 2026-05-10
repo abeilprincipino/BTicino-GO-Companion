@@ -74,8 +74,8 @@ func TestRouterEntrypointUnlockEndpoint(t *testing.T) {
 func TestRouterEventsSSEReplay(t *testing.T) {
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	b := events.New(32)
-	b.Publish(event.Envelope{ID: 1, Type: "ring.started"})
-	b.Publish(event.Envelope{ID: 2, Type: "stream.started"})
+	b.Publish(event.Envelope{ID: 1, Type: event.TypeRingStarted})
+	b.Publish(event.Envelope{ID: 2, Type: event.TypeStreamStarted})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, nil)
 	r := NewRouter(p, c, b, newTestRuntimeStatus())
 

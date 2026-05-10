@@ -38,37 +38,37 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 			return nil
 		}
 		m.floorRinging = true
-		return []event.Envelope{newEvent("ring.floor.started", map[string]any{"raw": raw, "entrance": "floor"})}
+		return []event.Envelope{newEvent(event.TypeRingFloorStarted, map[string]any{"raw": raw, "entrance": "floor"})}
 	case IsRingStart(raw):
 		payload := map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)}
-		return []event.Envelope{newEvent("ring.started", payload), newEvent("call.incoming", payload)}
+		return []event.Envelope{newEvent(event.TypeRingStarted, payload), newEvent(event.TypeCallIncoming, payload)}
 	case IsViewRequest(raw):
-		return []event.Envelope{newEvent("call.view_requested", map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)})}
+		return []event.Envelope{newEvent(event.TypeCallViewRequested, map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)})}
 	case IsUnlockOpen(raw):
 		addr := ExtractAddress(raw)
-		return []event.Envelope{newEvent("unlock.pulse.started", map[string]any{"raw": raw, "devaddr": addr})}
+		return []event.Envelope{newEvent(event.TypeUnlockPulseStart, map[string]any{"raw": raw, "devaddr": addr})}
 	case IsUnlockClose(raw):
 		addr := ExtractAddress(raw)
-		return []event.Envelope{newEvent("unlock.pulse.ended", map[string]any{"raw": raw, "devaddr": addr})}
+		return []event.Envelope{newEvent(event.TypeUnlockPulseEnd, map[string]any{"raw": raw, "devaddr": addr})}
 	case raw == FrameAudioMuted:
-		return []event.Envelope{newEvent("audio.muted", map[string]any{"raw": raw})}
+		return []event.Envelope{newEvent(event.TypeAudioMuted, map[string]any{"raw": raw})}
 	case raw == FrameAudioUnmuted:
-		return []event.Envelope{newEvent("audio.unmuted", map[string]any{"raw": raw})}
+		return []event.Envelope{newEvent(event.TypeAudioUnmuted, map[string]any{"raw": raw})}
 	case IsStreamStartVideo(raw):
-		return []event.Envelope{newEvent("stream.started", map[string]any{"raw": raw, "channel": "video"})}
+		return []event.Envelope{newEvent(event.TypeStreamStarted, map[string]any{"raw": raw, "channel": "video"})}
 	case IsStreamStartAudio(raw):
-		return []event.Envelope{newEvent("stream.started", map[string]any{"raw": raw, "channel": "audio"})}
+		return []event.Envelope{newEvent(event.TypeStreamStarted, map[string]any{"raw": raw, "channel": "audio"})}
 	case IsStreamProbe(raw):
 		return nil
 	case IsStreamStop(raw):
 		events := []event.Envelope{
-			newEvent("stream.stopped", map[string]any{"raw": raw}),
-			newEvent("ring.ended", map[string]any{"raw": raw}),
-			newEvent("call.ended", map[string]any{"raw": raw}),
+			newEvent(event.TypeStreamStopped, map[string]any{"raw": raw}),
+			newEvent(event.TypeRingEnded, map[string]any{"raw": raw}),
+			newEvent(event.TypeCallEnded, map[string]any{"raw": raw}),
 		}
 		if m.floorRinging {
 			m.floorRinging = false
-			events = append(events, newEvent("ring.floor.ended", map[string]any{"raw": raw, "entrance": "floor"}))
+			events = append(events, newEvent(event.TypeRingFloorEnded, map[string]any{"raw": raw, "entrance": "floor"}))
 		}
 		return events
 	default:

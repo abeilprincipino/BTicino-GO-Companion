@@ -51,29 +51,29 @@ func (p *Projector) Apply(ev event.Envelope) event.Envelope {
 	s.LastEventTS = &ts
 
 	switch ev.Type {
-	case "ring.started":
+	case event.TypeRingStarted:
 		s.Ringing = true
 		s.CallState = "ringing"
-	case "ring.ended":
+	case event.TypeRingEnded:
 		s.Ringing = false
 		if !s.StreamActive {
 			s.CallState = "idle"
 		}
-	case "ring.floor.started":
+	case event.TypeRingFloorStarted:
 		s.FloorRinging = true
-	case "ring.floor.ended":
+	case event.TypeRingFloorEnded:
 		s.FloorRinging = false
-	case "stream.started":
+	case event.TypeStreamStarted:
 		s.StreamActive = true
 		if s.CallState == "idle" {
 			s.CallState = "active"
 		}
-	case "stream.stopped":
+	case event.TypeStreamStopped:
 		s.StreamActive = false
 		s.CallState = "idle"
-	case "call.incoming":
+	case event.TypeCallIncoming:
 		s.CallState = "ringing"
-	case "call.ended":
+	case event.TypeCallEnded:
 		if !s.StreamActive {
 			s.CallState = "idle"
 		}
