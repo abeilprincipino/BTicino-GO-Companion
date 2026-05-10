@@ -20,8 +20,7 @@ import (
 )
 
 var (
-	ErrNoIncomingCall = errors.New("no incoming call")
-	ErrNoActiveCall   = errors.New("no active call")
+	ErrNoActiveCall = errors.New("no active call")
 )
 
 const sipAnswerTimeout = 8 * time.Second
@@ -192,46 +191,6 @@ func (m *Manager) registerHandlers() {
 		m.mu.Unlock()
 		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye"})
 	})
-}
-
-func (m *Manager) Enabled() bool {
-	return m.enabled
-}
-
-func (m *Manager) HasIncomingCall() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.incoming != nil
-}
-
-func (m *Manager) HasActiveCall() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.activeIn != nil || m.activeOut != nil || m.dialing
-}
-
-func (m *Manager) Answer(_ context.Context) error {
-	if !m.enabled {
-		return ErrNoIncomingCall
-	}
-
-	m.mu.Lock()
-	dlg := m.incoming
-	m.mu.Unlock()
-	if dlg == nil {
-		return ErrNoIncomingCall
-	}
-
-	if err := dlg.RespondSDP([]byte(m.answerSDP())); err != nil {
-		return fmt.Errorf("answer failed: %w", err)
-	}
-
-	m.mu.Lock()
-	m.activeIn = dlg
-	m.incoming = nil
-	m.mu.Unlock()
-	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
-	return nil
 }
 
 func (m *Manager) Hangup(ctx context.Context) error {

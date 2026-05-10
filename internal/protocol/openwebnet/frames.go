@@ -6,16 +6,11 @@ import (
 )
 
 const (
-	FrameACK              = "*#*1##"
-	FrameNACK             = "*#*0##"
-	FrameStop             = "*7*0*##"
-	FrameStreamProbe      = "*7*73#0#0*##"
-	FrameAudioMuted       = "*#8**33*0##"
-	FrameAudioUnmuted     = "*#8**33*1##"
-	FrameMuteCommand      = "*#8**#33*0##"
-	FrameUnmuteCommand    = "*#8**#33*1##"
-	FrameVoicemailEnable  = "*8*91##"
-	FrameVoicemailDisable = "*8*92##"
+	FrameACK          = "*#*1##"
+	FrameStop         = "*7*0*##"
+	FrameStreamProbe  = "*7*73#0#0*##"
+	FrameAudioMuted   = "*#8**33*0##"
+	FrameAudioUnmuted = "*#8**33*1##"
 )
 
 func BuildUnlockOpen(devAddr string) string {
@@ -26,23 +21,8 @@ func BuildUnlockClose(devAddr string) string {
 	return fmt.Sprintf("*8*20*%s##", strings.TrimSpace(devAddr))
 }
 
-func BuildSIPStreamVideoToggle(port int, quality int) string {
-	if quality != 0 && quality != 1 {
-		quality = 0
-	}
-	return fmt.Sprintf("*7*300#127#0#0#1#%d#%d*##", port, quality)
-}
-
-func BuildSIPStreamAudioToggle(port int) string {
-	return fmt.Sprintf("*7*300#127#0#0#1#%d#2*##", port)
-}
-
 func IsACK(frame string) bool {
 	return strings.TrimSpace(frame) == FrameACK
-}
-
-func IsNACK(frame string) bool {
-	return strings.TrimSpace(frame) == FrameNACK
 }
 
 func IsRingStart(frame string) bool {
