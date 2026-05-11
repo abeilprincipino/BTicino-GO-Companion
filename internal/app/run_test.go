@@ -29,3 +29,23 @@ func TestRunReturnsLoadConfigErrorOnInvalidJSON(t *testing.T) {
 		t.Fatalf("unexpected cancellation error: %v", err)
 	}
 }
+
+func TestLoadOrCreateConfigCreatesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, created, err := loadOrCreateConfig(path)
+	if err != nil {
+		t.Fatalf("loadOrCreateConfig failed: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created=true")
+	}
+	if strings.TrimSpace(cfg.ClaimCode) == "" {
+		t.Fatalf("expected generated claim code")
+	}
+	if cfg.DataDir != filepath.Dir(path) {
+		t.Fatalf("unexpected data dir: %s", cfg.DataDir)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected config file to exist: %v", err)
+	}
+}

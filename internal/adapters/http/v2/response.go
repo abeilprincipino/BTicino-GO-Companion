@@ -14,13 +14,21 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code string, message string) {
+	writeErrorWithExtras(w, status, code, message, nil)
+}
+
+func writeErrorWithExtras(w http.ResponseWriter, status int, code string, message string, extras map[string]any) {
+	errBody := map[string]any{
+		"code":      code,
+		"message":   message,
+		"status":    status,
+		"retryable": status >= 500,
+	}
+	for key, value := range extras {
+		errBody[key] = value
+	}
 	writeJSON(w, status, map[string]any{
-		"error": map[string]any{
-			"code":      code,
-			"message":   message,
-			"status":    status,
-			"retryable": status >= 500,
-		},
+		"error": errBody,
 	})
 }
 

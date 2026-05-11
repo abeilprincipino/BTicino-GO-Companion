@@ -38,6 +38,8 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 			"control_entrypoints_v2",
 			"control_call_v2",
 			"trace_openwebnet_v2",
+			"pairing_v2",
+			"auth_v2",
 		},
 	})
 }

@@ -2,24 +2,32 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"bticino-go-companion/internal/adapters/http/v2"
 	"bticino-go-companion/internal/adapters/openwebnet"
 	"bticino-go-companion/internal/adapters/rtsp"
 	"bticino-go-companion/internal/adapters/sip"
+	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/protocol/openwebnet"
+	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
 	"bticino-go-companion/internal/services/trace"
+	"bticino-go-companion/internal/system"
 )
 
 func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
@@ -27,10 +35,23 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		logger = log.Default()
 	}
 
-	cfg, err := config.Load(cfgPath)
+	resolvedConfigPath, err := config.ResolvePath(cfgPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	cfg, created, err := loadOrCreateConfig(resolvedConfigPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if created {
+		logger.Printf("created default config at %s", resolvedConfigPath)
+	}
+
+	authStore, err := auth.NewStore(resolvedConfigPath, cfg.ClaimCode, cfg.DeviceModel, cfg.DeviceMAC)
+	if err != nil {
+		return fmt.Errorf("init auth store: %w", err)
+	}
+	guard := security.NewGuard()
 
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
@@ -111,7 +132,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	})
 	runtimeStatus.SetControlReady(true, "")
 
-	router := v2.NewRouter(projector, controlService, eventBroker, runtimeStatus, traceBroker)
+	router := v2.NewRouter(authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
@@ -153,4 +174,83 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		return fmt.Errorf("http server failed: %w", err)
 	}
 	return nil
+}
+
+func loadOrCreateConfig(path string) (config.Config, bool, error) {
+	dir := filepath.Dir(path)
+	_, err := os.Stat(path)
+	if err == nil {
+		cfg, loadErr := config.Load(path)
+		if loadErr != nil {
+			return config.Config{}, false, loadErr
+		}
+		changed := false
+
+		if cfg.DataDir != dir {
+			cfg.DataDir = dir
+			changed = true
+		}
+		if strings.TrimSpace(cfg.ClaimCode) == "" {
+			cfg.ClaimCode = defaultClaimCode()
+			changed = true
+		}
+		model := strings.TrimSpace(cfg.DeviceModel)
+		if model == "" || strings.EqualFold(model, "unknown") {
+			model = strings.TrimSpace(system.DetectDeviceModel())
+			if model == "" || strings.EqualFold(model, "unknown") {
+				model = "C300X"
+			}
+			cfg.DeviceModel = model
+			changed = true
+		}
+		if strings.TrimSpace(cfg.DeviceMAC) == "" {
+			mac := strings.TrimSpace(system.DetectDeviceMAC())
+			if mac == "" {
+				mac = "00:00:00:00:00:00"
+			}
+			cfg.DeviceMAC = mac
+			changed = true
+		}
+		if changed {
+			if saveErr := config.Save(path, cfg); saveErr != nil {
+				return config.Config{}, false, saveErr
+			}
+		}
+		return cfg, false, nil
+	}
+	if !os.IsNotExist(err) {
+		return config.Config{}, false, err
+	}
+
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.ClaimCode = defaultClaimCode()
+
+	model := strings.TrimSpace(system.DetectDeviceModel())
+	if model == "" || strings.EqualFold(model, "unknown") {
+		model = "C300X"
+	}
+	cfg.DeviceModel = model
+
+	mac := strings.TrimSpace(system.DetectDeviceMAC())
+	if mac == "" {
+		mac = "00:00:00:00:00:00"
+	}
+	cfg.DeviceMAC = mac
+
+	if err := config.Save(path, cfg); err != nil {
+		return config.Config{}, false, err
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		return config.Config{}, false, err
+	}
+	return loaded, true, nil
+}
+
+func defaultClaimCode() string {
+	buf := make([]byte, 4)
+	_, _ = rand.Read(buf)
+	hexVal := strings.ToLower(hex.EncodeToString(buf))
+	return hexVal[:4] + "-" + hexVal[4:]
 }

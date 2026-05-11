@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,12 @@ import (
 type Config struct {
 	ListenAddr            string             `json:"listen_addr"`
 	DataDir               string             `json:"data_dir"`
+	ClaimCode             string             `json:"claim_code"`
+	DeviceModel           string             `json:"device_model"`
+	DeviceFirmware        string             `json:"device_firmware"`
+	DeviceIP              string             `json:"device_ip"`
+	DeviceMAC             string             `json:"device_mac"`
+	DeviceWiFiRSSI        *int               `json:"device_wifi_rssi,omitempty"`
 	OpenWebNetEnabled     bool               `json:"openwebnet_enabled"`
 	OpenWebNetGroup       string             `json:"openwebnet_group"`
 	OpenWebNetListenPort  int                `json:"openwebnet_listen_port"`
@@ -32,13 +39,28 @@ type Config struct {
 	MediaRTSPPathMain     string             `json:"media_rtsp_path_main"`
 	MediaRTPAudioPort     int                `json:"media_rtp_audio_port"`
 	MediaRTPVideoPort     int                `json:"media_rtp_video_port"`
+	Auth                  AuthState          `json:"auth"`
 	Entrypoints           []entrypoint.Model `json:"entrypoints"`
+}
+
+type AuthState struct {
+	DeviceID    string `json:"device_id"`
+	Claimed     bool   `json:"claimed"`
+	ClaimCode   string `json:"claim_code"`
+	BearerToken string `json:"bearer_token"`
+	KeyID       string `json:"key_id"`
 }
 
 func Default() Config {
 	return Config{
 		ListenAddr:            "0.0.0.0:8080",
-		DataDir:               "/home/bticino/cfg/extra/companion/config",
+		DataDir:               "/home/bticino/cfg/extra/companion",
+		ClaimCode:             "",
+		DeviceModel:           "unknown",
+		DeviceFirmware:        "unknown",
+		DeviceIP:              "",
+		DeviceMAC:             "",
+		DeviceWiFiRSSI:        nil,
 		OpenWebNetEnabled:     true,
 		OpenWebNetGroup:       "239.255.76.67",
 		OpenWebNetListenPort:  7667,
@@ -93,6 +115,18 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func ResolvePath(path string) (string, error) {
+	raw := strings.TrimSpace(path)
+	if raw != "" {
+		return raw, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable: %w", err)
+	}
+	return filepath.Join(filepath.Dir(exe), "config.json"), nil
+}
+
 func Save(path string, cfg Config) error {
 	cfg.normalize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -110,7 +144,22 @@ func (c *Config) normalize() {
 		c.ListenAddr = "0.0.0.0:8080"
 	}
 	if strings.TrimSpace(c.DataDir) == "" {
-		c.DataDir = "/home/bticino/cfg/extra/companion/config"
+		c.DataDir = "/home/bticino/cfg/extra/companion"
+	}
+	c.ClaimCode = strings.TrimSpace(c.ClaimCode)
+	c.DeviceModel = strings.TrimSpace(c.DeviceModel)
+	c.DeviceFirmware = strings.TrimSpace(c.DeviceFirmware)
+	c.DeviceIP = strings.TrimSpace(c.DeviceIP)
+	c.DeviceMAC = strings.TrimSpace(c.DeviceMAC)
+	c.Auth.DeviceID = strings.TrimSpace(c.Auth.DeviceID)
+	c.Auth.ClaimCode = strings.TrimSpace(c.Auth.ClaimCode)
+	c.Auth.BearerToken = strings.TrimSpace(c.Auth.BearerToken)
+	c.Auth.KeyID = strings.TrimSpace(c.Auth.KeyID)
+	if c.DeviceModel == "" {
+		c.DeviceModel = "unknown"
+	}
+	if c.DeviceFirmware == "" {
+		c.DeviceFirmware = "unknown"
 	}
 	if strings.TrimSpace(c.OpenWebNetGroup) == "" {
 		c.OpenWebNetGroup = "239.255.76.67"

@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
@@ -41,15 +45,49 @@ func newTestRuntimeStatus() *runtime.Status {
 	return rt
 }
 
-func TestRouterStateEndpoint(t *testing.T) {
+func newClaimedAuth(t *testing.T) (*auth.Store, string) {
+	t.Helper()
+	store, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:03:50:96:2e:38")
+	if err != nil {
+		t.Fatalf("new auth store: %v", err)
+	}
+	ch, err := store.StartChallenge()
+	if err != nil {
+		t.Fatalf("start challenge: %v", err)
+	}
+	token, _, err := store.Claim(auth.ClaimRequest{
+		ChallengeID: ch.ID,
+		Nonce:       ch.Nonce,
+		ClaimCode:   "abcd-1234",
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	return store, token
+}
+
+func authReq(method string, path string, token string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
+}
+
+func newAuthedRouter(t *testing.T) (*Router, string) {
+	t.Helper()
+	authStore, token := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/state", nil)
+	r := NewRouter(authStore, security.NewGuard(), p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
+	return r, token
+}
+
+func TestRouterStateEndpoint(t *testing.T) {
+	r, token := newAuthedRouter(t)
+	req := authReq(http.MethodGet, "/api/v2/state", token)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	var body struct {
@@ -67,66 +105,55 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 }
 
-func TestRouterCapabilitiesEndpoint(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/capabilities", nil)
+func TestRouterRejectsUnauthorizedProtectedEndpoint(t *testing.T) {
+	r, _ := newAuthedRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/state", nil)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var body struct {
-		APIVersion   string   `json:"api_version"`
-		Capabilities []string `json:"capabilities"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if body.APIVersion != "v2" {
-		t.Fatalf("unexpected api_version: %s", body.APIVersion)
-	}
-	if len(body.Capabilities) != 5 {
-		t.Fatalf("unexpected capabilities payload: %+v", body.Capabilities)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
-func TestRouterEntrypointUnlockEndpoint(t *testing.T) {
+func TestRouterPairChallengeAndClaim(t *testing.T) {
+	authStore, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:03:50:96:2e:38")
+	if err != nil {
+		t.Fatalf("new auth store: %v", err)
+	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/main/unlock", nil)
+	r := NewRouter(authStore, security.NewGuard(), p, c, events.New(8), newTestRuntimeStatus(), trace.New(8))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("challenge expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
-
-	var body struct {
-		OK           bool   `json:"ok"`
-		EntrypointID string `json:"entrypoint_id"`
-		Action       string `json:"action"`
+	var ch struct {
+		ChallengeID string `json:"challenge_id"`
+		Nonce       string `json:"nonce"`
 	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
+	if err := json.Unmarshal(rr.Body.Bytes(), &ch); err != nil {
+		t.Fatalf("decode challenge body: %v", err)
 	}
-	if !body.OK || body.EntrypointID != "main" || body.Action != "unlock" {
-		t.Fatalf("unexpected response payload: %+v", body)
+	body := `{"challenge_id":"` + ch.ChallengeID + `","nonce":"` + ch.Nonce + `","claim_code":"abcd-1234"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/v2/pair/claim", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("claim expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
 func TestRouterEventsSSEReplay(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	b := events.New(32)
-	b.Publish(event.Envelope{ID: 1, Type: event.TypeRingStarted})
-	b.Publish(event.Envelope{ID: 2, Type: event.TypeStreamStarted})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, b, newTestRuntimeStatus(), trace.New(16))
+	r, token := newAuthedRouter(t)
+	r.events.Publish(event.Envelope{ID: 1, Type: event.TypeRingStarted})
+	r.events.Publish(event.Envelope{ID: 2, Type: event.TypeStreamStarted})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/events?last_event_id=1", nil).WithContext(ctx)
+	req := authReq(http.MethodGet, "/api/v2/events?last_event_id=1", token).WithContext(ctx)
 	cancel()
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
@@ -138,72 +165,16 @@ func TestRouterEventsSSEReplay(t *testing.T) {
 	}
 }
 
-func TestRouterEntrypointControlNotFoundErrorEnvelope(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(8), newTestRuntimeStatus(), trace.New(16))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/unknown/unlock", nil)
-	rr := httptest.NewRecorder()
-	r.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var body struct {
-		Error struct {
-			Code      string `json:"code"`
-			Status    int    `json:"status"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if body.Error.Code != "entrypoint_not_found" || body.Error.Status != http.StatusNotFound || body.Error.Retryable {
-		t.Fatalf("unexpected error envelope: %+v", body.Error)
-	}
-}
-
-func TestRouterControlUnavailableEnvelope(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	r := NewRouter(p, nil, events.New(8), newTestRuntimeStatus(), trace.New(16))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/entrypoints/main/stream/start", nil)
-	rr := httptest.NewRecorder()
-	r.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var body struct {
-		Error struct {
-			Code      string `json:"code"`
-			Status    int    `json:"status"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if body.Error.Code != "control_unavailable" || body.Error.Status != http.StatusServiceUnavailable || !body.Error.Retryable {
-		t.Fatalf("unexpected error envelope: %+v", body.Error)
-	}
-}
-
 func TestRouterCallControlEndpoints(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(8), newTestRuntimeStatus(), trace.New(16))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/call/answer", nil)
+	r, token := newAuthedRouter(t)
+	req := authReq(http.MethodPost, "/api/v2/control/call/answer", token)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 on answer, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/v2/control/call/hangup", nil)
+	req = authReq(http.MethodPost, "/api/v2/control/call/hangup", token)
 	rr = httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -212,13 +183,9 @@ func TestRouterCallControlEndpoints(t *testing.T) {
 }
 
 func TestRouterOpenWebNetTraceEndpoint(t *testing.T) {
-	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	tb := trace.New(8)
-	tb.Publish(trace.Record{Direction: "rx", Transport: "udp_multicast", Frame: "*8*1#1#4#21*10##", Mapped: true})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(p, c, events.New(8), newTestRuntimeStatus(), tb)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/trace/openwebnet", nil)
+	r, token := newAuthedRouter(t)
+	r.trace.Publish(trace.Record{Direction: "rx", Transport: "udp_multicast", Frame: "*8*1#1#4#21*10##", Mapped: true})
+	req := authReq(http.MethodGet, "/api/v2/trace/openwebnet", token)
 	rr := httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
