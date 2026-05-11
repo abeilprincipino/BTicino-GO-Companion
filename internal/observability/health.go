@@ -40,7 +40,7 @@ func New(boot time.Time, status runtime.Snapshot) Health {
 		Ready:     ready,
 		Degraded:  degraded,
 		BootTime:  boot,
-		Timestamp: time.Now().UTC(),
+		Timestamp: time.Now(),
 		Reasons:   reasons,
 		Components: map[string]any{
 			"sip":        status.SIP,

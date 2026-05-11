@@ -95,7 +95,7 @@ func (s *Service) StopForEntrypoint(ctx context.Context, _ string) error {
 }
 
 func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID string, devAddr string) error {
-	now := time.Now().UTC()
+	now := time.Now()
 
 	s.mu.Lock()
 	if s.streamActive && s.activeEntrypoint != "" && s.activeEntrypoint != entrypointID {
@@ -138,7 +138,7 @@ func (s *Service) ReaderTouch(sessionID string) {
 	if !ok {
 		return
 	}
-	reader.LastSeen = time.Now().UTC()
+	reader.LastSeen = time.Now()
 	s.readers[sessionID] = reader
 }
 
@@ -158,7 +158,7 @@ func (s *Service) PruneIdleReaders(ctx context.Context, maxIdle time.Duration) e
 	if maxIdle <= 0 {
 		maxIdle = 40 * time.Second
 	}
-	cutoff := time.Now().UTC().Add(-maxIdle)
+	cutoff := time.Now().Add(-maxIdle)
 
 	s.mu.Lock()
 	for id, reader := range s.readers {

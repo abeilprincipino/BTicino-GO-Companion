@@ -376,7 +376,7 @@ func (m *Manager) publish(kind string, payload map[string]any) {
 	}
 	sink(event.Envelope{
 		Type:    kind,
-		TS:      time.Now().UTC(),
+		TS:      time.Now(),
 		Source:  event.SourceSIP,
 		Payload: payload,
 	})

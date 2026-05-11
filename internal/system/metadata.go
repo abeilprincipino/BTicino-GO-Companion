@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -127,13 +128,26 @@ func parseModel(content string) (string, bool) {
 }
 
 type dbfilesWS struct {
-	VerWebserver string `xml:"global_info>ver_webserver"`
+	VerWebserver string `xml:"general_info>ver_webserver"`
 }
+
+var firmwareTagRegex = regexp.MustCompile(`(?is)<ver_webserver>\s*([^<]+?)\s*</ver_webserver>`)
 
 func parseFirmwareVersion(content string) (string, bool) {
 	var parsed dbfilesWS
 	if err := xml.Unmarshal([]byte(content), &parsed); err != nil {
-		return "", false
+		if !strings.Contains(err.Error(), "CharsetReader is nil") {
+			return "", false
+		}
+		matches := firmwareTagRegex.FindStringSubmatch(content)
+		if len(matches) < 2 {
+			return "", false
+		}
+		version := strings.TrimSpace(matches[1])
+		if version == "" {
+			return "", false
+		}
+		return version, true
 	}
 	version := strings.TrimSpace(parsed.VerWebserver)
 	if version == "" {

@@ -23,7 +23,38 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, r.state.Snapshot())
+	snap := r.state.Snapshot()
+	network := map[string]any{
+		"ip":        nullableString(r.cfg.DeviceIP),
+		"mac":       nullableString(r.cfg.DeviceMAC),
+		"wifi_rssi": r.cfg.DeviceWiFiRSSI,
+	}
+	response := map[string]any{
+		"boot_time":      snap.BootTime,
+		"call_state":     snap.CallState,
+		"stream_active":  snap.StreamActive,
+		"ringing":        snap.Ringing,
+		"floor_ringing":  snap.FloorRinging,
+		"last_event_type": snap.LastEventType,
+		"last_event_ts":  snap.LastEventTS,
+		"entrypoints":    snap.Entrypoints,
+		"device": map[string]any{
+			"id":       nullableString(r.auth.DeviceID()),
+			"name":     nullableString(r.cfg.DeviceModel),
+			"model":    nullableString(r.cfg.DeviceModel),
+			"firmware": nullableString(r.cfg.DeviceFirmware),
+		},
+		"diagnostics": map[string]any{
+			"network": network,
+		},
+	}
+	if snap.LastEventType == "" {
+		delete(response, "last_event_type")
+	}
+	if snap.LastEventTS == nil {
+		delete(response, "last_event_ts")
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
@@ -50,4 +81,11 @@ func (r *Router) handleEntrypoints(w http.ResponseWriter, req *http.Request) {
 	}
 	snap := r.state.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{"entrypoints": snap.Entrypoints})
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

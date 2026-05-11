@@ -29,7 +29,7 @@ func NewNormalizer(entrypoints []entrypoint.Model) *Normalizer {
 
 func (n *Normalizer) Normalize(ev event.Envelope) event.Envelope {
 	if ev.TS.IsZero() {
-		ev.TS = time.Now().UTC()
+		ev.TS = time.Now()
 	}
 	if strings.TrimSpace(ev.Source) == "" {
 		ev.Source = event.SourceSystem

@@ -139,7 +139,7 @@ func (s *Service) publish(kind string, entrypointID string, payload map[string]a
 	}
 	s.emit(event.Envelope{
 		Type:         kind,
-		TS:           time.Now().UTC(),
+		TS:           time.Now(),
 		Source:       event.SourceAPI,
 		EntrypointID: entrypointID,
 		Payload:      payload,

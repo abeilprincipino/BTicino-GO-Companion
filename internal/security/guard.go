@@ -83,7 +83,7 @@ func NewGuard() *Guard {
 }
 
 func (g *Guard) Begin(scope Scope, ip string) Decision {
-	now := time.Now().UTC()
+	now := time.Now()
 	ip = normalizeIP(ip)
 
 	g.mu.Lock()
@@ -123,7 +123,7 @@ func (g *Guard) Begin(scope Scope, ip string) Decision {
 }
 
 func (g *Guard) Success(scope Scope, ip string) {
-	now := time.Now().UTC()
+	now := time.Now()
 	ip = normalizeIP(ip)
 
 	g.mu.Lock()
@@ -138,7 +138,7 @@ func (g *Guard) Success(scope Scope, ip string) {
 }
 
 func (g *Guard) Failure(scope Scope, ip string) {
-	now := time.Now().UTC()
+	now := time.Now()
 	ip = normalizeIP(ip)
 
 	g.mu.Lock()
@@ -167,7 +167,7 @@ func (g *Guard) Failure(scope Scope, ip string) {
 }
 
 func (g *Guard) Snapshot() map[string]any {
-	now := time.Now().UTC()
+	now := time.Now()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

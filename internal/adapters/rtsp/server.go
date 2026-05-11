@@ -145,7 +145,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 		SessionID:    sessionID,
 		EntrypointID: entrypointID,
 		DevAddr:      devAddr,
-		LastSeen:     time.Now().UTC(),
+		LastSeen:     time.Now(),
 	}
 	s.mu.Unlock()
 
@@ -306,7 +306,7 @@ func (s *Server) watchReaderSessions(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			now := time.Now().UTC()
+			now := time.Now()
 			var stale []*gortsplib.ServerSession
 			s.mu.RLock()
 			for sess, info := range s.readers {
@@ -348,7 +348,7 @@ func (s *Server) touchReader(sess *gortsplib.ServerSession) {
 	s.mu.Lock()
 	info, ok := s.readers[sess]
 	if ok {
-		info.LastSeen = time.Now().UTC()
+		info.LastSeen = time.Now()
 		s.readers[sess] = info
 	}
 	s.mu.Unlock()

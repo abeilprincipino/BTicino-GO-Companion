@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"bticino-go-companion/internal/domain/entrypoint"
 )
@@ -44,11 +45,14 @@ type Config struct {
 }
 
 type AuthState struct {
-	DeviceID    string `json:"device_id"`
-	Claimed     bool   `json:"claimed"`
-	ClaimCode   string `json:"claim_code"`
-	BearerToken string `json:"bearer_token"`
-	KeyID       string `json:"key_id"`
+	DeviceID              string    `json:"device_id"`
+	Claimed               bool      `json:"claimed"`
+	ClaimCode             string    `json:"claim_code"`
+	BearerToken           string    `json:"bearer_token"`
+	KeyID                 string    `json:"key_id"`
+	AccessTokenExpiresAt  time.Time `json:"access_token_expires_at,omitempty"`
+	RefreshToken          string    `json:"refresh_token,omitempty"`
+	RefreshTokenExpiresAt time.Time `json:"refresh_token_expires_at,omitempty"`
 }
 
 func Default() Config {
@@ -155,6 +159,7 @@ func (c *Config) normalize() {
 	c.Auth.ClaimCode = strings.TrimSpace(c.Auth.ClaimCode)
 	c.Auth.BearerToken = strings.TrimSpace(c.Auth.BearerToken)
 	c.Auth.KeyID = strings.TrimSpace(c.Auth.KeyID)
+	c.Auth.RefreshToken = strings.TrimSpace(c.Auth.RefreshToken)
 	if c.DeviceModel == "" {
 		c.DeviceModel = "unknown"
 	}

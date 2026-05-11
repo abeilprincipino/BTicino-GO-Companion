@@ -29,7 +29,7 @@ func NewProjector(entrypoints []entrypoint.Model) *Projector {
 	return &Projector{
 		nextID: 1,
 		snapshot: Snapshot{
-			BootTime:     time.Now().UTC(),
+			BootTime:     time.Now(),
 			CallState:    CallStateIdle,
 			Entrypoints:  entrypoints,
 			StreamActive: false,

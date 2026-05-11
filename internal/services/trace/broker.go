@@ -41,7 +41,7 @@ func New(maxRetained int) *Broker {
 func (b *Broker) Publish(rec Record) {
 	b.mu.Lock()
 	if rec.TS.IsZero() {
-		rec.TS = time.Now().UTC()
+		rec.TS = time.Now()
 	}
 	if rec.ID == 0 {
 		rec.ID = b.nextID

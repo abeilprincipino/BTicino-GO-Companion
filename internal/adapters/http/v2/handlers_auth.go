@@ -30,8 +30,17 @@ func (r *Router) withBearer(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		token := bearerToken(req.Header.Get("Authorization"))
-		if token == "" || r.auth.ValidateBearer(token) != nil {
+		if token == "" {
 			r.guard.Failure(security.ScopeAuth, ip)
+			writeError(w, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
+			return
+		}
+		if err := r.auth.ValidateBearer(token); err != nil {
+			r.guard.Failure(security.ScopeAuth, ip)
+			if errors.Is(err, auth.ErrTokenExpired) {
+				writeError(w, http.StatusUnauthorized, "token_expired", "bearer token has expired")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
 			return
 		}
@@ -112,10 +121,13 @@ func (r *Router) handlePairClaim(w http.ResponseWriter, req *http.Request) {
 	r.guard.Success(security.ScopePairing, ip)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"needs_claim":  false,
-		"token_type":   "Bearer",
-		"access_token": token,
-		"key_id":       keyID,
+		"needs_claim":              false,
+		"token_type":               "Bearer",
+		"access_token":             token,
+		"key_id":                   keyID,
+		"access_token_expires_at":  r.auth.AccessTokenExpiresAt().Format(time.RFC3339),
+		"refresh_token":            r.auth.RefreshToken(),
+		"refresh_token_expires_at": r.auth.RefreshTokenExpiresAt().Format(time.RFC3339),
 	})
 }
 
@@ -126,7 +138,15 @@ func (r *Router) handleAuthStatus(w http.ResponseWriter, req *http.Request) {
 	}
 	if !r.auth.NeedsClaim() {
 		token := bearerToken(req.Header.Get("Authorization"))
-		if token == "" || r.auth.ValidateBearer(token) != nil {
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
+			return
+		}
+		if err := r.auth.ValidateBearer(token); err != nil {
+			if errors.Is(err, auth.ErrTokenExpired) {
+				writeError(w, http.StatusUnauthorized, "token_expired", "bearer token has expired")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
 			return
 		}
@@ -137,8 +157,59 @@ func (r *Router) handleAuthStatus(w http.ResponseWriter, req *http.Request) {
 		guard = r.guard.Snapshot()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"needs_claim": r.auth.NeedsClaim(),
-		"guard":       guard,
+		"needs_claim":              r.auth.NeedsClaim(),
+		"guard":                    guard,
+		"key_id":                   r.auth.CurrentKeyID(),
+		"refresh_token":            emptyToNil(r.auth.RefreshToken()),
+		"access_token_expires_at":  timeOrNilRFC3339(r.auth.AccessTokenExpiresAt()),
+		"refresh_token_expires_at": timeOrNilRFC3339(r.auth.RefreshTokenExpiresAt()),
+	})
+}
+
+func (r *Router) handleAuthRefresh(w http.ResponseWriter, req *http.Request) {
+	if r.auth == nil || r.guard == nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_unavailable", "auth service unavailable")
+		return
+	}
+
+	ip := requestIP(req)
+	decision := r.guard.Begin(security.ScopeAuth, ip)
+	if !decision.Allowed {
+		writeGuardError(w, decision)
+		return
+	}
+
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := decodeRequiredJSONBody(req, &body); err != nil || strings.TrimSpace(body.RefreshToken) == "" {
+		r.guard.Failure(security.ScopeAuth, ip)
+		writeError(w, http.StatusBadRequest, "bad_request", "refresh_token is required")
+		return
+	}
+
+	token, keyID, accessExp, refreshToken, refreshExp, err := r.auth.Refresh(body.RefreshToken)
+	if err != nil {
+		r.guard.Failure(security.ScopeAuth, ip)
+		switch {
+		case errors.Is(err, auth.ErrRefreshTokenExpired):
+			writeError(w, http.StatusUnauthorized, "refresh_token_expired", "refresh token has expired")
+		case errors.Is(err, auth.ErrInvalidRefreshToken):
+			writeError(w, http.StatusUnauthorized, "invalid_refresh_token", "refresh token is invalid")
+		default:
+			writeError(w, http.StatusUnauthorized, "unauthorized", "refresh failed")
+		}
+		return
+	}
+
+	r.guard.Success(security.ScopeAuth, ip)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token_type":               "Bearer",
+		"access_token":             token,
+		"key_id":                   keyID,
+		"access_token_expires_at":  accessExp.Format(time.RFC3339),
+		"refresh_token":            refreshToken,
+		"refresh_token_expires_at": refreshExp.Format(time.RFC3339),
 	})
 }
 
@@ -153,6 +224,9 @@ func (r *Router) handleAuthRotate(w http.ResponseWriter, _ *http.Request) {
 		"access_token":    token,
 		"key_id":          keyID,
 		"replaced_key_id": prevKeyID,
+		"access_token_expires_at":  r.auth.AccessTokenExpiresAt().Format(time.RFC3339),
+		"refresh_token":            r.auth.RefreshToken(),
+		"refresh_token_expires_at": r.auth.RefreshTokenExpiresAt().Format(time.RFC3339),
 	})
 }
 
@@ -180,6 +254,9 @@ func (r *Router) handleAuthRevoke(w http.ResponseWriter, req *http.Request) {
 		"token_type":     "Bearer",
 		"access_token":   token,
 		"key_id":         keyID,
+		"access_token_expires_at":  r.auth.AccessTokenExpiresAt().Format(time.RFC3339),
+		"refresh_token":            r.auth.RefreshToken(),
+		"refresh_token_expires_at": r.auth.RefreshTokenExpiresAt().Format(time.RFC3339),
 	})
 }
 
@@ -277,6 +354,21 @@ func requestIP(req *http.Request) string {
 		return host
 	}
 	return strings.TrimSpace(req.RemoteAddr)
+}
+
+func timeOrNilRFC3339(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.Format(time.RFC3339)
+}
+
+func emptyToNil(value string) any {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
 }
 
 func writeGuardError(w http.ResponseWriter, decision security.Decision) {

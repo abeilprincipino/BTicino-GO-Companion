@@ -10,7 +10,7 @@ import (
 
 func TestProjectorApply(t *testing.T) {
 	p := NewProjector([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	now := time.Now().UTC()
+	now := time.Now()
 	p.Apply(event.Envelope{Type: event.TypeRingStarted, TS: now})
 	s := p.Snapshot()
 	if !s.Ringing || s.CallState != CallStateRinging {

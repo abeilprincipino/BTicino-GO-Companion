@@ -132,7 +132,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	})
 	runtimeStatus.SetControlReady(true, "")
 
-	router := v2.NewRouter(authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker)
+	router := v2.NewRouter(cfg, authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
@@ -184,6 +184,7 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 		if loadErr != nil {
 			return config.Config{}, false, loadErr
 		}
+		meta := system.DetectLocalMetadata()
 		changed := false
 
 		if cfg.DataDir != dir {
@@ -196,19 +197,42 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 		}
 		model := strings.TrimSpace(cfg.DeviceModel)
 		if model == "" || strings.EqualFold(model, "unknown") {
-			model = strings.TrimSpace(system.DetectDeviceModel())
+			model = strings.TrimSpace(meta.Model)
 			if model == "" || strings.EqualFold(model, "unknown") {
 				model = "C300X"
 			}
 			cfg.DeviceModel = model
 			changed = true
 		}
-		if strings.TrimSpace(cfg.DeviceMAC) == "" {
-			mac := strings.TrimSpace(system.DetectDeviceMAC())
+		firmware := strings.TrimSpace(cfg.DeviceFirmware)
+		if firmware == "" || strings.EqualFold(firmware, "unknown") {
+			firmware = strings.TrimSpace(meta.Firmware)
+			if firmware != "" {
+				cfg.DeviceFirmware = firmware
+				changed = true
+			}
+		}
+		if strings.TrimSpace(cfg.DeviceIP) == "" {
+			ip := strings.TrimSpace(meta.Network.IP)
+			if ip != "" {
+				cfg.DeviceIP = ip
+				changed = true
+			}
+		}
+		if strings.TrimSpace(cfg.DeviceMAC) == "" || cfg.DeviceMAC == "00:00:00:00:00:00" {
+			mac := strings.TrimSpace(meta.Network.MAC)
+			if mac == "" {
+				mac = strings.TrimSpace(system.DetectDeviceMAC())
+			}
 			if mac == "" {
 				mac = "00:00:00:00:00:00"
 			}
 			cfg.DeviceMAC = mac
+			changed = true
+		}
+		if cfg.DeviceWiFiRSSI == nil && meta.Network.WiFiRSSI != nil {
+			rssi := *meta.Network.WiFiRSSI
+			cfg.DeviceWiFiRSSI = &rssi
 			changed = true
 		}
 		if changed {
@@ -225,18 +249,37 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 	cfg := config.Default()
 	cfg.DataDir = dir
 	cfg.ClaimCode = defaultClaimCode()
+	meta := system.DetectLocalMetadata()
 
-	model := strings.TrimSpace(system.DetectDeviceModel())
+	model := strings.TrimSpace(meta.Model)
 	if model == "" || strings.EqualFold(model, "unknown") {
 		model = "C300X"
 	}
 	cfg.DeviceModel = model
 
-	mac := strings.TrimSpace(system.DetectDeviceMAC())
+	firmware := strings.TrimSpace(meta.Firmware)
+	if firmware != "" {
+		cfg.DeviceFirmware = firmware
+	}
+
+	ip := strings.TrimSpace(meta.Network.IP)
+	if ip != "" {
+		cfg.DeviceIP = ip
+	}
+
+	mac := strings.TrimSpace(meta.Network.MAC)
+	if mac == "" {
+		mac = strings.TrimSpace(system.DetectDeviceMAC())
+	}
 	if mac == "" {
 		mac = "00:00:00:00:00:00"
 	}
 	cfg.DeviceMAC = mac
+
+	if meta.Network.WiFiRSSI != nil {
+		rssi := *meta.Network.WiFiRSSI
+		cfg.DeviceWiFiRSSI = &rssi
+	}
 
 	if err := config.Save(path, cfg); err != nil {
 		return config.Config{}, false, err

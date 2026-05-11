@@ -13,7 +13,7 @@ func TestHealthReady(t *testing.T) {
 		OpenWebNet: runtime.ComponentStatus{Enabled: true, Ready: true},
 		Control:    runtime.ComponentStatus{Enabled: true, Ready: true},
 	}
-	health := New(time.Now().UTC(), status)
+	health := New(time.Now(), status)
 	if !health.Live || !health.Ready || health.Degraded {
 		t.Fatalf("unexpected health: %+v", health)
 	}
@@ -25,7 +25,7 @@ func TestHealthNotReadyAndDegraded(t *testing.T) {
 		OpenWebNet: runtime.ComponentStatus{Enabled: true, Ready: true},
 		Control:    runtime.ComponentStatus{Enabled: true, Ready: false},
 	}
-	health := New(time.Now().UTC(), status)
+	health := New(time.Now(), status)
 	if health.Ready {
 		t.Fatalf("health should not be ready: %+v", health)
 	}

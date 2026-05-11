@@ -19,7 +19,7 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 		return nil
 	}
 
-	now := time.Now().UTC()
+	now := time.Now()
 	raw := msg.Raw
 
 	newEvent := func(kind string, payload map[string]any) event.Envelope {

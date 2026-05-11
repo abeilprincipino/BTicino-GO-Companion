@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"bticino-go-companion/internal/auth"
+	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/security"
@@ -77,7 +78,7 @@ func newAuthedRouter(t *testing.T) (*Router, string) {
 	authStore, token := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(authStore, security.NewGuard(), p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
+	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
 	return r, token
 }
 
@@ -93,6 +94,7 @@ func TestRouterStateEndpoint(t *testing.T) {
 	var body struct {
 		CallState   string             `json:"call_state"`
 		Entrypoints []entrypoint.Model `json:"entrypoints"`
+		Device      map[string]any     `json:"device"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -102,6 +104,9 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 	if len(body.Entrypoints) != 1 || body.Entrypoints[0].ID != "main" {
 		t.Fatalf("unexpected entrypoints payload: %+v", body.Entrypoints)
+	}
+	if _, ok := body.Device["model"]; !ok {
+		t.Fatalf("expected device model in state payload: %+v", body.Device)
 	}
 }
 
@@ -122,7 +127,7 @@ func TestRouterPairChallengeAndClaim(t *testing.T) {
 	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
-	r := NewRouter(authStore, security.NewGuard(), p, c, events.New(8), newTestRuntimeStatus(), trace.New(8))
+	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(8), newTestRuntimeStatus(), trace.New(8))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
 	rr := httptest.NewRecorder()
