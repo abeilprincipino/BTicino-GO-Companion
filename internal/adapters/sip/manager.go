@@ -203,6 +203,7 @@ func (m *Manager) registerHandlers() {
 				}
 				m.activeOut = nil
 				m.mu.Unlock()
+				m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "remote_bye_outgoing"})
 				m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye_outgoing"})
 				return
 			}
@@ -218,6 +219,7 @@ func (m *Manager) registerHandlers() {
 		m.activeIn = nil
 		m.incoming = nil
 		m.mu.Unlock()
+		m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "remote_bye"})
 		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye"})
 	})
 }
@@ -243,6 +245,7 @@ func (m *Manager) Hangup(ctx context.Context) error {
 			m.incoming = nil
 		}
 		m.mu.Unlock()
+		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "local_reject_incoming"})
 		return nil
 	}
 
@@ -260,6 +263,8 @@ func (m *Manager) Hangup(ctx context.Context) error {
 			m.activeOut = nil
 		}
 		m.mu.Unlock()
+		m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "local_hangup_outgoing"})
+		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "local_hangup_outgoing"})
 		return nil
 	}
 
@@ -272,6 +277,8 @@ func (m *Manager) Hangup(ctx context.Context) error {
 		m.activeIn = nil
 	}
 	m.mu.Unlock()
+	m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "local_hangup_incoming"})
+	m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "local_hangup_incoming"})
 	return nil
 }
 

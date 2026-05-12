@@ -40,18 +40,21 @@ func (r *lifecycleRecorder) ReaderTouch(_ string) {
 func TestServerPathAndLifecycleHooks(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaRTSPPathMain = "doorbell"
-	cfg.Entrypoints = []entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true}}
+	cfg.Entrypoints = []entrypoint.Model{
+		{ID: "gate1", DevAddr: "20", HasStream: true},
+		{ID: "gate2", DevAddr: "21", HasStream: true},
+	}
 
 	rec := &lifecycleRecorder{}
 	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
 
-	if !s.isKnownPath("/doorbell") || s.isKnownPath("/extra") || s.isKnownPath("/unknown") {
+	if !s.isKnownPath("/doorbell-gate1") || !s.isKnownPath("/doorbell-gate2") || s.isKnownPath("/doorbell") || s.isKnownPath("/unknown") {
 		t.Fatal("unexpected path match behavior")
 	}
 
 	session := &gortsplib.ServerSession{}
 	playResp, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{
-		Path:    "/doorbell",
+		Path:    "/doorbell-gate2",
 		Session: session,
 	})
 	if err != nil {
@@ -60,7 +63,7 @@ func TestServerPathAndLifecycleHooks(t *testing.T) {
 	if playResp == nil || playResp.StatusCode != base.StatusOK {
 		t.Fatalf("unexpected play response: %+v", playResp)
 	}
-	if rec.joinCalls != 1 || rec.lastJoinID != "main" || rec.lastDev != "20" {
+	if rec.joinCalls != 1 || rec.lastJoinID != "gate2" || rec.lastDev != "21" {
 		t.Fatalf("unexpected lifecycle join payload: %+v", rec)
 	}
 

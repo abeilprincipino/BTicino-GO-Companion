@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/pion/rtp"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/domain/entrypoint"
 )
 
 const (
@@ -32,6 +34,11 @@ type readerInfo struct {
 	LastSeen     time.Time
 }
 
+type streamRoute struct {
+	EntrypointID string
+	DevAddr      string
+}
+
 type Server struct {
 	cfg    config.Config
 	logger *log.Logger
@@ -45,18 +52,21 @@ type Server struct {
 	videoMed *description.Media
 	audioMed *description.Media
 	readers  map[*gortsplib.ServerSession]readerInfo
-	mainPath string
+	paths    map[string]streamRoute
+	pathList []string
 }
 
 func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Server {
-	mainPath := normalizePath(cfg.MediaRTSPPathMain, "doorbell")
+	pathPrefix := normalizePath(cfg.MediaRTSPPathMain, "doorbell")
+	paths := buildStreamRoutes(pathPrefix, cfg.Entrypoints)
 
 	s := &Server{
 		cfg:       cfg,
 		logger:    logger,
 		transport: NewTransport(lifecycle),
 		readers:   map[*gortsplib.ServerSession]readerInfo{},
-		mainPath:  mainPath,
+		paths:     paths,
+		pathList:  sortedRoutePaths(paths),
 	}
 	s.srv = &gortsplib.Server{
 		Handler:        s,
@@ -71,7 +81,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.srv.Start(); err != nil {
 		return fmt.Errorf("start rtsp server: %w", err)
 	}
-	s.logf("rtsp server started addr=%s path_main=/%s", s.cfg.MediaRTSPAddress, s.mainPath)
+	s.logf("rtsp server started addr=%s paths=%v", s.cfg.MediaRTSPAddress, s.pathList)
 
 	if err := s.ensureStaticStream(); err != nil {
 		s.srv.Close()
@@ -97,7 +107,11 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) StreamURL(host string) string {
-	return fmt.Sprintf("rtsp://%s/%s", net.JoinHostPort(extractHost(host), extractPortString(s.cfg.MediaRTSPAddress, 8554)), s.mainPath)
+	path := "doorbell"
+	if len(s.pathList) > 0 {
+		path = s.pathList[0]
+	}
+	return fmt.Sprintf("rtsp://%s/%s", net.JoinHostPort(extractHost(host), extractPortString(s.cfg.MediaRTSPAddress, 8554)), path)
 }
 
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
@@ -129,7 +143,10 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 }
 
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
-	entrypointID, devAddr := s.resolveEntrypoint(ctx.Path)
+	entrypointID, devAddr, ok := s.resolveEntrypoint(ctx.Path)
+	if !ok {
+		return &base.Response{StatusCode: base.StatusNotFound}, nil
+	}
 	sessionID := sessionID(ctx.Session)
 
 	startCtx, cancel := context.WithTimeout(context.Background(), streamAutostartTimeout)
@@ -357,27 +374,19 @@ func (s *Server) touchReader(sess *gortsplib.ServerSession) {
 	}
 }
 
-func (s *Server) resolveEntrypoint(path string) (string, string) {
-	main := strings.TrimPrefix(s.mainPath, "/")
+func (s *Server) resolveEntrypoint(path string) (string, string, bool) {
 	reqPath := strings.TrimPrefix(strings.TrimSpace(path), "/")
-
-	if reqPath == main {
-		for _, ep := range s.cfg.Entrypoints {
-			if ep.HasStream {
-				return ep.ID, ep.DevAddr
-			}
-		}
+	route, ok := s.paths[reqPath]
+	if !ok {
+		return "", "", false
 	}
-	if len(s.cfg.Entrypoints) > 0 {
-		return s.cfg.Entrypoints[0].ID, s.cfg.Entrypoints[0].DevAddr
-	}
-	return "main", "20"
+	return route.EntrypointID, route.DevAddr, true
 }
 
 func (s *Server) isKnownPath(path string) bool {
 	reqPath := strings.TrimPrefix(strings.TrimSpace(path), "/")
-	main := strings.TrimPrefix(s.mainPath, "/")
-	return reqPath == main
+	_, ok := s.paths[reqPath]
+	return ok
 }
 
 func normalizePath(raw string, fallback string) string {
@@ -427,4 +436,72 @@ func (s *Server) logf(format string, args ...any) {
 	if s.logger != nil {
 		s.logger.Printf(format, args...)
 	}
+}
+
+func buildStreamRoutes(prefix string, entrypoints []entrypoint.Model) map[string]streamRoute {
+	routes := make(map[string]streamRoute)
+	for idx, ep := range entrypoints {
+		if !ep.HasStream {
+			continue
+		}
+		id := strings.TrimSpace(ep.ID)
+		if id == "" {
+			continue
+		}
+		token := sanitizePathToken(id)
+		if token == "" {
+			token = fmt.Sprintf("entrypoint%d", idx+1)
+		}
+		basePath := fmt.Sprintf("%s-%s", prefix, token)
+		path := basePath
+		for n := 2; ; n++ {
+			if _, exists := routes[path]; !exists {
+				break
+			}
+			path = fmt.Sprintf("%s-%d", basePath, n)
+		}
+		routes[path] = streamRoute{
+			EntrypointID: id,
+			DevAddr:      strings.TrimSpace(ep.DevAddr),
+		}
+	}
+	return routes
+}
+
+func sortedRoutePaths(routes map[string]streamRoute) []string {
+	paths := make([]string, 0, len(routes))
+	for path := range routes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func sanitizePathToken(raw string) string {
+	val := strings.ToLower(strings.TrimSpace(raw))
+	if val == "" {
+		return ""
+	}
+
+	var out strings.Builder
+	lastDash := false
+	for _, r := range val {
+		switch {
+		case r >= 'a' && r <= 'z':
+			out.WriteRune(r)
+			lastDash = false
+		case r >= '0' && r <= '9':
+			out.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_':
+			out.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				out.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(out.String(), "-")
 }
