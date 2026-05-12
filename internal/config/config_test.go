@@ -4,6 +4,9 @@ import "testing"
 
 func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	cfg := Default()
+	if !cfg.MDNSEnabled || cfg.MDNSServiceType != "_bticomp._tcp" {
+		t.Fatalf("unexpected mDNS defaults: enabled=%v service=%s", cfg.MDNSEnabled, cfg.MDNSServiceType)
+	}
 	if cfg.OpenWebNetCommandHost != "127.0.0.1" || cfg.OpenWebNetCommandPort != 20000 || cfg.OpenWebNetCommandSec != 3 {
 		t.Fatalf("unexpected openwebnet command defaults: host=%s port=%d timeout=%d", cfg.OpenWebNetCommandHost, cfg.OpenWebNetCommandPort, cfg.OpenWebNetCommandSec)
 	}

@@ -22,6 +22,7 @@ import (
 	"bticino-go-companion/internal/protocol/openwebnet"
 	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
+	"bticino-go-companion/internal/services/discovery"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
@@ -51,6 +52,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init auth store: %w", err)
 	}
+
+	go func() {
+		if err := discovery.Start(ctx, cfg, authStore.NeedsClaim, authStore.DeviceID, logger); err != nil {
+			logger.Printf("mdns service stopped: %v", err)
+		}
+	}()
+
 	guard := security.NewGuard()
 
 	projector := state.NewProjector(cfg.Entrypoints)

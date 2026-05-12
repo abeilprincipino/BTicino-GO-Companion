@@ -15,11 +15,14 @@ type Config struct {
 	ListenAddr            string             `json:"listen_addr"`
 	DataDir               string             `json:"data_dir"`
 	ClaimCode             string             `json:"claim_code"`
+	DeviceName            string             `json:"device_name"`
 	DeviceModel           string             `json:"device_model"`
 	DeviceFirmware        string             `json:"device_firmware"`
 	DeviceIP              string             `json:"device_ip"`
 	DeviceMAC             string             `json:"device_mac"`
 	DeviceWiFiRSSI        *int               `json:"device_wifi_rssi,omitempty"`
+	MDNSEnabled           bool               `json:"mdns_enabled"`
+	MDNSServiceType       string             `json:"mdns_service_type"`
 	OpenWebNetEnabled     bool               `json:"openwebnet_enabled"`
 	OpenWebNetGroup       string             `json:"openwebnet_group"`
 	OpenWebNetListenPort  int                `json:"openwebnet_listen_port"`
@@ -60,11 +63,14 @@ func Default() Config {
 		ListenAddr:            "0.0.0.0:8080",
 		DataDir:               "/home/bticino/cfg/extra/companion",
 		ClaimCode:             "",
+		DeviceName:            "BTicino Companion",
 		DeviceModel:           "unknown",
 		DeviceFirmware:        "unknown",
 		DeviceIP:              "",
 		DeviceMAC:             "",
 		DeviceWiFiRSSI:        nil,
+		MDNSEnabled:           true,
+		MDNSServiceType:       "_bticomp._tcp",
 		OpenWebNetEnabled:     true,
 		OpenWebNetGroup:       "239.255.76.67",
 		OpenWebNetListenPort:  7667,
@@ -151,20 +157,28 @@ func (c *Config) normalize() {
 		c.DataDir = "/home/bticino/cfg/extra/companion"
 	}
 	c.ClaimCode = strings.TrimSpace(c.ClaimCode)
+	c.DeviceName = strings.TrimSpace(c.DeviceName)
 	c.DeviceModel = strings.TrimSpace(c.DeviceModel)
 	c.DeviceFirmware = strings.TrimSpace(c.DeviceFirmware)
 	c.DeviceIP = strings.TrimSpace(c.DeviceIP)
 	c.DeviceMAC = strings.TrimSpace(c.DeviceMAC)
+	c.MDNSServiceType = strings.TrimSpace(c.MDNSServiceType)
 	c.Auth.DeviceID = strings.TrimSpace(c.Auth.DeviceID)
 	c.Auth.ClaimCode = strings.TrimSpace(c.Auth.ClaimCode)
 	c.Auth.BearerToken = strings.TrimSpace(c.Auth.BearerToken)
 	c.Auth.KeyID = strings.TrimSpace(c.Auth.KeyID)
 	c.Auth.RefreshToken = strings.TrimSpace(c.Auth.RefreshToken)
+	if c.DeviceName == "" {
+		c.DeviceName = "BTicino Companion"
+	}
 	if c.DeviceModel == "" {
 		c.DeviceModel = "unknown"
 	}
 	if c.DeviceFirmware == "" {
 		c.DeviceFirmware = "unknown"
+	}
+	if c.MDNSServiceType == "" {
+		c.MDNSServiceType = "_bticomp._tcp"
 	}
 	if strings.TrimSpace(c.OpenWebNetGroup) == "" {
 		c.OpenWebNetGroup = "239.255.76.67"
