@@ -24,7 +24,15 @@ var (
 	ErrNoActiveCall   = errors.New("no active call")
 )
 
-const sipAnswerTimeout = 8 * time.Second
+const (
+	registerCheckInterval = 10 * time.Second
+	registerTimeout       = 4 * time.Second
+	registerExpires       = 600
+	registerSkew          = 10
+	sipAnswerTimeout      = 8 * time.Second
+	sipSDPAudioPort       = 65000
+	sipSDPVideoPort       = 65002
+)
 
 type Manager struct {
 	cfg    config.Config
@@ -44,6 +52,11 @@ type Manager struct {
 	activeIn  *sipgo.DialogServerSession
 	activeOut *sipgo.DialogClientSession
 	dialing   bool
+
+	registerCancel context.CancelFunc
+	registerWG     sync.WaitGroup
+	registerEvery  time.Duration
+	lastRegister   time.Time
 }
 
 func NewManager(cfg config.Config, logger *log.Logger) *Manager {
@@ -122,6 +135,15 @@ func (m *Manager) Start(ctx context.Context) error {
 			}
 		}
 	}()
+
+	m.registerEvery = time.Duration(registerExpires-registerSkew) * time.Second
+	if m.registerEvery <= 0 {
+		m.registerEvery = 10 * time.Minute
+	}
+	registerCtx, registerCancel := context.WithCancel(context.Background())
+	m.registerCancel = registerCancel
+	m.registerWG.Add(1)
+	go m.registrationLoop(registerCtx)
 
 	m.logf("sip manager started transport=%s listen=%s from=%s", transport, listenAddr, m.cfg.MediaSIPFrom)
 	return nil
@@ -358,6 +380,11 @@ func (m *Manager) StreamStop(ctx context.Context) error {
 }
 
 func (m *Manager) Close() error {
+	if m.registerCancel != nil {
+		m.registerCancel()
+	}
+	m.registerWG.Wait()
+
 	if m.srv != nil {
 		_ = m.srv.Close()
 	}
@@ -386,8 +413,8 @@ func (m *Manager) offerSDP(includeDevAddr bool, devAddr string) string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
 	return sipprotocol.BuildOffer(sipprotocol.SDPConfig{
 		Host:           host,
-		AudioPort:      m.cfg.MediaRTPAudioPort,
-		VideoPort:      m.cfg.MediaRTPVideoPort,
+		AudioPort:      sipSDPAudioPort,
+		VideoPort:      sipSDPVideoPort,
 		IncludeDevAddr: includeDevAddr,
 		DevAddr:        strings.TrimSpace(devAddr),
 	})
@@ -397,8 +424,8 @@ func (m *Manager) answerSDP() string {
 	host, _ := hostFromListen(m.cfg.MediaSIPListen)
 	return sipprotocol.BuildAnswer(sipprotocol.SDPConfig{
 		Host:      host,
-		AudioPort: m.cfg.MediaRTPAudioPort,
-		VideoPort: m.cfg.MediaRTPVideoPort,
+		AudioPort: sipSDPAudioPort,
+		VideoPort: sipSDPVideoPort,
 	})
 }
 
@@ -462,4 +489,135 @@ func (m *Manager) logf(format string, args ...any) {
 	if m.logger != nil {
 		m.logger.Printf(format, args...)
 	}
+}
+
+func (m *Manager) registrationLoop(ctx context.Context) {
+	defer m.registerWG.Done()
+
+	// Perform one immediate REGISTER attempt at startup.
+	m.tryRegister(ctx, true)
+
+	ticker := time.NewTicker(registerCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.tryRegister(ctx, false)
+		}
+	}
+}
+
+func (m *Manager) tryRegister(loopCtx context.Context, force bool) {
+	if !m.shouldRegister(force) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(loopCtx, registerTimeout)
+	defer cancel()
+
+	if err := m.registerOnce(ctx); err != nil {
+		m.logf("sip register failed: %v", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.lastRegister = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *Manager) shouldRegister(force bool) bool {
+	if m.client == nil {
+		return false
+	}
+	if registerDomain(m.cfg) == "" {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	busy := m.incoming != nil || m.activeIn != nil || m.activeOut != nil || m.dialing
+	if busy {
+		return false
+	}
+
+	if force || m.lastRegister.IsZero() {
+		return true
+	}
+	return time.Since(m.lastRegister) >= m.registerEvery
+}
+
+func (m *Manager) registerOnce(ctx context.Context) error {
+	domain := registerDomain(m.cfg)
+	if domain == "" {
+		return nil
+	}
+
+	fromUser, _, _ := sipprotocol.ParseFromAddress(m.cfg.MediaSIPFrom)
+	if fromUser == "" {
+		return fmt.Errorf("register from user missing")
+	}
+
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{
+		Scheme: "sip",
+		Host:   domain,
+	})
+	req.SetTransport(strings.ToUpper(normalizeTransport(m.cfg.MediaSIPTransport)))
+	req.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:%s@%s>", fromUser, domain)))
+	req.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", fromUser, domain, sip.GenerateTagN(16))))
+	req.AppendHeader(sip.NewHeader("Contact", formatContactValue(buildContactHeader(m.cfg))))
+	req.AppendHeader(sip.NewHeader("Expires", strconv.Itoa(registerExpires)))
+
+	res, err := m.client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		return fmt.Errorf("empty register response")
+	}
+
+	if (res.StatusCode == sip.StatusUnauthorized || res.StatusCode == sip.StatusProxyAuthRequired) && strings.TrimSpace(m.cfg.MediaSIPAuthPass) != "" {
+		authRes, authErr := m.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
+			Username: inviteAuthUser(m.cfg),
+			Password: strings.TrimSpace(m.cfg.MediaSIPAuthPass),
+		})
+		if authErr != nil {
+			return fmt.Errorf("register digest auth failed: %w", authErr)
+		}
+		res = authRes
+	}
+
+	if !res.IsSuccess() {
+		return fmt.Errorf("register failed status=%d", res.StatusCode)
+	}
+	return nil
+}
+
+func registerDomain(cfg config.Config) string {
+	if domain := strings.TrimSpace(cfg.MediaSIPDomain); domain != "" {
+		return domain
+	}
+	target, err := sipprotocol.ResolveInviteTarget(cfg.MediaSIPTo, cfg.MediaSIPDomain, false)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(target.URI.Host)
+}
+
+func formatContactValue(contact sip.ContactHeader) string {
+	host := strings.TrimSpace(contact.Address.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := contact.Address.Port
+	if port <= 0 {
+		port = 5070
+	}
+	user := strings.TrimSpace(contact.Address.User)
+	if user == "" {
+		user = "webrtc"
+	}
+	return fmt.Sprintf("<sip:%s@%s:%d>", user, host, port)
 }

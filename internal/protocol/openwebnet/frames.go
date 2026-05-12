@@ -21,6 +21,14 @@ func BuildUnlockClose(devAddr string) string {
 	return fmt.Sprintf("*8*20*%s##", strings.TrimSpace(devAddr))
 }
 
+func BuildStreamStartVideo(port int) string {
+	return fmt.Sprintf("*7*300#127#0#0#1#%d#0*##", port)
+}
+
+func BuildStreamStartAudio(port int) string {
+	return fmt.Sprintf("*7*300#127#0#0#1#%d#2*##", port)
+}
+
 func IsACK(frame string) bool {
 	return strings.TrimSpace(frame) == FrameACK
 }

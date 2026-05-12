@@ -2,8 +2,11 @@ package openwebnet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -11,12 +14,18 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/config"
-	"bticino-go-companion/internal/protocol/openwebnet"
+	openwebnetproto "bticino-go-companion/internal/protocol/openwebnet"
 )
 
 var (
-	ErrHandshakeFailed = errors.New("openwebnet handshake failed")
-	ErrUnexpectedReply = errors.New("openwebnet unexpected reply")
+	ErrHandshakeFailed      = errors.New("openwebnet handshake failed")
+	ErrAuthenticationNeeded = errors.New("openwebnet authentication required")
+	ErrUnexpectedReply      = errors.New("openwebnet unexpected reply")
+)
+
+const (
+	ownAckFrame  = "*#*1##"
+	ownNackFrame = "*#*0##"
 )
 
 var frameRegexp = regexp.MustCompile(`\*#?.*?##`)
@@ -25,6 +34,7 @@ type CommandClient struct {
 	host        string
 	port        int
 	timeout     time.Duration
+	password    string
 	unlockDelay time.Duration
 	traceSink   func(string, map[string]any)
 }
@@ -43,6 +53,7 @@ func NewCommandClient(cfg config.Config) *CommandClient {
 		host:        strings.TrimSpace(cfg.OpenWebNetCommandHost),
 		port:        cfg.OpenWebNetCommandPort,
 		timeout:     timeout,
+		password:    strings.TrimSpace(cfg.OpenWebNetCommandPassword),
 		unlockDelay: 2 * time.Second,
 	}
 }
@@ -56,7 +67,7 @@ func (c *CommandClient) Unlock(ctx context.Context, devAddr string) error {
 		return errors.New("empty devaddr")
 	}
 	return c.exec(ctx, func(reader *frameReader) error {
-		if err := c.sendAndExpect(reader, openwebnetproto.BuildUnlockOpen(devAddr)); err != nil {
+		if err := c.sendAndExpectSuccess(reader, "lock.unlock.open", openwebnetproto.BuildUnlockOpen(devAddr)); err != nil {
 			return fmt.Errorf("unlock open: %w", err)
 		}
 		timer := time.NewTimer(c.unlockDelay)
@@ -66,8 +77,23 @@ func (c *CommandClient) Unlock(ctx context.Context, devAddr string) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-		if err := c.sendAndExpect(reader, openwebnetproto.BuildUnlockClose(devAddr)); err != nil {
+		if err := c.sendAndExpectSuccess(reader, "lock.unlock.close", openwebnetproto.BuildUnlockClose(devAddr)); err != nil {
 			return fmt.Errorf("unlock close: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *CommandClient) StreamStart(ctx context.Context, audioPort, videoPort int) error {
+	if audioPort <= 0 || videoPort <= 0 {
+		return errors.New("invalid stream ports")
+	}
+	return c.exec(ctx, func(reader *frameReader) error {
+		if err := c.sendAndExpectSuccess(reader, "stream.start.video", openwebnetproto.BuildStreamStartVideo(videoPort)); err != nil {
+			return fmt.Errorf("stream start video: %w", err)
+		}
+		if err := c.sendAndExpectSuccess(reader, "stream.start.audio", openwebnetproto.BuildStreamStartAudio(audioPort)); err != nil {
+			return fmt.Errorf("stream start audio: %w", err)
 		}
 		return nil
 	})
@@ -86,7 +112,7 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 
 	reader := &frameReader{conn: conn}
 	handshake := "*99*0##"
-	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "frame": handshake})
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "handshake", "frame": handshake})
 	if _, err := conn.Write([]byte(handshake)); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}
@@ -94,27 +120,231 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 	if err != nil {
 		return fmt.Errorf("read handshake: %w", err)
 	}
-	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "frame": resp, "mapped": false})
-	if !openwebnetproto.IsACK(resp) {
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "handshake", "frame": resp, "mapped": false})
+
+	switch strings.TrimSpace(resp) {
+	case ownAckFrame:
+	case "*98*2##":
+		if c.password == "" {
+			return ErrAuthenticationNeeded
+		}
+		if err := c.authenticateHMAC(reader); err != nil {
+			return fmt.Errorf("%w: %v", ErrHandshakeFailed, err)
+		}
+	default:
 		return fmt.Errorf("%w: %s", ErrHandshakeFailed, strings.TrimSpace(resp))
 	}
+
 	return fn(reader)
 }
 
-func (c *CommandClient) sendAndExpect(reader *frameReader, frame string) error {
-	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "frame": frame})
+func (c *CommandClient) sendAndExpectSuccess(reader *frameReader, operation string, frame string, acceptedFrames ...string) error {
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "operation": operation, "frame": frame})
 	if _, err := reader.conn.Write([]byte(frame)); err != nil {
 		return err
 	}
+
 	resp, err := reader.readFrame()
 	if err != nil {
 		return err
 	}
-	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "frame": resp, "mapped": false})
-	if !openwebnetproto.IsACK(resp) {
-		return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(resp))
+
+	frames := []string{resp}
+	accepted := false
+	terminal := ""
+	switch {
+	case resp == ownNackFrame:
+		terminal = "nack"
+	case resp == ownAckFrame:
+		accepted = true
+		terminal = "ack"
+	case isAcceptedFrame(resp, acceptedFrames):
+		accepted = true
+		terminal = "accepted_frame"
+	default:
+		terminal = "unexpected"
+	}
+
+	if accepted {
+		for i := 0; i < 8; i++ {
+			next, timedOut, readErr := readFrameWithTimeout(reader, 40*time.Millisecond)
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					terminal = "accepted_eof"
+					break
+				}
+				return readErr
+			}
+			if timedOut {
+				terminal = "accepted_timeout"
+				break
+			}
+			frames = append(frames, next)
+			switch {
+			case next == ownAckFrame:
+				terminal = "ack"
+			case next == ownNackFrame:
+				accepted = false
+				terminal = "nack"
+				i = 8
+			case isAcceptedFrame(next, acceptedFrames):
+				terminal = "accepted_frame"
+			default:
+				accepted = false
+				terminal = "unexpected"
+				i = 8
+			}
+		}
+	}
+
+	finalFrame := frames[len(frames)-1]
+	c.emitTrace("rx", map[string]any{
+		"transport": "tcp_command",
+		"operation": operation,
+		"frame":     finalFrame,
+		"frames":    frames,
+		"accepted":  accepted,
+		"terminal":  terminal,
+	})
+	if !accepted {
+		return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(finalFrame))
 	}
 	return nil
+}
+
+func (c *CommandClient) authenticateHMAC(reader *frameReader) error {
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": ownAckFrame})
+	if _, err := reader.conn.Write([]byte(ownAckFrame)); err != nil {
+		return fmt.Errorf("send auth ack: %w", err)
+	}
+
+	challenge, err := reader.readFrame()
+	if err != nil {
+		return fmt.Errorf("read auth challenge: %w", err)
+	}
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": challenge})
+
+	ra, err := challengeToHex(challenge)
+	if err != nil {
+		return err
+	}
+	rb := sha256Hex(fmt.Sprintf("time%d", time.Now().UnixMilli()))
+	kab := sha256Hex(c.password)
+	const (
+		a = "736F70653E"
+		b = "636F70653E"
+	)
+	hmac := sha256Hex(ra + rb + a + b + kab)
+	payload := "*#" + hexToDigit(rb) + "*" + hexToDigit(hmac) + "##"
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": payload})
+	if _, err := reader.conn.Write([]byte(payload)); err != nil {
+		return fmt.Errorf("send auth payload: %w", err)
+	}
+
+	serverHMAC, err := reader.readFrame()
+	if err != nil {
+		return fmt.Errorf("read auth server hmac: %w", err)
+	}
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": serverHMAC})
+	if !strings.HasPrefix(serverHMAC, "*#") || !strings.HasSuffix(serverHMAC, "##") {
+		return fmt.Errorf("unexpected auth server payload: %s", serverHMAC)
+	}
+
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": ownAckFrame})
+	if _, err := reader.conn.Write([]byte(ownAckFrame)); err != nil {
+		return fmt.Errorf("send auth final ack: %w", err)
+	}
+	finalAck, err := reader.readFrame()
+	if err != nil {
+		return fmt.Errorf("read auth final ack: %w", err)
+	}
+	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": finalAck})
+	if strings.TrimSpace(finalAck) != ownAckFrame {
+		return fmt.Errorf("unexpected auth final ack: %s", finalAck)
+	}
+	return nil
+}
+
+func isAcceptedFrame(frame string, acceptedFrames []string) bool {
+	for _, candidate := range acceptedFrames {
+		if frame == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func readFrameWithTimeout(reader *frameReader, timeout time.Duration) (string, bool, error) {
+	if err := reader.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", false, err
+	}
+	frame, err := reader.readFrame()
+	clearErr := reader.conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			if clearErr != nil {
+				return "", false, clearErr
+			}
+			return "", true, nil
+		}
+		if clearErr != nil {
+			return "", false, clearErr
+		}
+		return "", false, err
+	}
+	if clearErr != nil {
+		return "", false, clearErr
+	}
+	return frame, false, nil
+}
+
+func challengeToHex(frame string) (string, error) {
+	if !strings.HasPrefix(frame, "*#") || !strings.HasSuffix(frame, "##") {
+		return "", fmt.Errorf("invalid auth challenge: %s", frame)
+	}
+	digits := strings.TrimSuffix(strings.TrimPrefix(frame, "*#"), "##")
+	if digits == "" || len(digits)%4 != 0 {
+		return "", fmt.Errorf("invalid auth challenge digits: %s", frame)
+	}
+	return digitToHex(digits)
+}
+
+func digitToHex(digits string) (string, error) {
+	var builder strings.Builder
+	for i := 0; i < len(digits); i += 4 {
+		pairA, err := strconv.Atoi(digits[i : i+2])
+		if err != nil {
+			return "", fmt.Errorf("invalid auth challenge pair: %w", err)
+		}
+		pairB, err := strconv.Atoi(digits[i+2 : i+4])
+		if err != nil {
+			return "", fmt.Errorf("invalid auth challenge pair: %w", err)
+		}
+		builder.WriteString(fmt.Sprintf("%02x", pairA))
+		builder.WriteString(fmt.Sprintf("%02x", pairB))
+	}
+	return builder.String(), nil
+}
+
+func hexToDigit(hexString string) string {
+	var builder strings.Builder
+	for _, c := range hexString {
+		v, err := strconv.ParseInt(string(c), 16, 64)
+		if err != nil {
+			continue
+		}
+		if v < 10 {
+			builder.WriteByte('0')
+		}
+		builder.WriteString(strconv.FormatInt(v, 10))
+	}
+	return builder.String()
+}
+
+func sha256Hex(input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *frameReader) readFrame() (string, error) {

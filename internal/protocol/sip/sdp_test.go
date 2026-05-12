@@ -24,4 +24,10 @@ func TestBuildAnswerContainsSpeexAndH264(t *testing.T) {
 	if !strings.Contains(answer, "speex/8000") || !strings.Contains(answer, "H264/90000") {
 		t.Fatalf("unexpected answer: %s", answer)
 	}
+	if !strings.Contains(answer, "m=audio 65000 RTP/SAVP 110") {
+		t.Fatalf("expected default audio port 65000 in answer: %s", answer)
+	}
+	if !strings.Contains(answer, "m=video 65002 RTP/SAVP 96") {
+		t.Fatalf("expected default video port 65002 in answer: %s", answer)
+	}
 }

@@ -12,39 +12,41 @@ import (
 )
 
 type Config struct {
-	ListenAddr            string             `json:"listen_addr"`
-	DataDir               string             `json:"data_dir"`
-	ClaimCode             string             `json:"claim_code"`
-	DeviceName            string             `json:"device_name"`
-	DeviceModel           string             `json:"device_model"`
-	DeviceFirmware        string             `json:"device_firmware"`
-	DeviceIP              string             `json:"device_ip"`
-	DeviceMAC             string             `json:"device_mac"`
-	DeviceWiFiRSSI        *int               `json:"device_wifi_rssi,omitempty"`
-	MDNSEnabled           bool               `json:"mdns_enabled"`
-	MDNSServiceType       string             `json:"mdns_service_type"`
-	OpenWebNetEnabled     bool               `json:"openwebnet_enabled"`
-	OpenWebNetGroup       string             `json:"openwebnet_group"`
-	OpenWebNetListenPort  int                `json:"openwebnet_listen_port"`
-	OpenWebNetReadBuffer  int                `json:"openwebnet_read_buffer"`
-	OpenWebNetCommandHost string             `json:"openwebnet_command_host"`
-	OpenWebNetCommandPort int                `json:"openwebnet_command_port"`
-	OpenWebNetCommandSec  int                `json:"openwebnet_command_timeout_sec"`
-	MediaSIPEnabled       bool               `json:"media_sip_enabled"`
-	MediaSIPTransport     string             `json:"media_sip_transport"`
-	MediaSIPListen        string             `json:"media_sip_listen"`
-	MediaSIPFrom          string             `json:"media_sip_from"`
-	MediaSIPTo            string             `json:"media_sip_to"`
-	MediaSIPDomain        string             `json:"media_sip_domain"`
-	MediaSIPAuthUser      string             `json:"media_sip_auth_user"`
-	MediaSIPAuthPass      string             `json:"media_sip_auth_pass"`
-	MediaRTSPEnabled      bool               `json:"media_rtsp_enabled"`
-	MediaRTSPAddress      string             `json:"media_rtsp_address"`
-	MediaRTSPPathMain     string             `json:"media_rtsp_path_main"`
-	MediaRTPAudioPort     int                `json:"media_rtp_audio_port"`
-	MediaRTPVideoPort     int                `json:"media_rtp_video_port"`
-	Auth                  AuthState          `json:"auth"`
-	Entrypoints           []entrypoint.Model `json:"entrypoints"`
+	ListenAddr                string
+	DataDir                   string
+	ClaimCode                 string
+	DeviceName                string
+	DeviceModel               string
+	DeviceFirmware            string
+	DeviceIP                  string
+	DeviceMAC                 string
+	DeviceWiFiRSSI            *int
+	MDNSEnabled               bool
+	MDNSServiceType           string
+	OpenWebNetEnabled         bool
+	OpenWebNetGroup           string
+	OpenWebNetListenPort      int
+	OpenWebNetReadBuffer      int
+	OpenWebNetCommandHost     string
+	OpenWebNetCommandPort     int
+	OpenWebNetCommandSec      int
+	OpenWebNetCommandPassword string
+	MediaSIPEnabled           bool
+	MediaSIPTransport         string
+	MediaSIPListen            string
+	MediaSIPFrom              string
+	MediaSIPTo                string
+	MediaSIPDomain            string
+	MediaSIPAuthUser          string
+	MediaSIPAuthPass          string
+	MediaRTSPEnabled          bool
+	MediaRTSPAddress          string
+	MediaRTSPPathMain         string
+	MediaRTPAudioPort         int
+	MediaRTPVideoPort         int
+
+	Auth        AuthState
+	Entrypoints []entrypoint.Model
 }
 
 type AuthState struct {
@@ -58,39 +60,46 @@ type AuthState struct {
 	RefreshTokenExpiresAt time.Time `json:"refresh_token_expires_at,omitempty"`
 }
 
+type PersistedConfig struct {
+	Auth                      AuthState          `json:"auth"`
+	Entrypoints               []entrypoint.Model `json:"entrypoints"`
+	OpenWebNetCommandPassword string             `json:"openwebnet_command_password,omitempty"`
+}
+
 func Default() Config {
 	return Config{
-		ListenAddr:            "0.0.0.0:8080",
-		DataDir:               "/home/bticino/cfg/extra/companion",
-		ClaimCode:             "",
-		DeviceName:            "BTicino Companion",
-		DeviceModel:           "unknown",
-		DeviceFirmware:        "unknown",
-		DeviceIP:              "",
-		DeviceMAC:             "",
-		DeviceWiFiRSSI:        nil,
-		MDNSEnabled:           true,
-		MDNSServiceType:       "_bticomp._tcp",
-		OpenWebNetEnabled:     true,
-		OpenWebNetGroup:       "239.255.76.67",
-		OpenWebNetListenPort:  7667,
-		OpenWebNetReadBuffer:  65535,
-		OpenWebNetCommandHost: "127.0.0.1",
-		OpenWebNetCommandPort: 20000,
-		OpenWebNetCommandSec:  3,
-		MediaSIPEnabled:       true,
-		MediaSIPTransport:     "tcp",
-		MediaSIPListen:        "0.0.0.0:5070",
-		MediaSIPFrom:          "webrtc@127.0.0.1",
-		MediaSIPTo:            "c300x@127.0.0.1",
-		MediaSIPDomain:        "",
-		MediaSIPAuthUser:      "",
-		MediaSIPAuthPass:      "",
-		MediaRTSPEnabled:      true,
-		MediaRTSPAddress:      ":8554",
-		MediaRTSPPathMain:     "doorbell",
-		MediaRTPAudioPort:     5000,
-		MediaRTPVideoPort:     5007,
+		ListenAddr:                "0.0.0.0:8080",
+		DataDir:                   "/home/bticino/cfg/extra/companion",
+		ClaimCode:                 "",
+		DeviceName:                "BTicino Companion",
+		DeviceModel:               "unknown",
+		DeviceFirmware:            "unknown",
+		DeviceIP:                  "",
+		DeviceMAC:                 "",
+		DeviceWiFiRSSI:            nil,
+		MDNSEnabled:               true,
+		MDNSServiceType:           "_bticomp._tcp",
+		OpenWebNetEnabled:         true,
+		OpenWebNetGroup:           "239.255.76.67",
+		OpenWebNetListenPort:      7667,
+		OpenWebNetReadBuffer:      65535,
+		OpenWebNetCommandHost:     "127.0.0.1",
+		OpenWebNetCommandPort:     20000,
+		OpenWebNetCommandSec:      3,
+		OpenWebNetCommandPassword: "",
+		MediaSIPEnabled:           true,
+		MediaSIPTransport:         "tcp",
+		MediaSIPListen:            "0.0.0.0:5070",
+		MediaSIPFrom:              "webrtc@127.0.0.1",
+		MediaSIPTo:                "",
+		MediaSIPDomain:            "",
+		MediaSIPAuthUser:          "",
+		MediaSIPAuthPass:          "",
+		MediaRTSPEnabled:          true,
+		MediaRTSPAddress:          ":8554",
+		MediaRTSPPathMain:         "doorbell",
+		MediaRTPAudioPort:         5000,
+		MediaRTPVideoPort:         5007,
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -108,21 +117,50 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	path = strings.TrimSpace(path)
 	if path == "" {
+		cfg.normalize()
 		return cfg, nil
 	}
 
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			cfg.normalize()
 			return cfg, nil
 		}
 		return Config{}, err
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return Config{}, err
+
+	var persisted PersistedConfig
+	if err := json.Unmarshal(b, &persisted); err != nil {
+		return Config{}, fmt.Errorf("parse persisted config: %w", err)
 	}
+
+	cfg.Auth = persisted.Auth
+	cfg.OpenWebNetCommandPassword = persisted.OpenWebNetCommandPassword
+	if len(persisted.Entrypoints) > 0 {
+		cfg.Entrypoints = persisted.Entrypoints
+	}
+
 	cfg.normalize()
 	return cfg, nil
+}
+
+func Save(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	persisted := PersistedConfig{
+		Auth:                      cfg.Auth,
+		Entrypoints:               cfg.Entrypoints,
+		OpenWebNetCommandPassword: strings.TrimSpace(cfg.OpenWebNetCommandPassword),
+	}
+
+	b, err := json.MarshalIndent(persisted, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 func ResolvePath(path string) (string, error) {
@@ -135,18 +173,6 @@ func ResolvePath(path string) (string, error) {
 		return "", fmt.Errorf("resolve executable: %w", err)
 	}
 	return filepath.Join(filepath.Dir(exe), "config.json"), nil
-}
-
-func Save(path string, cfg Config) error {
-	cfg.normalize()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 func (c *Config) normalize() {
@@ -198,6 +224,7 @@ func (c *Config) normalize() {
 	if c.OpenWebNetCommandSec <= 0 {
 		c.OpenWebNetCommandSec = 3
 	}
+	c.OpenWebNetCommandPassword = strings.TrimSpace(c.OpenWebNetCommandPassword)
 	if strings.TrimSpace(c.MediaSIPTransport) == "" {
 		c.MediaSIPTransport = "tcp"
 	}

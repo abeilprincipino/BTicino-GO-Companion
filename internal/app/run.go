@@ -126,7 +126,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 		traceBroker.Publish(rec)
 	})
-	mediaService := media.NewService(sipManager)
+	mediaBackend := media.NewCompositeBackend(
+		sipManager,
+		commandClient,
+		cfg.MediaRTPAudioPort,
+		cfg.MediaRTPVideoPort,
+	)
+	mediaService := media.NewService(mediaBackend)
 
 	if cfg.MediaRTSPEnabled {
 		rtspServer := rtspadapter.NewServer(cfg, logger, mediaService)

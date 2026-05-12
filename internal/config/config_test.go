@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	cfg := Default()
@@ -9,6 +12,9 @@ func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	}
 	if cfg.OpenWebNetCommandHost != "127.0.0.1" || cfg.OpenWebNetCommandPort != 20000 || cfg.OpenWebNetCommandSec != 3 {
 		t.Fatalf("unexpected openwebnet command defaults: host=%s port=%d timeout=%d", cfg.OpenWebNetCommandHost, cfg.OpenWebNetCommandPort, cfg.OpenWebNetCommandSec)
+	}
+	if cfg.OpenWebNetCommandPassword != "" {
+		t.Fatalf("expected empty openwebnet command password by default, got %q", cfg.OpenWebNetCommandPassword)
 	}
 	if !cfg.MediaRTSPEnabled || cfg.MediaRTSPAddress != ":8554" || cfg.MediaRTSPPathMain != "doorbell" {
 		t.Fatalf("unexpected rtsp defaults: enabled=%v addr=%s main=%s", cfg.MediaRTSPEnabled, cfg.MediaRTSPAddress, cfg.MediaRTSPPathMain)
@@ -22,5 +28,24 @@ func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	ep := cfg.Entrypoints[0]
 	if ep.DevAddr != "20" || !ep.HasStream || !ep.HasUnlock || !ep.HasRing {
 		t.Fatalf("unexpected default entrypoint: %+v", ep)
+	}
+}
+
+func TestSaveLoadPersistsOpenWebNetCommandPassword(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.OpenWebNetCommandPassword = "pw123"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.OpenWebNetCommandPassword != "pw123" {
+		t.Fatalf("expected persisted openwebnet command password, got %q", loaded.OpenWebNetCommandPassword)
 	}
 }

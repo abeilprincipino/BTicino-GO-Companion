@@ -9,6 +9,12 @@ func TestFrameBuilders(t *testing.T) {
 	if got := BuildUnlockClose("21"); got != "*8*20*21##" {
 		t.Fatalf("unexpected close frame: %s", got)
 	}
+	if got := BuildStreamStartVideo(5007); got != "*7*300#127#0#0#1#5007#0*##" {
+		t.Fatalf("unexpected stream video frame: %s", got)
+	}
+	if got := BuildStreamStartAudio(5000); got != "*7*300#127#0#0#1#5000#2*##" {
+		t.Fatalf("unexpected stream audio frame: %s", got)
+	}
 }
 
 func TestFramePredicates(t *testing.T) {

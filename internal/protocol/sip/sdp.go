@@ -80,14 +80,14 @@ func normalizeHost(host string) string {
 
 func normalizeAudioPort(port int) int {
 	if port <= 0 {
-		return 5000
+		return 65000
 	}
 	return port
 }
 
 func normalizeVideoPort(port int) int {
 	if port <= 0 {
-		return 5007
+		return 65002
 	}
 	return port
 }

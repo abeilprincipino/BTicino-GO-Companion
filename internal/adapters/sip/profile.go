@@ -49,6 +49,13 @@ func resolveSIPConfig(cfg config.Config) (config.Config, error) {
 		out.MediaSIPAuthUser = profile.AuthUser
 	}
 
+	to := strings.TrimSpace(out.MediaSIPTo)
+	if to == "" {
+		if defaultTarget, ok := defaultSIPTargetFromModel(out.DeviceModel); ok {
+			out.MediaSIPTo = defaultTarget
+		}
+	}
+
 	fromUser, _, _ := sipprotocol.ParseFromAddress(out.MediaSIPFrom)
 	if strings.TrimSpace(fromUser) == "" {
 		return cfg, ErrSIPProfileUnset
@@ -175,4 +182,14 @@ func splitNonEmptyLines(content string) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func defaultSIPTargetFromModel(deviceModel string) (string, bool) {
+	model := strings.ToLower(strings.TrimSpace(deviceModel))
+	switch model {
+	case "c300x", "c100x":
+		return model + "@127.0.0.1", true
+	default:
+		return "", false
+	}
 }
