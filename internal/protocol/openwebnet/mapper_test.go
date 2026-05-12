@@ -47,3 +47,15 @@ func TestMapperFloorRingLifecycle(t *testing.T) {
 		t.Fatalf("unexpected floor end flow: %+v", events)
 	}
 }
+
+func TestMapperViewRequestUsesRequestedEntrypointAddress(t *testing.T) {
+	mapper := NewMapper()
+	events := mapper.Map(Message{System: "OPEN", Raw: "*8*1#5#4#21*12##"})
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	payload := events[0].Payload
+	if payload["devaddr"] != "21" {
+		t.Fatalf("expected devaddr 21, got %#v", payload["devaddr"])
+	}
+}

@@ -34,3 +34,23 @@ func TestFramePredicates(t *testing.T) {
 		t.Fatal("expected audio start")
 	}
 }
+
+func TestExtractAddress(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "ring_start", raw: "*8*1#1#4#10*21##", want: "21"},
+		{name: "view_request_target", raw: "*8*1#5#4#21*12##", want: "21"},
+		{name: "unlock_open", raw: "*8*19*22##", want: "22"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractAddress(tc.raw); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}

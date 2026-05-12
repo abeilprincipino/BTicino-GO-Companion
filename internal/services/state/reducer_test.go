@@ -13,7 +13,7 @@ func TestApplyTransitionStreamStopKeepsRingingState(t *testing.T) {
 		Ringing:      true,
 	}
 
-	applyTransition(&s, event.TypeStreamStopped)
+	applyTransition(&s, event.Envelope{Type: event.TypeStreamStopped})
 
 	if s.StreamActive {
 		t.Fatal("expected stream inactive")
@@ -25,7 +25,7 @@ func TestApplyTransitionStreamStopKeepsRingingState(t *testing.T) {
 
 func TestApplyTransitionCallAnsweredSetsActive(t *testing.T) {
 	s := Snapshot{CallState: CallStateRinging}
-	applyTransition(&s, event.TypeCallAnswered)
+	applyTransition(&s, event.Envelope{Type: event.TypeCallAnswered})
 	if s.CallState != CallStateActive {
 		t.Fatalf("expected active state, got %s", s.CallState)
 	}
@@ -33,7 +33,7 @@ func TestApplyTransitionCallAnsweredSetsActive(t *testing.T) {
 
 func TestApplyTransitionFloorRingTogglesOnlyFloorFlag(t *testing.T) {
 	s := Snapshot{CallState: CallStateIdle}
-	applyTransition(&s, event.TypeRingFloorStarted)
+	applyTransition(&s, event.Envelope{Type: event.TypeRingFloorStarted})
 	if !s.FloorRinging {
 		t.Fatal("expected floor ringing true")
 	}
@@ -41,8 +41,29 @@ func TestApplyTransitionFloorRingTogglesOnlyFloorFlag(t *testing.T) {
 		t.Fatalf("floor ring should not alter call state, got %s", s.CallState)
 	}
 
-	applyTransition(&s, event.TypeRingFloorEnded)
+	applyTransition(&s, event.Envelope{Type: event.TypeRingFloorEnded})
 	if s.FloorRinging {
 		t.Fatal("expected floor ringing false")
+	}
+}
+
+func TestApplyTransitionTracksActiveEntrypoint(t *testing.T) {
+	s := Snapshot{}
+	applyTransition(&s, event.Envelope{Type: event.TypeCallViewRequested, EntrypointID: "gate2"})
+	if s.ActiveEntrypoint != "gate2" {
+		t.Fatalf("expected gate2, got %q", s.ActiveEntrypoint)
+	}
+
+	applyTransition(&s, event.Envelope{Type: event.TypeStreamStarted, EntrypointID: "gate2"})
+	if !s.StreamActive {
+		t.Fatal("expected stream active")
+	}
+	if s.ActiveEntrypoint != "gate2" {
+		t.Fatalf("expected gate2 while streaming, got %q", s.ActiveEntrypoint)
+	}
+
+	applyTransition(&s, event.Envelope{Type: event.TypeStreamStopped})
+	if s.ActiveEntrypoint != "" {
+		t.Fatalf("expected active entrypoint cleared, got %q", s.ActiveEntrypoint)
 	}
 }

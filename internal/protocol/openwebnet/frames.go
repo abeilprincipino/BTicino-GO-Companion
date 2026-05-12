@@ -72,6 +72,12 @@ func IsStreamProbe(frame string) bool {
 }
 
 func ExtractAddress(frame string) string {
+	if IsViewRequest(frame) {
+		if addr := extractViewRequestAddress(frame); addr != "" {
+			return addr
+		}
+	}
+
 	trimmed := strings.TrimSpace(frame)
 	trimmed = strings.TrimPrefix(trimmed, "*")
 	trimmed = strings.TrimSuffix(trimmed, "##")
@@ -80,4 +86,23 @@ func ExtractAddress(frame string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[2])
+}
+
+func extractViewRequestAddress(frame string) string {
+	trimmed := strings.TrimSpace(frame)
+	trimmed = strings.TrimPrefix(trimmed, "*")
+	trimmed = strings.TrimSuffix(trimmed, "##")
+	parts := strings.Split(trimmed, "*")
+	if len(parts) < 2 {
+		return ""
+	}
+	segment := strings.TrimSpace(parts[1])
+	if segment == "" {
+		return ""
+	}
+	idx := strings.LastIndex(segment, "#")
+	if idx < 0 || idx+1 >= len(segment) {
+		return ""
+	}
+	return strings.TrimSpace(segment[idx+1:])
 }

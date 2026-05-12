@@ -96,7 +96,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		Addr:         cfg.ListenAddr,
 		Handler:      nil,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 0,
 		IdleTimeout:  30 * time.Second,
 	}
 
@@ -133,6 +133,25 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.MediaRTPVideoPort,
 	)
 	mediaService := media.NewService(mediaBackend)
+	mediaService.SetTransitionSink(func(tr media.Transition) {
+		if strings.TrimSpace(tr.Kind) == "" {
+			return
+		}
+		payload := map[string]any{
+			"source": strings.TrimSpace(tr.Source),
+			"reason": strings.TrimSpace(tr.Reason),
+		}
+		if strings.TrimSpace(tr.DevAddr) != "" {
+			payload["devaddr"] = strings.TrimSpace(tr.DevAddr)
+		}
+		publish(event.Envelope{
+			Type:         tr.Kind,
+			TS:           time.Now(),
+			Source:       strings.TrimSpace(tr.Source),
+			EntrypointID: strings.TrimSpace(tr.EntrypointID),
+			Payload:      payload,
+		})
+	})
 
 	if cfg.MediaRTSPEnabled {
 		rtspServer := rtspadapter.NewServer(cfg, logger, mediaService)
@@ -302,6 +321,7 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 	if err != nil {
 		return config.Config{}, false, err
 	}
+	loaded.DataDir = dir
 	return loaded, true, nil
 }
 

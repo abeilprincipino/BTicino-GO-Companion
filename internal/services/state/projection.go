@@ -9,14 +9,15 @@ import (
 )
 
 type Snapshot struct {
-	BootTime      time.Time          `json:"boot_time"`
-	CallState     string             `json:"call_state"`
-	StreamActive  bool               `json:"stream_active"`
-	Ringing       bool               `json:"ringing"`
-	FloorRinging  bool               `json:"floor_ringing"`
-	LastEventType string             `json:"last_event_type,omitempty"`
-	LastEventTS   *time.Time         `json:"last_event_ts,omitempty"`
-	Entrypoints   []entrypoint.Model `json:"entrypoints"`
+	BootTime         time.Time          `json:"boot_time"`
+	CallState        string             `json:"call_state"`
+	StreamActive     bool               `json:"stream_active"`
+	ActiveEntrypoint string             `json:"active_entrypoint,omitempty"`
+	Ringing          bool               `json:"ringing"`
+	FloorRinging     bool               `json:"floor_ringing"`
+	LastEventType    string             `json:"last_event_type,omitempty"`
+	LastEventTS      *time.Time         `json:"last_event_ts,omitempty"`
+	Entrypoints      []entrypoint.Model `json:"entrypoints"`
 }
 
 type Projector struct {
@@ -50,7 +51,7 @@ func (p *Projector) Apply(ev event.Envelope) event.Envelope {
 	ts := ev.TS
 	s.LastEventTS = &ts
 
-	applyTransition(s, ev.Type)
+	applyTransition(s, ev)
 
 	return ev
 }

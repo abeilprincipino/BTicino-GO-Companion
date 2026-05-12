@@ -15,6 +15,14 @@ type backendStub struct {
 	stopErr      error
 }
 
+type transitionRecorder struct {
+	items []Transition
+}
+
+func (r *transitionRecorder) record(tr Transition) {
+	r.items = append(r.items, tr)
+}
+
 func (b *backendStub) StreamStart(_ context.Context, devAddr string) error {
 	b.startCalls++
 	b.startDevAddr = devAddr
@@ -52,6 +60,8 @@ func TestServiceManualStartStop(t *testing.T) {
 func TestServiceReaderLifecycleAutostartStop(t *testing.T) {
 	backend := &backendStub{}
 	svc := NewService(backend)
+	rec := &transitionRecorder{}
+	svc.SetTransitionSink(rec.record)
 
 	if err := svc.ReaderJoin(context.Background(), "s1", "main", "20"); err != nil {
 		t.Fatalf("reader join failed: %v", err)
@@ -61,6 +71,15 @@ func TestServiceReaderLifecycleAutostartStop(t *testing.T) {
 	}
 	if backend.startCalls != 1 || backend.stopCalls != 1 {
 		t.Fatalf("unexpected backend calls start=%d stop=%d", backend.startCalls, backend.stopCalls)
+	}
+	if len(rec.items) != 2 {
+		t.Fatalf("expected 2 transitions, got %d", len(rec.items))
+	}
+	if rec.items[0].Kind != "stream.started" || rec.items[0].EntrypointID != "main" || rec.items[0].DevAddr != "20" {
+		t.Fatalf("unexpected start transition: %+v", rec.items[0])
+	}
+	if rec.items[1].Kind != "stream.stopped" || rec.items[1].EntrypointID != "main" || rec.items[1].DevAddr != "20" {
+		t.Fatalf("unexpected stop transition: %+v", rec.items[1])
 	}
 }
 

@@ -136,6 +136,7 @@ func Load(path string) (Config, error) {
 	}
 
 	cfg.Auth = persisted.Auth
+	cfg.ClaimCode = strings.TrimSpace(persisted.Auth.ClaimCode)
 	cfg.OpenWebNetCommandPassword = persisted.OpenWebNetCommandPassword
 	if len(persisted.Entrypoints) > 0 {
 		cfg.Entrypoints = persisted.Entrypoints
@@ -149,9 +150,10 @@ func Save(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	cfg.normalize()
 
 	persisted := PersistedConfig{
-		Auth:                      cfg.Auth,
+		Auth:                      configAuthState(cfg),
 		Entrypoints:               cfg.Entrypoints,
 		OpenWebNetCommandPassword: strings.TrimSpace(cfg.OpenWebNetCommandPassword),
 	}
@@ -191,6 +193,12 @@ func (c *Config) normalize() {
 	c.MDNSServiceType = strings.TrimSpace(c.MDNSServiceType)
 	c.Auth.DeviceID = strings.TrimSpace(c.Auth.DeviceID)
 	c.Auth.ClaimCode = strings.TrimSpace(c.Auth.ClaimCode)
+	if c.ClaimCode == "" && c.Auth.ClaimCode != "" {
+		c.ClaimCode = c.Auth.ClaimCode
+	}
+	if c.Auth.ClaimCode == "" && c.ClaimCode != "" {
+		c.Auth.ClaimCode = c.ClaimCode
+	}
 	c.Auth.BearerToken = strings.TrimSpace(c.Auth.BearerToken)
 	c.Auth.KeyID = strings.TrimSpace(c.Auth.KeyID)
 	c.Auth.RefreshToken = strings.TrimSpace(c.Auth.RefreshToken)
@@ -267,4 +275,13 @@ func (c *Config) normalize() {
 			ep.DevAddr = "20"
 		}
 	}
+}
+
+func configAuthState(cfg Config) AuthState {
+	auth := cfg.Auth
+	auth.ClaimCode = strings.TrimSpace(auth.ClaimCode)
+	if auth.ClaimCode == "" {
+		auth.ClaimCode = strings.TrimSpace(cfg.ClaimCode)
+	}
+	return auth
 }

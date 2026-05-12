@@ -29,14 +29,26 @@ type Snapshot struct {
 	ReaderCount      int    `json:"reader_count"`
 }
 
+type Transition struct {
+	Kind         string
+	EntrypointID string
+	DevAddr      string
+	Source       string
+	Reason       string
+}
+
+type TransitionSink func(Transition)
+
 type Service struct {
 	backend Backend
 
 	mu               sync.RWMutex
 	streamActive     bool
 	activeEntrypoint string
+	activeDevAddr    string
 	manualHold       bool
 	readers          map[string]readerSession
+	transitionSink   TransitionSink
 }
 
 func NewService(backend Backend) *Service {
@@ -44,6 +56,12 @@ func NewService(backend Backend) *Service {
 		backend: backend,
 		readers: map[string]readerSession{},
 	}
+}
+
+func (s *Service) SetTransitionSink(sink TransitionSink) {
+	s.mu.Lock()
+	s.transitionSink = sink
+	s.mu.Unlock()
 }
 
 func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, devAddr string) error {
@@ -65,8 +83,16 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 		s.mu.Lock()
 		s.streamActive = true
 		s.activeEntrypoint = entrypointID
+		s.activeDevAddr = devAddr
 		s.manualHold = true
 		s.mu.Unlock()
+		s.emitTransition(Transition{
+			Kind:         "stream.started",
+			EntrypointID: entrypointID,
+			DevAddr:      devAddr,
+			Source:       "api",
+			Reason:       "manual_start",
+		})
 		return nil
 	}
 
@@ -77,8 +103,16 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 	s.mu.Lock()
 	s.streamActive = true
 	s.activeEntrypoint = entrypointID
+	s.activeDevAddr = devAddr
 	s.manualHold = true
 	s.mu.Unlock()
+	s.emitTransition(Transition{
+		Kind:         "stream.started",
+		EntrypointID: entrypointID,
+		DevAddr:      devAddr,
+		Source:       "api",
+		Reason:       "manual_start",
+	})
 	return nil
 }
 
@@ -91,7 +125,7 @@ func (s *Service) StopForEntrypoint(ctx context.Context, _ string) error {
 	if !shouldStop {
 		return nil
 	}
-	return s.stopStream(ctx)
+	return s.stopStream(ctx, "api", "manual_stop")
 }
 
 func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID string, devAddr string) error {
@@ -110,6 +144,10 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 	}
 
 	if s.streamActive {
+		if s.activeEntrypoint == "" {
+			s.activeEntrypoint = entrypointID
+			s.activeDevAddr = devAddr
+		}
 		s.mu.Unlock()
 		return nil
 	}
@@ -127,7 +165,15 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 	s.mu.Lock()
 	s.streamActive = true
 	s.activeEntrypoint = entrypointID
+	s.activeDevAddr = devAddr
 	s.mu.Unlock()
+	s.emitTransition(Transition{
+		Kind:         "stream.started",
+		EntrypointID: entrypointID,
+		DevAddr:      devAddr,
+		Source:       "rtsp",
+		Reason:       "reader_join",
+	})
 	return nil
 }
 
@@ -151,7 +197,7 @@ func (s *Service) ReaderLeave(ctx context.Context, sessionID string) error {
 	if !shouldStop {
 		return nil
 	}
-	return s.stopStream(ctx)
+	return s.stopStream(ctx, "rtsp", "reader_leave")
 }
 
 func (s *Service) PruneIdleReaders(ctx context.Context, maxIdle time.Duration) error {
@@ -172,7 +218,7 @@ func (s *Service) PruneIdleReaders(ctx context.Context, maxIdle time.Duration) e
 	if !shouldStop {
 		return nil
 	}
-	return s.stopStream(ctx)
+	return s.stopStream(ctx, "rtsp", "reader_prune")
 }
 
 func (s *Service) Snapshot() Snapshot {
@@ -186,7 +232,16 @@ func (s *Service) Snapshot() Snapshot {
 	}
 }
 
-func (s *Service) stopStream(ctx context.Context) error {
+func (s *Service) stopStream(ctx context.Context, source string, reason string) error {
+	s.mu.RLock()
+	if !s.streamActive {
+		s.mu.RUnlock()
+		return nil
+	}
+	entrypointID := s.activeEntrypoint
+	devAddr := s.activeDevAddr
+	s.mu.RUnlock()
+
 	if s.backend != nil {
 		if err := s.backend.StreamStop(ctx); err != nil {
 			return err
@@ -195,6 +250,24 @@ func (s *Service) stopStream(ctx context.Context) error {
 	s.mu.Lock()
 	s.streamActive = false
 	s.activeEntrypoint = ""
+	s.activeDevAddr = ""
 	s.mu.Unlock()
+	s.emitTransition(Transition{
+		Kind:         "stream.stopped",
+		EntrypointID: entrypointID,
+		DevAddr:      devAddr,
+		Source:       source,
+		Reason:       reason,
+	})
 	return nil
+}
+
+func (s *Service) emitTransition(transition Transition) {
+	s.mu.RLock()
+	sink := s.transitionSink
+	s.mu.RUnlock()
+	if sink == nil {
+		return
+	}
+	sink(transition)
 }

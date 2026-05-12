@@ -30,14 +30,15 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		"wifi_rssi": r.cfg.DeviceWiFiRSSI,
 	}
 	response := map[string]any{
-		"boot_time":      snap.BootTime,
-		"call_state":     snap.CallState,
-		"stream_active":  snap.StreamActive,
-		"ringing":        snap.Ringing,
-		"floor_ringing":  snap.FloorRinging,
-		"last_event_type": snap.LastEventType,
-		"last_event_ts":  snap.LastEventTS,
-		"entrypoints":    snap.Entrypoints,
+		"boot_time":         snap.BootTime,
+		"call_state":        snap.CallState,
+		"stream_active":     snap.StreamActive,
+		"active_entrypoint": nullableString(snap.ActiveEntrypoint),
+		"ringing":           snap.Ringing,
+		"floor_ringing":     snap.FloorRinging,
+		"last_event_type":   snap.LastEventType,
+		"last_event_ts":     snap.LastEventTS,
+		"entrypoints":       snap.Entrypoints,
 		"device": map[string]any{
 			"id":       nullableString(r.auth.DeviceID()),
 			"name":     nullableString(r.cfg.DeviceModel),

@@ -1,6 +1,10 @@
 package state
 
-import "bticino-go-companion/internal/domain/event"
+import (
+	"strings"
+
+	"bticino-go-companion/internal/domain/event"
+)
 
 const (
 	CallStateIdle    = "idle"
@@ -8,11 +12,18 @@ const (
 	CallStateActive  = "active"
 )
 
-func applyTransition(s *Snapshot, kind string) {
+func applyTransition(s *Snapshot, ev event.Envelope) {
+	kind := strings.TrimSpace(ev.Type)
+	entrypointID := strings.TrimSpace(ev.EntrypointID)
+	setEntrypoint := entrypointID != "" && entrypointID != "floor"
+
 	switch kind {
 	case event.TypeRingStarted:
 		s.Ringing = true
 		s.CallState = CallStateRinging
+		if setEntrypoint {
+			s.ActiveEntrypoint = entrypointID
+		}
 	case event.TypeRingEnded:
 		s.Ringing = false
 		if s.StreamActive {
@@ -20,6 +31,7 @@ func applyTransition(s *Snapshot, kind string) {
 			return
 		}
 		s.CallState = CallStateIdle
+		s.ActiveEntrypoint = ""
 	case event.TypeRingFloorStarted:
 		s.FloorRinging = true
 	case event.TypeRingFloorEnded:
@@ -27,6 +39,9 @@ func applyTransition(s *Snapshot, kind string) {
 	case event.TypeStreamStarted:
 		s.StreamActive = true
 		s.CallState = CallStateActive
+		if setEntrypoint {
+			s.ActiveEntrypoint = entrypointID
+		}
 	case event.TypeStreamStopped:
 		s.StreamActive = false
 		if s.Ringing {
@@ -34,8 +49,12 @@ func applyTransition(s *Snapshot, kind string) {
 			return
 		}
 		s.CallState = CallStateIdle
+		s.ActiveEntrypoint = ""
 	case event.TypeCallIncoming:
 		s.CallState = CallStateRinging
+		if setEntrypoint {
+			s.ActiveEntrypoint = entrypointID
+		}
 	case event.TypeCallAnswered:
 		s.CallState = CallStateActive
 	case event.TypeCallEnded:
@@ -48,5 +67,10 @@ func applyTransition(s *Snapshot, kind string) {
 			return
 		}
 		s.CallState = CallStateIdle
+		s.ActiveEntrypoint = ""
+	case event.TypeCallViewRequested:
+		if setEntrypoint {
+			s.ActiveEntrypoint = entrypointID
+		}
 	}
 }
