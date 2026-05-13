@@ -3,7 +3,6 @@ package system
 import (
 	"bufio"
 	"encoding/xml"
-	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -70,49 +69,247 @@ func detectFirmwareVersion() string {
 }
 
 func detectNetworkSnapshot() NetworkSnapshot {
-	ifaces, err := net.Interfaces()
-	if err != nil {
+	snap, ok := detectNetworkSnapshotViaConnMan()
+	if !ok {
 		return NetworkSnapshot{}
+	}
+	return snap
+}
+
+func detectNetworkSnapshotViaConnMan() (NetworkSnapshot, bool) {
+	out, err := exec.Command(
+		"/usr/bin/dbus-send",
+		"--system",
+		"--print-reply",
+		"--dest=net.connman",
+		"/",
+		"net.connman.Manager.GetServices",
+	).Output()
+	if err != nil {
+		return NetworkSnapshot{}, false
 	}
 
-	type candidate struct {
-		ifaceName string
-		ip        string
-		mac       string
-		score     int
+	services := splitConnManServiceBlocks(string(out))
+	if len(services) == 0 {
+		return NetworkSnapshot{}, false
 	}
-	best := candidate{score: -1}
-	for _, iface := range ifaces {
-		if (iface.Flags&net.FlagLoopback) != 0 || (iface.Flags&net.FlagUp) == 0 {
+
+	best := connManService{score: -1}
+	for _, block := range services {
+		svc := parseConnManServiceBlock(block)
+		if !strings.EqualFold(strings.TrimSpace(svc.Type), "wifi") {
 			continue
 		}
-		ip := interfacePrimaryIP(iface)
-		if ip == "" {
+		if strings.TrimSpace(svc.Interface) == "" || strings.TrimSpace(svc.IP) == "" {
 			continue
 		}
-		score := interfacePriority(iface.Name)
-		if score > best.score {
-			best = candidate{
-				ifaceName: iface.Name,
-				ip:        ip,
-				mac:       strings.ToLower(strings.TrimSpace(iface.HardwareAddr.String())),
-				score:     score,
-			}
+		score := connManServiceScore(svc.State)
+		svc.score = score
+		if svc.score > best.score {
+			best = svc
 		}
 	}
+
 	if best.score < 0 {
-		return NetworkSnapshot{}
+		return NetworkSnapshot{}, false
 	}
 
 	snap := NetworkSnapshot{
-		Interface: best.ifaceName,
-		IP:        best.ip,
-		MAC:       best.mac,
+		Interface: strings.TrimSpace(best.Interface),
+		IP:        strings.TrimSpace(best.IP),
+		MAC:       normalizeMACString(best.MAC),
 	}
-	if rssi, ok := readWirelessRSSI(best.ifaceName); ok {
-		snap.WiFiRSSI = &rssi
+	if best.Strength != nil {
+		v := *best.Strength
+		if v < 0 {
+			v = 0
+		}
+		if v > 100 {
+			v = 100
+		}
+		snap.WiFiRSSI = &v
 	}
-	return snap
+	return snap, true
+}
+
+type connManService struct {
+	Type      string
+	State     string
+	Interface string
+	IP        string
+	MAC       string
+	Strength  *int
+	score     int
+}
+
+func splitConnManServiceBlocks(output string) []string {
+	lines := strings.Split(output, "\n")
+	blocks := make([]string, 0, 4)
+	depth := 0
+	var current strings.Builder
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.Contains(line, "struct {") && depth == 0 {
+			depth = 1
+			current.Reset()
+			current.WriteString(raw)
+			current.WriteByte('\n')
+			continue
+		}
+		if depth == 0 {
+			continue
+		}
+
+		openCount := strings.Count(line, "{")
+		closeCount := strings.Count(line, "}")
+		if !(openCount == 1 && strings.Contains(line, "struct {")) {
+			depth += openCount
+		}
+		depth -= closeCount
+		current.WriteString(raw)
+		current.WriteByte('\n')
+		if depth <= 0 {
+			blocks = append(blocks, current.String())
+			depth = 0
+		}
+	}
+	return blocks
+}
+
+func parseConnManServiceBlock(block string) connManService {
+	service := connManService{}
+	section := "top"
+	currentKey := ""
+
+	scanner := bufio.NewScanner(strings.NewReader(block))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if key, ok := parseDBusKey(line); ok {
+			currentKey = key
+			switch key {
+			case "Ethernet":
+				section = "ethernet"
+				currentKey = ""
+			case "IPv4":
+				section = "ipv4"
+				currentKey = ""
+			case "IPv6", "Proxy", "Provider":
+				section = "other"
+				currentKey = ""
+			}
+			continue
+		}
+
+		if !strings.Contains(line, "variant") || currentKey == "" {
+			continue
+		}
+
+		value, ok := parseDBusVariantValue(line)
+		if !ok {
+			continue
+		}
+
+		switch section {
+		case "top":
+			switch currentKey {
+			case "Type":
+				service.Type = value
+			case "State":
+				service.State = value
+			case "Strength":
+				if n, err := strconv.Atoi(value); err == nil {
+					v := n
+					service.Strength = &v
+				}
+			}
+		case "ethernet":
+			switch currentKey {
+			case "Interface":
+				service.Interface = value
+			case "Address":
+				service.MAC = value
+			}
+		case "ipv4":
+			if currentKey == "Address" {
+				service.IP = value
+			}
+		}
+	}
+
+	return service
+}
+
+func parseDBusKey(line string) (string, bool) {
+	if !strings.HasPrefix(line, "string \"") {
+		return "", false
+	}
+	start := strings.Index(line, "\"")
+	if start < 0 {
+		return "", false
+	}
+	rest := line[start+1:]
+	end := strings.Index(rest, "\"")
+	if end < 0 {
+		return "", false
+	}
+	key := strings.TrimSpace(rest[:end])
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+func parseDBusVariantValue(line string) (string, bool) {
+	parts := strings.Fields(line)
+	if len(parts) < 3 {
+		return "", false
+	}
+	for i := 0; i < len(parts); i++ {
+		if parts[i] != "variant" {
+			continue
+		}
+		if i+1 >= len(parts) {
+			return "", false
+		}
+		typeName := strings.TrimSpace(parts[i+1])
+		switch typeName {
+		case "string":
+			if idx := strings.Index(line, "\""); idx >= 0 {
+				rest := line[idx+1:]
+				if end := strings.LastIndex(rest, "\""); end >= 0 {
+					return strings.TrimSpace(rest[:end]), true
+				}
+			}
+			return "", false
+		case "byte", "int16", "int32", "uint16", "uint32", "int64", "uint64":
+			if i+2 >= len(parts) {
+				return "", false
+			}
+			return strings.TrimSpace(parts[i+2]), true
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func connManServiceScore(state string) int {
+	s := strings.ToLower(strings.TrimSpace(state))
+	switch s {
+	case "online", "ready":
+		return 30
+	case "association", "configuration":
+		return 20
+	case "idle":
+		return 10
+	default:
+		return 5
+	}
 }
 
 func parseModel(content string) (string, bool) {
@@ -156,73 +353,20 @@ func parseFirmwareVersion(content string) (string, bool) {
 	return version, true
 }
 
-func interfacePrimaryIP(iface net.Interface) string {
-	addrs, err := iface.Addrs()
-	if err != nil {
+func normalizeMACString(raw string) string {
+	val := strings.ToLower(strings.TrimSpace(raw))
+	val = strings.ReplaceAll(val, "-", ":")
+	if val == "" {
 		return ""
 	}
-
-	var firstGlobalV6 string
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP == nil {
-			continue
-		}
-		ip := ipNet.IP
-		if ip.IsLoopback() || !ip.IsGlobalUnicast() {
-			continue
-		}
-		if ipv4 := ip.To4(); ipv4 != nil {
-			return ipv4.String()
-		}
-		if firstGlobalV6 == "" {
-			firstGlobalV6 = ip.String()
+	parts := strings.Split(val, ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	for _, p := range parts {
+		if len(p) != 2 {
+			return ""
 		}
 	}
-	return firstGlobalV6
-}
-
-func interfacePriority(name string) int {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	switch {
-	case strings.HasPrefix(lower, "wlan"), strings.HasPrefix(lower, "wl"):
-		return 40
-	case strings.HasPrefix(lower, "usb"):
-		return 20
-	case strings.HasPrefix(lower, "eth"), strings.HasPrefix(lower, "en"):
-		return 10
-	default:
-		return 5
-	}
-}
-
-func readWirelessRSSI(ifaceName string) (int, bool) {
-	if strings.TrimSpace(ifaceName) == "" {
-		return 0, false
-	}
-	out, err := exec.Command("/usr/sbin/iw", "dev", ifaceName, "link").Output()
-	if err != nil {
-		return 0, false
-	}
-	return parseIWLinkRSSI(string(out))
-}
-
-func parseIWLinkRSSI(output string) (int, bool) {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(strings.ToLower(line), "signal:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			return 0, false
-		}
-		value, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return 0, false
-		}
-		return value, true
-	}
-	return 0, false
+	return val
 }

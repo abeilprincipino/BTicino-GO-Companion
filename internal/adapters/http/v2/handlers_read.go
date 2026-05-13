@@ -25,9 +25,10 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 	}
 	snap := r.state.Snapshot()
 	network := map[string]any{
-		"ip":        nullableString(r.cfg.DeviceIP),
-		"mac":       nullableString(r.cfg.DeviceMAC),
-		"wifi_rssi": r.cfg.DeviceWiFiRSSI,
+		"ip":            nullableString(r.cfg.DeviceIP),
+		"mac":           nullableString(r.cfg.DeviceMAC),
+		"wifi_rssi":     r.cfg.DeviceWiFiRSSI,
+		"wifi_strength": r.cfg.DeviceWiFiRSSI,
 	}
 	response := map[string]any{
 		"boot_time":         snap.BootTime,
