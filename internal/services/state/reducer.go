@@ -72,5 +72,9 @@ func applyTransition(s *Snapshot, ev event.Envelope) {
 		if setEntrypoint {
 			s.ActiveEntrypoint = entrypointID
 		}
+	case event.TypeAudioMuted:
+		s.AudioMuted = true
+	case event.TypeAudioUnmuted:
+		s.AudioMuted = false
 	}
 }

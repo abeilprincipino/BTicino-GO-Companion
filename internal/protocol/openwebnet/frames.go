@@ -6,11 +6,14 @@ import (
 )
 
 const (
-	FrameACK          = "*#*1##"
-	FrameStop         = "*7*0*##"
-	FrameStreamProbe  = "*7*73#0#0*##"
-	FrameAudioMuted   = "*#8**33*0##"
-	FrameAudioUnmuted = "*#8**33*1##"
+	FrameACK            = "*#*1##"
+	FrameStop           = "*7*0*##"
+	FrameStreamProbe    = "*7*73#0#0*##"
+	FrameAudioStatusCmd = "*#8**33##"
+	FrameAudioMuteCmd   = "*#8**#33*0##"
+	FrameAudioUnmuteCmd = "*#8**#33*1##"
+	FrameAudioMuted     = "*#8**33*0##"
+	FrameAudioUnmuted   = "*#8**33*1##"
 )
 
 func BuildUnlockOpen(devAddr string) string {

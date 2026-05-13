@@ -73,6 +73,8 @@ func (r *Router) Handler() http.Handler {
 	// Protected control endpoints.
 	mux.HandleFunc("POST /api/v2/control/call/answer", r.withBearer(r.handleCallAnswer))
 	mux.HandleFunc("POST /api/v2/control/call/hangup", r.withBearer(r.handleCallHangup))
+	mux.HandleFunc("POST /api/v2/control/audio/mute", r.withBearer(r.handleAudioMute))
+	mux.HandleFunc("POST /api/v2/control/audio/unmute", r.withBearer(r.handleAudioUnmute))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/unlock", r.withBearer(r.handleEntrypointUnlock))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/start", r.withBearer(r.handleEntrypointStreamStart))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/stop", r.withBearer(r.handleEntrypointStreamStop))

@@ -48,7 +48,6 @@ func TestCommandClientUnlock(t *testing.T) {
 			done <- err
 			return
 		}
-		defer conn.Close()
 		reader := &testFrameReader{conn: conn}
 
 		if got := reader.readFrame(t); got != "*99*0##" {
@@ -251,6 +250,127 @@ func TestCommandClientStreamStart(t *testing.T) {
 	c := NewCommandClient(cfg)
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("stream start failed: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
+func TestCommandClientMuteUnmute(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**#33*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#8**33*0##"))
+		_ = conn.Close()
+
+		conn, err = ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		reader = &testFrameReader{conn: conn}
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**#33*1##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#8**33*1##"))
+		_ = conn.Close()
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	if err := c.Mute(context.Background()); err != nil {
+		t.Fatalf("mute failed: %v", err)
+	}
+	if err := c.Unmute(context.Background()); err != nil {
+		t.Fatalf("unmute failed: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
+func TestCommandClientAudioMutedStatus(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**33##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#8**33*0##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	muted, err := c.AudioMutedStatus(context.Background())
+	if err != nil {
+		t.Fatalf("audio status failed: %v", err)
+	}
+	if !muted {
+		t.Fatal("expected muted=true")
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("server flow failed: %v", err)

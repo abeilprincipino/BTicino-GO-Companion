@@ -16,6 +16,7 @@ var (
 	ErrCapabilityNotEnabled = errors.New("entrypoint capability not enabled")
 	ErrNoIncomingCall       = errors.New("no incoming call")
 	ErrNoActiveCall         = errors.New("no active call")
+	ErrAudioControlDisabled = errors.New("audio control unavailable")
 )
 
 type UnlockDriver interface {
@@ -32,15 +33,21 @@ type CallDriver interface {
 	Hangup(ctx context.Context) error
 }
 
+type AudioDriver interface {
+	Mute(ctx context.Context) error
+	Unmute(ctx context.Context) error
+}
+
 type Service struct {
 	entrypoints map[string]entrypoint.Model
 	stream      StreamDriver
 	unlock      UnlockDriver
 	call        CallDriver
+	audio       AudioDriver
 	emit        func(event.Envelope)
 }
 
-func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDriver, call CallDriver, emit func(event.Envelope)) *Service {
+func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDriver, call CallDriver, audio AudioDriver, emit func(event.Envelope)) *Service {
 	index := make(map[string]entrypoint.Model, len(entrypoints))
 	for _, ep := range entrypoints {
 		id := strings.TrimSpace(ep.ID)
@@ -54,6 +61,7 @@ func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDrive
 		stream:      stream,
 		unlock:      unlock,
 		call:        call,
+		audio:       audio,
 		emit:        emit,
 	}
 }
@@ -122,6 +130,28 @@ func (s *Service) HangupCall(ctx context.Context) error {
 		return mapCallError(err)
 	}
 	s.publish(event.TypeCallEnded, "", map[string]any{"source": "api", "reason": "hangup_requested"})
+	return nil
+}
+
+func (s *Service) MuteAudio(ctx context.Context) error {
+	if s.audio == nil {
+		return ErrAudioControlDisabled
+	}
+	if err := s.audio.Mute(ctx); err != nil {
+		return err
+	}
+	s.publish(event.TypeAudioMuted, "", map[string]any{"source": "api"})
+	return nil
+}
+
+func (s *Service) UnmuteAudio(ctx context.Context) error {
+	if s.audio == nil {
+		return ErrAudioControlDisabled
+	}
+	if err := s.audio.Unmute(ctx); err != nil {
+		return err
+	}
+	s.publish(event.TypeAudioUnmuted, "", map[string]any{"source": "api"})
 	return nil
 }
 

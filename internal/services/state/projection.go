@@ -12,6 +12,7 @@ type Snapshot struct {
 	BootTime         time.Time          `json:"boot_time"`
 	CallState        string             `json:"call_state"`
 	StreamActive     bool               `json:"stream_active"`
+	AudioMuted       bool               `json:"audio_muted"`
 	ActiveEntrypoint string             `json:"active_entrypoint,omitempty"`
 	Ringing          bool               `json:"ringing"`
 	FloorRinging     bool               `json:"floor_ringing"`
@@ -32,6 +33,7 @@ func NewProjector(entrypoints []entrypoint.Model) *Projector {
 			CallState:    CallStateIdle,
 			Entrypoints:  entrypoints,
 			StreamActive: false,
+			AudioMuted:   false,
 			Ringing:      false,
 		},
 	}

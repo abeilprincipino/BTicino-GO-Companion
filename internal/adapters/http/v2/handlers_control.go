@@ -82,6 +82,34 @@ func (r *Router) handleCallHangup(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "call_hangup"})
 }
 
+func (r *Router) handleAudioMute(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.MuteAudio(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "audio_mute", "muted": true})
+}
+
+func (r *Router) handleAudioUnmute(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.UnmuteAudio(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "audio_unmute", "muted": false})
+}
+
 func contextWithTimeout(req *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(req.Context(), 8*time.Second)
 }
@@ -96,6 +124,8 @@ func handleControlError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "no_incoming_call", err.Error())
 	case errors.Is(err, control.ErrNoActiveCall):
 		writeError(w, http.StatusConflict, "no_active_call", err.Error())
+	case errors.Is(err, control.ErrAudioControlDisabled):
+		writeError(w, http.StatusConflict, "audio_control_disabled", err.Error())
 	default:
 		writeError(w, http.StatusBadGateway, "control_failed", err.Error())
 	}

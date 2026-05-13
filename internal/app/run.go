@@ -143,6 +143,29 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 		traceBroker.Publish(rec)
 	})
+	if cfg.OpenWebNetEnabled {
+		go func() {
+			bootCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			muted, err := commandClient.AudioMutedStatus(bootCtx)
+			if err != nil {
+				logger.Printf("audio status bootstrap skipped: %v", err)
+				return
+			}
+			kind := event.TypeAudioUnmuted
+			if muted {
+				kind = event.TypeAudioMuted
+			}
+			publish(event.Envelope{
+				Type:   kind,
+				TS:     time.Now(),
+				Source: event.SourceSystem,
+				Payload: map[string]any{
+					"source": "bootstrap_probe",
+				},
+			})
+		}()
+	}
 	mediaBackend := media.NewCompositeBackend(
 		sipManager,
 		commandClient,
@@ -177,7 +200,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
-	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, func(ev event.Envelope) {
+	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, commandClient, func(ev event.Envelope) {
 		publish(ev)
 	})
 	runtimeStatus.SetControlReady(true, "")

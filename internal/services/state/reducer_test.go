@@ -67,3 +67,15 @@ func TestApplyTransitionTracksActiveEntrypoint(t *testing.T) {
 		t.Fatalf("expected active entrypoint cleared, got %q", s.ActiveEntrypoint)
 	}
 }
+
+func TestApplyTransitionTracksAudioMute(t *testing.T) {
+	s := Snapshot{}
+	applyTransition(&s, event.Envelope{Type: event.TypeAudioMuted})
+	if !s.AudioMuted {
+		t.Fatal("expected audio muted true")
+	}
+	applyTransition(&s, event.Envelope{Type: event.TypeAudioUnmuted})
+	if s.AudioMuted {
+		t.Fatal("expected audio muted false")
+	}
+}

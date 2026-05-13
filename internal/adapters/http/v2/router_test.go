@@ -38,6 +38,11 @@ type callNoop struct {
 func (c callNoop) Answer(context.Context) error { return c.answerErr }
 func (c callNoop) Hangup(context.Context) error { return c.hangupErr }
 
+type audioNoop struct{}
+
+func (audioNoop) Mute(context.Context) error   { return nil }
+func (audioNoop) Unmute(context.Context) error { return nil }
+
 func newTestRuntimeStatus() *runtime.Status {
 	rt := runtime.New(true, true)
 	rt.SetSIPReady(true, "")
@@ -77,7 +82,7 @@ func newAuthedRouter(t *testing.T) (*Router, string) {
 	t.Helper()
 	authStore, token := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
+	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, nil)
 	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(32), newTestRuntimeStatus(), trace.New(16))
 	return r, token
 }
@@ -126,7 +131,7 @@ func TestRouterPairChallengeAndClaim(t *testing.T) {
 		t.Fatalf("new auth store: %v", err)
 	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
-	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, nil)
+	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, nil)
 	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(8), newTestRuntimeStatus(), trace.New(8))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
@@ -187,6 +192,20 @@ func TestRouterCallControlEndpoints(t *testing.T) {
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 on hangup, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = authReq(http.MethodPost, "/api/v2/control/audio/mute", token)
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on audio mute, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = authReq(http.MethodPost, "/api/v2/control/audio/unmute", token)
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on audio unmute, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

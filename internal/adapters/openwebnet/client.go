@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/config"
-	openwebnetproto "bticino-go-companion/internal/protocol/openwebnet"
+	"bticino-go-companion/internal/protocol/openwebnet"
 )
 
 var (
@@ -99,6 +99,38 @@ func (c *CommandClient) StreamStart(ctx context.Context, audioPort, videoPort in
 	})
 }
 
+func (c *CommandClient) Mute(ctx context.Context) error {
+	return c.exec(ctx, func(reader *frameReader) error {
+		if err := c.sendAndExpectSuccess(
+			reader,
+			"audio.mute",
+			openwebnetproto.FrameAudioMuteCmd,
+			openwebnetproto.FrameAudioMuted,
+		); err != nil {
+			return fmt.Errorf("audio mute: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *CommandClient) Unmute(ctx context.Context) error {
+	return c.exec(ctx, func(reader *frameReader) error {
+		if err := c.sendAndExpectSuccess(
+			reader,
+			"audio.unmute",
+			openwebnetproto.FrameAudioUnmuteCmd,
+			openwebnetproto.FrameAudioUnmuted,
+		); err != nil {
+			return fmt.Errorf("audio unmute: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *CommandClient) AudioMutedStatus(ctx context.Context) (bool, error) {
+	return c.execAudioMutedStatus(ctx)
+}
+
 func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) error) error {
 	address := net.JoinHostPort(c.host, strconv.Itoa(c.port))
 	conn, err := net.DialTimeout("tcp", address, c.timeout)
@@ -139,14 +171,19 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 }
 
 func (c *CommandClient) sendAndExpectSuccess(reader *frameReader, operation string, frame string, acceptedFrames ...string) error {
+	_, err := c.sendAndExpectFrame(reader, operation, frame, acceptedFrames...)
+	return err
+}
+
+func (c *CommandClient) sendAndExpectFrame(reader *frameReader, operation string, frame string, acceptedFrames ...string) (string, error) {
 	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "operation": operation, "frame": frame})
 	if _, err := reader.conn.Write([]byte(frame)); err != nil {
-		return err
+		return "", err
 	}
 
 	resp, err := reader.readFrame()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	frames := []string{resp}
@@ -173,7 +210,7 @@ func (c *CommandClient) sendAndExpectSuccess(reader *frameReader, operation stri
 					terminal = "accepted_eof"
 					break
 				}
-				return readErr
+				return "", readErr
 			}
 			if timedOut {
 				terminal = "accepted_timeout"
@@ -207,9 +244,38 @@ func (c *CommandClient) sendAndExpectSuccess(reader *frameReader, operation stri
 		"terminal":  terminal,
 	})
 	if !accepted {
-		return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(finalFrame))
+		return "", fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(finalFrame))
 	}
-	return nil
+	return finalFrame, nil
+}
+
+func (c *CommandClient) execAudioMutedStatus(ctx context.Context) (bool, error) {
+	muted := false
+	err := c.exec(ctx, func(reader *frameReader) error {
+		frame, err := c.sendAndExpectFrame(
+			reader,
+			"audio.status",
+			openwebnetproto.FrameAudioStatusCmd,
+			openwebnetproto.FrameAudioMuted,
+			openwebnetproto.FrameAudioUnmuted,
+		)
+		if err != nil {
+			return fmt.Errorf("audio status: %w", err)
+		}
+		switch strings.TrimSpace(frame) {
+		case openwebnetproto.FrameAudioMuted:
+			muted = true
+		case openwebnetproto.FrameAudioUnmuted:
+			muted = false
+		default:
+			return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(frame))
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return muted, nil
 }
 
 func (c *CommandClient) authenticateHMAC(reader *frameReader) error {

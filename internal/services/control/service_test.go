@@ -44,6 +44,23 @@ type callStub struct {
 	hangupErr   error
 }
 
+type audioStub struct {
+	muteCalls   int
+	unmuteCalls int
+	muteErr     error
+	unmuteErr   error
+}
+
+func (a *audioStub) Mute(context.Context) error {
+	a.muteCalls++
+	return a.muteErr
+}
+
+func (a *audioStub) Unmute(context.Context) error {
+	a.unmuteCalls++
+	return a.unmuteErr
+}
+
 func (c *callStub) Answer(context.Context) error {
 	c.answerCalls++
 	return c.answerErr
@@ -58,8 +75,9 @@ func TestServiceUnlockEntrypoint(t *testing.T) {
 	unlock := &unlockStub{}
 	stream := &streamStub{}
 	call := &callStub{}
+	audio := &audioStub{}
 	var events []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, call, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
 		events = append(events, ev)
 	})
 
@@ -78,7 +96,8 @@ func TestServiceStreamStartUsesEntrypointDevAddr(t *testing.T) {
 	unlock := &unlockStub{}
 	stream := &streamStub{}
 	call := &callStub{}
-	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, call, nil)
+	audio := &audioStub{}
+	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, nil)
 
 	if err := svc.StartEntrypointStream(context.Background(), "gate2"); err != nil {
 		t.Fatalf("stream start failed: %v", err)
@@ -95,8 +114,9 @@ func TestServiceCallAnswerHangup(t *testing.T) {
 	unlock := &unlockStub{}
 	stream := &streamStub{}
 	call := &callStub{}
+	audio := &audioStub{}
 	var emitted []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
 		emitted = append(emitted, ev)
 	})
 
@@ -110,6 +130,30 @@ func TestServiceCallAnswerHangup(t *testing.T) {
 		t.Fatalf("unexpected call driver invocations answer=%d hangup=%d", call.answerCalls, call.hangupCalls)
 	}
 	if len(emitted) != 2 || emitted[0].Type != event.TypeCallAnswered || emitted[1].Type != event.TypeCallEnded {
+		t.Fatalf("unexpected emitted events: %+v", emitted)
+	}
+}
+
+func TestServiceAudioMuteUnmute(t *testing.T) {
+	unlock := &unlockStub{}
+	stream := &streamStub{}
+	call := &callStub{}
+	audio := &audioStub{}
+	var emitted []event.Envelope
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
+		emitted = append(emitted, ev)
+	})
+
+	if err := svc.MuteAudio(context.Background()); err != nil {
+		t.Fatalf("mute failed: %v", err)
+	}
+	if err := svc.UnmuteAudio(context.Background()); err != nil {
+		t.Fatalf("unmute failed: %v", err)
+	}
+	if audio.muteCalls != 1 || audio.unmuteCalls != 1 {
+		t.Fatalf("unexpected audio driver invocations mute=%d unmute=%d", audio.muteCalls, audio.unmuteCalls)
+	}
+	if len(emitted) != 2 || emitted[0].Type != event.TypeAudioMuted || emitted[1].Type != event.TypeAudioUnmuted {
 		t.Fatalf("unexpected emitted events: %+v", emitted)
 	}
 }
