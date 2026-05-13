@@ -22,13 +22,11 @@ type Snapshot struct {
 
 type Projector struct {
 	mu       sync.RWMutex
-	nextID   uint64
 	snapshot Snapshot
 }
 
 func NewProjector(entrypoints []entrypoint.Model) *Projector {
 	return &Projector{
-		nextID: 1,
 		snapshot: Snapshot{
 			BootTime:     time.Now(),
 			CallState:    CallStateIdle,
@@ -43,8 +41,9 @@ func (p *Projector) Apply(ev event.Envelope) event.Envelope {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	ev.ID = p.nextID
-	p.nextID++
+	if ev.Type == event.TypeHeartbeat {
+		return ev
+	}
 
 	s := &p.snapshot
 	s.LastEventType = ev.Type

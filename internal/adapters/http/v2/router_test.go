@@ -168,6 +168,9 @@ func TestRouterEventsSSEReplay(t *testing.T) {
 	if rr.Body.String() == "" {
 		t.Fatal("expected non-empty replay")
 	}
+	if !strings.Contains(rr.Body.String(), "id: 2") {
+		t.Fatalf("expected SSE id line for replayed event, body=%q", rr.Body.String())
+	}
 }
 
 func TestRouterCallControlEndpoints(t *testing.T) {

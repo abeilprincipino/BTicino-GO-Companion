@@ -92,6 +92,23 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		eventBroker.Publish(enriched)
 	}
 
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				publish(event.Envelope{
+					Type:   event.TypeHeartbeat,
+					TS:     time.Now(),
+					Source: event.SourceSystem,
+				})
+			}
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      nil,

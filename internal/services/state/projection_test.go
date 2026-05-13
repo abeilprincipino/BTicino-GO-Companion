@@ -34,3 +34,20 @@ func TestProjectorApply(t *testing.T) {
 		t.Fatalf("expected cleared active entrypoint, got %q", s.ActiveEntrypoint)
 	}
 }
+
+func TestProjectorHeartbeatDoesNotMutateState(t *testing.T) {
+	p := NewProjector([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
+	now := time.Now()
+	p.Apply(event.Envelope{Type: event.TypeRingStarted, TS: now, EntrypointID: "main"})
+	before := p.Snapshot()
+
+	p.Apply(event.Envelope{Type: event.TypeHeartbeat, TS: now.Add(time.Second)})
+	after := p.Snapshot()
+
+	if before.LastEventType != after.LastEventType {
+		t.Fatalf("heartbeat should not update last event type: before=%s after=%s", before.LastEventType, after.LastEventType)
+	}
+	if before.CallState != after.CallState || before.ActiveEntrypoint != after.ActiveEntrypoint || before.StreamActive != after.StreamActive || before.Ringing != after.Ringing {
+		t.Fatalf("heartbeat should not mutate state: before=%+v after=%+v", before, after)
+	}
+}

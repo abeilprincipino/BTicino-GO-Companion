@@ -2,6 +2,7 @@ package event
 
 const (
 	TypeEventInvalid      = "event.invalid"
+	TypeHeartbeat         = "heartbeat"
 	TypeRingStarted       = "ring.started"
 	TypeRingEnded         = "ring.ended"
 	TypeRingFloorStarted  = "ring.floor.started"
@@ -21,6 +22,7 @@ const (
 
 var knownTypes = map[string]struct{}{
 	TypeEventInvalid:      {},
+	TypeHeartbeat:         {},
 	TypeRingStarted:       {},
 	TypeRingEnded:         {},
 	TypeRingFloorStarted:  {},

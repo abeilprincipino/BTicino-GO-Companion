@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+
+	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/services/trace"
 )
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -35,6 +38,9 @@ func writeErrorWithExtras(w http.ResponseWriter, status int, code string, messag
 func parseLastEventID(req *http.Request) uint64 {
 	raw := req.URL.Query().Get("last_event_id")
 	if raw == "" {
+		raw = req.URL.Query().Get("since")
+	}
+	if raw == "" {
 		raw = req.Header.Get("Last-Event-ID")
 	}
 	id, err := strconv.ParseUint(raw, 10, 64)
@@ -48,6 +54,26 @@ func writeSSEEvent(w http.ResponseWriter, ev any) error {
 	body, err := json.Marshal(ev)
 	if err != nil {
 		return err
+	}
+	var id uint64
+	var eventType string
+	switch typed := ev.(type) {
+	case event.Envelope:
+		id = typed.ID
+		eventType = typed.Type
+	case trace.Record:
+		id = typed.ID
+	}
+
+	if id > 0 {
+		if _, err := fmt.Fprintf(w, "id: %d\n", id); err != nil {
+			return err
+		}
+	}
+	if eventType != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", eventType); err != nil {
+			return err
+		}
 	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", body)
 	return err

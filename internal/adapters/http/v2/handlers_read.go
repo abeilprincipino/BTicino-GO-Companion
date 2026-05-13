@@ -34,7 +34,7 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		"boot_time":         snap.BootTime,
 		"call_state":        snap.CallState,
 		"stream_active":     snap.StreamActive,
-		"active_entrypoint": nullableString(snap.ActiveEntrypoint),
+		"active_entrypoint": stateEntrypointValue(snap.ActiveEntrypoint),
 		"ringing":           snap.Ringing,
 		"floor_ringing":     snap.FloorRinging,
 		"last_event_type":   snap.LastEventType,
@@ -88,6 +88,13 @@ func (r *Router) handleEntrypoints(w http.ResponseWriter, req *http.Request) {
 func nullableString(value string) any {
 	if value == "" {
 		return nil
+	}
+	return value
+}
+
+func stateEntrypointValue(value string) string {
+	if value == "" {
+		return "none"
 	}
 	return value
 }

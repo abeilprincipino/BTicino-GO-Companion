@@ -10,6 +10,7 @@ import (
 type Broker struct {
 	mu          sync.RWMutex
 	maxRetained int
+	nextID      uint64
 	events      []event.Envelope
 	subs        map[chan event.Envelope]struct{}
 }
@@ -20,13 +21,20 @@ func New(maxRetained int) *Broker {
 	}
 	return &Broker{
 		maxRetained: maxRetained,
+		nextID:      1,
 		events:      make([]event.Envelope, 0, maxRetained),
 		subs:        map[chan event.Envelope]struct{}{},
 	}
 }
 
-func (b *Broker) Publish(ev event.Envelope) {
+func (b *Broker) Publish(ev event.Envelope) event.Envelope {
 	b.mu.Lock()
+	if ev.ID == 0 {
+		ev.ID = b.nextID
+		b.nextID++
+	} else if ev.ID >= b.nextID {
+		b.nextID = ev.ID + 1
+	}
 	b.events = append(b.events, ev)
 	if len(b.events) > b.maxRetained {
 		offset := len(b.events) - b.maxRetained
@@ -45,6 +53,7 @@ func (b *Broker) Publish(ev event.Envelope) {
 		default:
 		}
 	}
+	return ev
 }
 
 func (b *Broker) ReplaySince(lastID uint64) []event.Envelope {
