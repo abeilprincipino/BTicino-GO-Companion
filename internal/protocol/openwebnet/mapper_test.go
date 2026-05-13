@@ -15,6 +15,8 @@ func TestMapperCoreFrames(t *testing.T) {
 		{name: "unlock_close", raw: "*8*20*21##", wantTypes: []string{"unlock.pulse.ended"}},
 		{name: "mute", raw: "*#8**33*0##", wantTypes: []string{"audio.muted"}},
 		{name: "unmute", raw: "*#8**33*1##", wantTypes: []string{"audio.unmuted"}},
+		{name: "voicemail_enabled", raw: "*#8**40*1*0*0153*1*25##", wantTypes: []string{"voicemail.enabled"}},
+		{name: "voicemail_disabled", raw: "*#8**40*0*1*0153*1*25##", wantTypes: []string{"voicemail.disabled"}},
 		{name: "video_stream_start", raw: "*7*300#127#0#0#1#5007#0*##", wantTypes: []string{"stream.started"}},
 		{name: "audio_stream_start", raw: "*7*300#127#0#0#1#5000#2*##", wantTypes: []string{"stream.started"}},
 		{name: "stream_probe_ignored", raw: "*7*73#0#0*##", wantTypes: nil},

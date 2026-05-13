@@ -44,6 +44,7 @@ type Config struct {
 	MediaRTSPPathMain         string
 	MediaRTPAudioPort         int
 	MediaRTPVideoPort         int
+	VoicemailMessagesDir      string
 
 	Auth        AuthState
 	Entrypoints []entrypoint.Model
@@ -64,6 +65,8 @@ type PersistedConfig struct {
 	Auth                      AuthState          `json:"auth"`
 	Entrypoints               []entrypoint.Model `json:"entrypoints"`
 	OpenWebNetCommandPassword string             `json:"openwebnet_command_password,omitempty"`
+	VoicemailMessagesDir      string             `json:"voicemail_messages_dir,omitempty"`
+	DeviceModel               string             `json:"device_model,omitempty"`
 }
 
 func Default() Config {
@@ -100,6 +103,7 @@ func Default() Config {
 		MediaRTSPPathMain:         "doorbell",
 		MediaRTPAudioPort:         5000,
 		MediaRTPVideoPort:         5007,
+		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -138,6 +142,12 @@ func Load(path string) (Config, error) {
 	cfg.Auth = persisted.Auth
 	cfg.ClaimCode = strings.TrimSpace(persisted.Auth.ClaimCode)
 	cfg.OpenWebNetCommandPassword = persisted.OpenWebNetCommandPassword
+	if strings.TrimSpace(persisted.DeviceModel) != "" {
+		cfg.DeviceModel = persisted.DeviceModel
+	}
+	if strings.TrimSpace(persisted.VoicemailMessagesDir) != "" {
+		cfg.VoicemailMessagesDir = persisted.VoicemailMessagesDir
+	}
 	if len(persisted.Entrypoints) > 0 {
 		cfg.Entrypoints = persisted.Entrypoints
 	}
@@ -156,6 +166,8 @@ func Save(path string, cfg Config) error {
 		Auth:                      configAuthState(cfg),
 		Entrypoints:               cfg.Entrypoints,
 		OpenWebNetCommandPassword: strings.TrimSpace(cfg.OpenWebNetCommandPassword),
+		VoicemailMessagesDir:      strings.TrimSpace(cfg.VoicemailMessagesDir),
+		DeviceModel:               strings.TrimSpace(cfg.DeviceModel),
 	}
 
 	b, err := json.MarshalIndent(persisted, "", "  ")
@@ -233,6 +245,7 @@ func (c *Config) normalize() {
 		c.OpenWebNetCommandSec = 3
 	}
 	c.OpenWebNetCommandPassword = strings.TrimSpace(c.OpenWebNetCommandPassword)
+	c.VoicemailMessagesDir = strings.TrimSpace(c.VoicemailMessagesDir)
 	if strings.TrimSpace(c.MediaSIPTransport) == "" {
 		c.MediaSIPTransport = "tcp"
 	}
@@ -256,6 +269,9 @@ func (c *Config) normalize() {
 	}
 	if c.MediaRTPVideoPort <= 0 || c.MediaRTPVideoPort > 65535 {
 		c.MediaRTPVideoPort = 5007
+	}
+	if c.VoicemailMessagesDir == "" {
+		c.VoicemailMessagesDir = "/home/bticino/cfg/extra/47/messages"
 	}
 	if len(c.Entrypoints) == 0 {
 		c.Entrypoints = Default().Entrypoints

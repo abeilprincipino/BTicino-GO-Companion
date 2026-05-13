@@ -9,16 +9,18 @@ import (
 )
 
 type Snapshot struct {
-	BootTime         time.Time          `json:"boot_time"`
-	CallState        string             `json:"call_state"`
-	StreamActive     bool               `json:"stream_active"`
-	AudioMuted       bool               `json:"audio_muted"`
-	ActiveEntrypoint string             `json:"active_entrypoint,omitempty"`
-	Ringing          bool               `json:"ringing"`
-	FloorRinging     bool               `json:"floor_ringing"`
-	LastEventType    string             `json:"last_event_type,omitempty"`
-	LastEventTS      *time.Time         `json:"last_event_ts,omitempty"`
-	Entrypoints      []entrypoint.Model `json:"entrypoints"`
+	BootTime                       time.Time          `json:"boot_time"`
+	CallState                      string             `json:"call_state"`
+	StreamActive                   bool               `json:"stream_active"`
+	AudioMuted                     bool               `json:"audio_muted"`
+	VoicemailEnabled               bool               `json:"voicemail_enabled"`
+	VoicemailWelcomeMessageEnabled bool               `json:"voicemail_welcome_message_enabled"`
+	ActiveEntrypoint               string             `json:"active_entrypoint,omitempty"`
+	Ringing                        bool               `json:"ringing"`
+	FloorRinging                   bool               `json:"floor_ringing"`
+	LastEventType                  string             `json:"last_event_type,omitempty"`
+	LastEventTS                    *time.Time         `json:"last_event_ts,omitempty"`
+	Entrypoints                    []entrypoint.Model `json:"entrypoints"`
 }
 
 type Projector struct {
@@ -29,12 +31,14 @@ type Projector struct {
 func NewProjector(entrypoints []entrypoint.Model) *Projector {
 	return &Projector{
 		snapshot: Snapshot{
-			BootTime:     time.Now(),
-			CallState:    CallStateIdle,
-			Entrypoints:  entrypoints,
-			StreamActive: false,
-			AudioMuted:   false,
-			Ringing:      false,
+			BootTime:                       time.Now(),
+			CallState:                      CallStateIdle,
+			Entrypoints:                    entrypoints,
+			StreamActive:                   false,
+			AudioMuted:                     false,
+			VoicemailEnabled:               false,
+			VoicemailWelcomeMessageEnabled: false,
+			Ringing:                        false,
 		},
 	}
 }

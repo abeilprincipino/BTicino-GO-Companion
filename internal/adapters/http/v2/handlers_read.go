@@ -2,6 +2,7 @@ package v2
 
 import (
 	"net/http"
+	"strings"
 
 	"bticino-go-companion/internal/observability"
 	"bticino-go-companion/internal/services/runtime"
@@ -38,6 +39,10 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		"audio": map[string]any{
 			"muted": snap.AudioMuted,
 		},
+		"voicemail": map[string]any{
+			"enabled":                 snap.VoicemailEnabled,
+			"welcome_message_enabled": snap.VoicemailWelcomeMessageEnabled,
+		},
 		"ringing":         snap.Ringing,
 		"floor_ringing":   snap.FloorRinging,
 		"last_event_type": snap.LastEventType,
@@ -66,18 +71,22 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
+	capabilities := []string{
+		"entrypoints_v2",
+		"events_v2",
+		"control_entrypoints_v2",
+		"control_call_v2",
+		"control_audio_v2",
+		"trace_openwebnet_v2",
+		"pairing_v2",
+		"auth_v2",
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.cfg.DeviceModel), "C100X") {
+		capabilities = append(capabilities, "control_voicemail_v2", "voicemail_messages_v2")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"api_version": "v2",
-		"capabilities": []string{
-			"entrypoints_v2",
-			"events_v2",
-			"control_entrypoints_v2",
-			"control_call_v2",
-			"control_audio_v2",
-			"trace_openwebnet_v2",
-			"pairing_v2",
-			"auth_v2",
-		},
+		"api_version":  "v2",
+		"capabilities": capabilities,
 	})
 }
 

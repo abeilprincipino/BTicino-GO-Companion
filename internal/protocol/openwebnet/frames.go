@@ -2,19 +2,25 @@ package openwebnetproto
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 const (
-	FrameACK            = "*#*1##"
-	FrameStop           = "*7*0*##"
-	FrameStreamProbe    = "*7*73#0#0*##"
-	FrameAudioStatusCmd = "*#8**33##"
-	FrameAudioMuteCmd   = "*#8**#33*0##"
-	FrameAudioUnmuteCmd = "*#8**#33*1##"
-	FrameAudioMuted     = "*#8**33*0##"
-	FrameAudioUnmuted   = "*#8**33*1##"
+	FrameACK                 = "*#*1##"
+	FrameStop                = "*7*0*##"
+	FrameStreamProbe         = "*7*73#0#0*##"
+	FrameAudioStatusCmd      = "*#8**33##"
+	FrameAudioMuteCmd        = "*#8**#33*0##"
+	FrameAudioUnmuteCmd      = "*#8**#33*1##"
+	FrameAudioMuted          = "*#8**33*0##"
+	FrameAudioUnmuted        = "*#8**33*1##"
+	FrameVoicemailStatusCmd  = "*#8**40##"
+	FrameVoicemailEnableCmd  = "*8*91##"
+	FrameVoicemailDisableCmd = "*8*92##"
 )
+
+var voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
 
 func BuildUnlockOpen(devAddr string) string {
 	return fmt.Sprintf("*8*19*%s##", strings.TrimSpace(devAddr))
@@ -72,6 +78,16 @@ func IsStreamStop(frame string) bool {
 
 func IsStreamProbe(frame string) bool {
 	return strings.TrimSpace(frame) == FrameStreamProbe
+}
+
+func ParseVoicemailStatus(frame string) (enabled bool, welcomeMessageEnabled bool, ok bool) {
+	matches := voicemailStatusFrameRegexp.FindStringSubmatch(strings.TrimSpace(frame))
+	if len(matches) < 3 {
+		return false, false, false
+	}
+	enabled = matches[1] == "1"
+	welcomeMessageEnabled = matches[2] == "1"
+	return enabled, welcomeMessageEnabled, true
 }
 
 func ExtractAddress(frame string) string {

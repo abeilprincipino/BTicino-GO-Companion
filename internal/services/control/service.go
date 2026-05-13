@@ -17,6 +17,7 @@ var (
 	ErrNoIncomingCall       = errors.New("no incoming call")
 	ErrNoActiveCall         = errors.New("no active call")
 	ErrAudioControlDisabled = errors.New("audio control unavailable")
+	ErrVoicemailUnavailable = errors.New("voicemail control unavailable")
 )
 
 type UnlockDriver interface {
@@ -38,16 +39,30 @@ type AudioDriver interface {
 	Unmute(ctx context.Context) error
 }
 
+type VoicemailDriver interface {
+	VoicemailEnable(ctx context.Context) error
+	VoicemailDisable(ctx context.Context) error
+}
+
 type Service struct {
 	entrypoints map[string]entrypoint.Model
 	stream      StreamDriver
 	unlock      UnlockDriver
 	call        CallDriver
 	audio       AudioDriver
+	voicemail   VoicemailDriver
 	emit        func(event.Envelope)
 }
 
-func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDriver, call CallDriver, audio AudioDriver, emit func(event.Envelope)) *Service {
+func New(
+	entrypoints []entrypoint.Model,
+	stream StreamDriver,
+	unlock UnlockDriver,
+	call CallDriver,
+	audio AudioDriver,
+	voicemail VoicemailDriver,
+	emit func(event.Envelope),
+) *Service {
 	index := make(map[string]entrypoint.Model, len(entrypoints))
 	for _, ep := range entrypoints {
 		id := strings.TrimSpace(ep.ID)
@@ -62,6 +77,7 @@ func New(entrypoints []entrypoint.Model, stream StreamDriver, unlock UnlockDrive
 		unlock:      unlock,
 		call:        call,
 		audio:       audio,
+		voicemail:   voicemail,
 		emit:        emit,
 	}
 }
@@ -152,6 +168,28 @@ func (s *Service) UnmuteAudio(ctx context.Context) error {
 		return err
 	}
 	s.publish(event.TypeAudioUnmuted, "", map[string]any{"source": "api"})
+	return nil
+}
+
+func (s *Service) EnableVoicemail(ctx context.Context) error {
+	if s.voicemail == nil {
+		return ErrVoicemailUnavailable
+	}
+	if err := s.voicemail.VoicemailEnable(ctx); err != nil {
+		return err
+	}
+	s.publish(event.TypeVoicemailEnabled, "", map[string]any{"source": "api"})
+	return nil
+}
+
+func (s *Service) DisableVoicemail(ctx context.Context) error {
+	if s.voicemail == nil {
+		return ErrVoicemailUnavailable
+	}
+	if err := s.voicemail.VoicemailDisable(ctx); err != nil {
+		return err
+	}
+	s.publish(event.TypeVoicemailDisabled, "", map[string]any{"source": "api"})
 	return nil
 }
 

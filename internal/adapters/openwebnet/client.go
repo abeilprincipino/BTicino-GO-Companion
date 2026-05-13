@@ -39,6 +39,11 @@ type CommandClient struct {
 	traceSink   func(string, map[string]any)
 }
 
+type VoicemailStatus struct {
+	Enabled               bool
+	WelcomeMessageEnabled bool
+}
+
 type frameReader struct {
 	conn    net.Conn
 	pending string
@@ -129,6 +134,36 @@ func (c *CommandClient) Unmute(ctx context.Context) error {
 
 func (c *CommandClient) AudioMutedStatus(ctx context.Context) (bool, error) {
 	return c.execAudioMutedStatus(ctx)
+}
+
+func (c *CommandClient) VoicemailEnable(ctx context.Context) error {
+	return c.exec(ctx, func(reader *frameReader) error {
+		if err := c.sendAndExpectSuccess(
+			reader,
+			"voicemail.enable",
+			openwebnetproto.FrameVoicemailEnableCmd,
+		); err != nil {
+			return fmt.Errorf("voicemail enable: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *CommandClient) VoicemailDisable(ctx context.Context) error {
+	return c.exec(ctx, func(reader *frameReader) error {
+		if err := c.sendAndExpectSuccess(
+			reader,
+			"voicemail.disable",
+			openwebnetproto.FrameVoicemailDisableCmd,
+		); err != nil {
+			return fmt.Errorf("voicemail disable: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *CommandClient) VoicemailStatus(ctx context.Context) (VoicemailStatus, error) {
+	return c.execVoicemailStatus(ctx)
 }
 
 func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) error) error {
@@ -276,6 +311,68 @@ func (c *CommandClient) execAudioMutedStatus(ctx context.Context) (bool, error) 
 		return false, err
 	}
 	return muted, nil
+}
+
+func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatus, error) {
+	status := VoicemailStatus{}
+	err := c.exec(ctx, func(reader *frameReader) error {
+		const operation = "voicemail.status"
+		c.emitTrace("tx", map[string]any{
+			"transport": "tcp_command",
+			"operation": operation,
+			"frame":     openwebnetproto.FrameVoicemailStatusCmd,
+		})
+		if _, err := reader.conn.Write([]byte(openwebnetproto.FrameVoicemailStatusCmd)); err != nil {
+			return fmt.Errorf("voicemail status send: %w", err)
+		}
+
+		frame, err := reader.readFrame()
+		if err != nil {
+			return fmt.Errorf("voicemail status read: %w", err)
+		}
+		frames := []string{frame}
+		finalFrame := frame
+
+		if frame == ownAckFrame {
+			for i := 0; i < 8; i++ {
+				next, timedOut, readErr := readFrameWithTimeout(reader, 40*time.Millisecond)
+				if readErr != nil {
+					if errors.Is(readErr, io.EOF) {
+						break
+					}
+					return fmt.Errorf("voicemail status read continuation: %w", readErr)
+				}
+				if timedOut {
+					break
+				}
+				frames = append(frames, next)
+				finalFrame = next
+				if next != ownAckFrame {
+					break
+				}
+			}
+		}
+
+		enabled, welcomeEnabled, ok := openwebnetproto.ParseVoicemailStatus(finalFrame)
+		c.emitTrace("rx", map[string]any{
+			"transport": "tcp_command",
+			"operation": operation,
+			"frame":     finalFrame,
+			"frames":    frames,
+			"accepted":  ok,
+			"terminal":  "status_frame",
+		})
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(finalFrame))
+		}
+		status.Enabled = enabled
+		status.WelcomeMessageEnabled = welcomeEnabled
+		return nil
+	})
+	if err != nil {
+		return VoicemailStatus{}, err
+	}
+	return status, nil
 }
 
 func (c *CommandClient) authenticateHMAC(reader *frameReader) error {

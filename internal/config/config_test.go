@@ -49,3 +49,22 @@ func TestSaveLoadPersistsOpenWebNetCommandPassword(t *testing.T) {
 		t.Fatalf("expected persisted openwebnet command password, got %q", loaded.OpenWebNetCommandPassword)
 	}
 }
+
+func TestSaveLoadPersistsDeviceModel(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.DeviceModel = "C100X"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.DeviceModel != "C100X" {
+		t.Fatalf("expected persisted model C100X, got %q", loaded.DeviceModel)
+	}
+}

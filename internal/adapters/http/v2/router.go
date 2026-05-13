@@ -69,12 +69,16 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v2/events", r.withBearer(r.handleEventsSSE))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet", r.withBearer(r.handleOpenWebNetTrace))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet/stream", r.withBearer(r.handleOpenWebNetTraceStream))
+	mux.HandleFunc("GET /api/v2/voicemail/messages", r.withBearer(r.handleVoicemailMessages))
+	mux.HandleFunc("GET /api/v2/voicemail/messages/{message_id}/{asset}", r.withBearer(r.handleVoicemailAsset))
 
 	// Protected control endpoints.
 	mux.HandleFunc("POST /api/v2/control/call/answer", r.withBearer(r.handleCallAnswer))
 	mux.HandleFunc("POST /api/v2/control/call/hangup", r.withBearer(r.handleCallHangup))
 	mux.HandleFunc("POST /api/v2/control/audio/mute", r.withBearer(r.handleAudioMute))
 	mux.HandleFunc("POST /api/v2/control/audio/unmute", r.withBearer(r.handleAudioUnmute))
+	mux.HandleFunc("POST /api/v2/control/voicemail/enable", r.withBearer(r.handleVoicemailEnable))
+	mux.HandleFunc("POST /api/v2/control/voicemail/disable", r.withBearer(r.handleVoicemailDisable))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/unlock", r.withBearer(r.handleEntrypointUnlock))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/start", r.withBearer(r.handleEntrypointStreamStart))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/stop", r.withBearer(r.handleEntrypointStreamStop))

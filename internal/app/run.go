@@ -165,6 +165,30 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 				},
 			})
 		}()
+		if !strings.EqualFold(strings.TrimSpace(cfg.DeviceModel), "C100X") {
+			go func() {
+				bootCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				voicemailStatus, err := commandClient.VoicemailStatus(bootCtx)
+				if err != nil {
+					logger.Printf("voicemail status bootstrap skipped: %v", err)
+					return
+				}
+				kind := event.TypeVoicemailDisabled
+				if voicemailStatus.Enabled {
+					kind = event.TypeVoicemailEnabled
+				}
+				publish(event.Envelope{
+					Type:   kind,
+					TS:     time.Now(),
+					Source: event.SourceSystem,
+					Payload: map[string]any{
+						"source":                  "bootstrap_probe",
+						"welcome_message_enabled": voicemailStatus.WelcomeMessageEnabled,
+					},
+				})
+			}()
+		}
 	}
 	mediaBackend := media.NewCompositeBackend(
 		sipManager,
@@ -200,7 +224,11 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
-	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, commandClient, func(ev event.Envelope) {
+	voicemailClient := commandClient
+	if strings.EqualFold(strings.TrimSpace(cfg.DeviceModel), "C100X") {
+		voicemailClient = nil
+	}
+	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, commandClient, voicemailClient, func(ev event.Envelope) {
 		publish(ev)
 	})
 	runtimeStatus.SetControlReady(true, "")
@@ -268,11 +296,11 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 			cfg.ClaimCode = defaultClaimCode()
 			changed = true
 		}
-		model := strings.TrimSpace(cfg.DeviceModel)
-		if model == "" || strings.EqualFold(model, "unknown") {
-			model = strings.TrimSpace(meta.Model)
-			if model == "" || strings.EqualFold(model, "unknown") {
-				model = "C300X"
+		model := normalizedDetectedModel(cfg.DeviceModel)
+		if model == "" {
+			model = normalizedDetectedModel(meta.Model)
+			if model == "" {
+				return config.Config{}, false, fmt.Errorf("device model detection failed: model is unknown in config and runtime metadata")
 			}
 			cfg.DeviceModel = model
 			changed = true
@@ -324,9 +352,9 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 	cfg.ClaimCode = defaultClaimCode()
 	meta := system.DetectLocalMetadata()
 
-	model := strings.TrimSpace(meta.Model)
-	if model == "" || strings.EqualFold(model, "unknown") {
-		model = "C300X"
+	model := normalizedDetectedModel(meta.Model)
+	if model == "" {
+		return config.Config{}, false, fmt.Errorf("device model detection failed: runtime metadata returned unknown model")
 	}
 	cfg.DeviceModel = model
 
@@ -370,4 +398,12 @@ func defaultClaimCode() string {
 	_, _ = rand.Read(buf)
 	hexVal := strings.ToLower(hex.EncodeToString(buf))
 	return hexVal[:4] + "-" + hexVal[4:]
+}
+
+func normalizedDetectedModel(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" || strings.EqualFold(trimmed, "unknown") {
+		return ""
+	}
+	return trimmed
 }

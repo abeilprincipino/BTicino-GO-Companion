@@ -8,6 +8,7 @@ import (
 )
 
 var _ control.UnlockDriver = (*openwebnet.CommandClient)(nil)
+var _ control.VoicemailDriver = (*openwebnet.CommandClient)(nil)
 var _ control.StreamDriver = (*media.Service)(nil)
 var _ control.CallDriver = (*sipadapter.Manager)(nil)
 var _ media.Backend = (*sipadapter.Manager)(nil)

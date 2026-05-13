@@ -110,6 +110,34 @@ func (r *Router) handleAudioUnmute(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "audio_unmute", "muted": false})
 }
 
+func (r *Router) handleVoicemailEnable(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.EnableVoicemail(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "voicemail_enable", "enabled": true})
+}
+
+func (r *Router) handleVoicemailDisable(w http.ResponseWriter, req *http.Request) {
+	if r.control == nil {
+		writeError(w, http.StatusServiceUnavailable, "control_unavailable", "control service unavailable")
+		return
+	}
+	ctx, cancel := contextWithTimeout(req)
+	defer cancel()
+	if err := r.control.DisableVoicemail(ctx); err != nil {
+		handleControlError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "voicemail_disable", "enabled": false})
+}
+
 func contextWithTimeout(req *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(req.Context(), 8*time.Second)
 }
@@ -126,6 +154,8 @@ func handleControlError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "no_active_call", err.Error())
 	case errors.Is(err, control.ErrAudioControlDisabled):
 		writeError(w, http.StatusConflict, "audio_control_disabled", err.Error())
+	case errors.Is(err, control.ErrVoicemailUnavailable):
+		writeError(w, http.StatusConflict, "voicemail_control_unavailable", err.Error())
 	default:
 		writeError(w, http.StatusBadGateway, "control_failed", err.Error())
 	}

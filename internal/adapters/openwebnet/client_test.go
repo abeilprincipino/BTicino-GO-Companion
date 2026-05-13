@@ -377,6 +377,128 @@ func TestCommandClientAudioMutedStatus(t *testing.T) {
 	}
 }
 
+func TestCommandClientVoicemailEnableDisable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		if got := reader.readFrame(t); got != "*8*91##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		_ = conn.Close()
+
+		conn, err = ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader = &testFrameReader{conn: conn}
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		if got := reader.readFrame(t); got != "*8*92##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	if err := c.VoicemailEnable(context.Background()); err != nil {
+		t.Fatalf("voicemail enable failed: %v", err)
+	}
+	if err := c.VoicemailDisable(context.Background()); err != nil {
+		t.Fatalf("voicemail disable failed: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
+func TestCommandClientVoicemailStatus(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**40##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#8**40*1*0*0153*1*25##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	status, err := c.VoicemailStatus(context.Background())
+	if err != nil {
+		t.Fatalf("voicemail status failed: %v", err)
+	}
+	if !status.Enabled {
+		t.Fatal("expected voicemail enabled=true")
+	}
+	if status.WelcomeMessageEnabled {
+		t.Fatal("expected welcome message enabled=false")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
 type errUnexpected string
 
 func (e errUnexpected) Error() string { return "unexpected frame: " + string(e) }

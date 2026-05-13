@@ -51,6 +51,13 @@ type audioStub struct {
 	unmuteErr   error
 }
 
+type voicemailStub struct {
+	enableCalls  int
+	disableCalls int
+	enableErr    error
+	disableErr   error
+}
+
 func (a *audioStub) Mute(context.Context) error {
 	a.muteCalls++
 	return a.muteErr
@@ -59,6 +66,16 @@ func (a *audioStub) Mute(context.Context) error {
 func (a *audioStub) Unmute(context.Context) error {
 	a.unmuteCalls++
 	return a.unmuteErr
+}
+
+func (v *voicemailStub) VoicemailEnable(context.Context) error {
+	v.enableCalls++
+	return v.enableErr
+}
+
+func (v *voicemailStub) VoicemailDisable(context.Context) error {
+	v.disableCalls++
+	return v.disableErr
 }
 
 func (c *callStub) Answer(context.Context) error {
@@ -76,8 +93,9 @@ func TestServiceUnlockEntrypoint(t *testing.T) {
 	stream := &streamStub{}
 	call := &callStub{}
 	audio := &audioStub{}
+	voicemail := &voicemailStub{}
 	var events []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "21", HasUnlock: true, HasStream: true}}, stream, unlock, call, audio, voicemail, func(ev event.Envelope) {
 		events = append(events, ev)
 	})
 
@@ -97,7 +115,8 @@ func TestServiceStreamStartUsesEntrypointDevAddr(t *testing.T) {
 	stream := &streamStub{}
 	call := &callStub{}
 	audio := &audioStub{}
-	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, nil)
+	voicemail := &voicemailStub{}
+	svc := New([]entrypoint.Model{{ID: "gate2", DevAddr: "22", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, voicemail, nil)
 
 	if err := svc.StartEntrypointStream(context.Background(), "gate2"); err != nil {
 		t.Fatalf("stream start failed: %v", err)
@@ -115,8 +134,9 @@ func TestServiceCallAnswerHangup(t *testing.T) {
 	stream := &streamStub{}
 	call := &callStub{}
 	audio := &audioStub{}
+	voicemail := &voicemailStub{}
 	var emitted []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, voicemail, func(ev event.Envelope) {
 		emitted = append(emitted, ev)
 	})
 
@@ -139,8 +159,9 @@ func TestServiceAudioMuteUnmute(t *testing.T) {
 	stream := &streamStub{}
 	call := &callStub{}
 	audio := &audioStub{}
+	voicemail := &voicemailStub{}
 	var emitted []event.Envelope
-	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, func(ev event.Envelope) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, voicemail, func(ev event.Envelope) {
 		emitted = append(emitted, ev)
 	})
 
@@ -154,6 +175,31 @@ func TestServiceAudioMuteUnmute(t *testing.T) {
 		t.Fatalf("unexpected audio driver invocations mute=%d unmute=%d", audio.muteCalls, audio.unmuteCalls)
 	}
 	if len(emitted) != 2 || emitted[0].Type != event.TypeAudioMuted || emitted[1].Type != event.TypeAudioUnmuted {
+		t.Fatalf("unexpected emitted events: %+v", emitted)
+	}
+}
+
+func TestServiceVoicemailEnableDisable(t *testing.T) {
+	unlock := &unlockStub{}
+	stream := &streamStub{}
+	call := &callStub{}
+	audio := &audioStub{}
+	voicemail := &voicemailStub{}
+	var emitted []event.Envelope
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true, HasUnlock: true}}, stream, unlock, call, audio, voicemail, func(ev event.Envelope) {
+		emitted = append(emitted, ev)
+	})
+
+	if err := svc.EnableVoicemail(context.Background()); err != nil {
+		t.Fatalf("voicemail enable failed: %v", err)
+	}
+	if err := svc.DisableVoicemail(context.Background()); err != nil {
+		t.Fatalf("voicemail disable failed: %v", err)
+	}
+	if voicemail.enableCalls != 1 || voicemail.disableCalls != 1 {
+		t.Fatalf("unexpected voicemail driver invocations enable=%d disable=%d", voicemail.enableCalls, voicemail.disableCalls)
+	}
+	if len(emitted) != 2 || emitted[0].Type != event.TypeVoicemailEnabled || emitted[1].Type != event.TypeVoicemailDisabled {
 		t.Fatalf("unexpected emitted events: %+v", emitted)
 	}
 }

@@ -76,5 +76,15 @@ func applyTransition(s *Snapshot, ev event.Envelope) {
 		s.AudioMuted = true
 	case event.TypeAudioUnmuted:
 		s.AudioMuted = false
+	case event.TypeVoicemailEnabled:
+		s.VoicemailEnabled = true
+		if welcomeEnabled, ok := ev.Payload["welcome_message_enabled"].(bool); ok {
+			s.VoicemailWelcomeMessageEnabled = welcomeEnabled
+		}
+	case event.TypeVoicemailDisabled:
+		s.VoicemailEnabled = false
+		if welcomeEnabled, ok := ev.Payload["welcome_message_enabled"].(bool); ok {
+			s.VoicemailWelcomeMessageEnabled = welcomeEnabled
+		}
 	}
 }

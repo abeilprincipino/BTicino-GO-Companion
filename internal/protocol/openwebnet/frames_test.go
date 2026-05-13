@@ -35,6 +35,30 @@ func TestFramePredicates(t *testing.T) {
 	}
 }
 
+func TestParseVoicemailStatus(t *testing.T) {
+	enabled, welcomeEnabled, ok := ParseVoicemailStatus("*#8**40*1*0*0153*1*25##")
+	if !ok {
+		t.Fatal("expected voicemail status frame to parse")
+	}
+	if !enabled {
+		t.Fatal("expected voicemail enabled")
+	}
+	if welcomeEnabled {
+		t.Fatal("expected welcome message disabled")
+	}
+
+	enabled, welcomeEnabled, ok = ParseVoicemailStatus("*#8**40*0*1*0153*1*25##")
+	if !ok {
+		t.Fatal("expected voicemail status frame to parse")
+	}
+	if enabled {
+		t.Fatal("expected voicemail disabled")
+	}
+	if !welcomeEnabled {
+		t.Fatal("expected welcome message enabled")
+	}
+}
+
 func TestExtractAddress(t *testing.T) {
 	tests := []struct {
 		name string

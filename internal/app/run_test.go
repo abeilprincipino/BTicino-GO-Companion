@@ -30,14 +30,33 @@ func TestRunReturnsLoadConfigErrorOnInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateConfigCreatesFile(t *testing.T) {
+func TestLoadOrCreateConfigUsesConfiguredModelWhenMetadataUnknown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "auth": {
+    "claim_code": "abcd-1234"
+  },
+  "entrypoints": [
+    {
+      "id": "main",
+      "label": "Main Gate",
+      "devaddr": "20",
+      "has_stream": true,
+      "has_unlock": true,
+      "has_ring": true
+    }
+  ],
+  "device_model": "C300X"
+}
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	cfg, created, err := loadOrCreateConfig(path)
 	if err != nil {
 		t.Fatalf("loadOrCreateConfig failed: %v", err)
 	}
-	if !created {
-		t.Fatalf("expected created=true")
+	if created {
+		t.Fatalf("expected created=false")
 	}
 	if strings.TrimSpace(cfg.ClaimCode) == "" {
 		t.Fatalf("expected generated claim code")

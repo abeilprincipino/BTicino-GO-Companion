@@ -79,3 +79,31 @@ func TestApplyTransitionTracksAudioMute(t *testing.T) {
 		t.Fatal("expected audio muted false")
 	}
 }
+
+func TestApplyTransitionTracksVoicemailStatus(t *testing.T) {
+	s := Snapshot{}
+	applyTransition(&s, event.Envelope{
+		Type: event.TypeVoicemailEnabled,
+		Payload: map[string]any{
+			"welcome_message_enabled": true,
+		},
+	})
+	if !s.VoicemailEnabled {
+		t.Fatal("expected voicemail enabled true")
+	}
+	if !s.VoicemailWelcomeMessageEnabled {
+		t.Fatal("expected welcome message enabled true")
+	}
+	applyTransition(&s, event.Envelope{
+		Type: event.TypeVoicemailDisabled,
+		Payload: map[string]any{
+			"welcome_message_enabled": false,
+		},
+	})
+	if s.VoicemailEnabled {
+		t.Fatal("expected voicemail enabled false")
+	}
+	if s.VoicemailWelcomeMessageEnabled {
+		t.Fatal("expected welcome message enabled false")
+	}
+}

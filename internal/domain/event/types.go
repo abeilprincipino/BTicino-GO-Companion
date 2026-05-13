@@ -18,6 +18,8 @@ const (
 	TypeUnlockTriggered   = "unlock.triggered"
 	TypeAudioMuted        = "audio.muted"
 	TypeAudioUnmuted      = "audio.unmuted"
+	TypeVoicemailEnabled  = "voicemail.enabled"
+	TypeVoicemailDisabled = "voicemail.disabled"
 )
 
 var knownTypes = map[string]struct{}{
@@ -38,6 +40,8 @@ var knownTypes = map[string]struct{}{
 	TypeUnlockTriggered:   {},
 	TypeAudioMuted:        {},
 	TypeAudioUnmuted:      {},
+	TypeVoicemailEnabled:  {},
+	TypeVoicemailDisabled: {},
 }
 
 func IsKnownType(kind string) bool {
