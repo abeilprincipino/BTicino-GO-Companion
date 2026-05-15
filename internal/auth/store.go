@@ -16,25 +16,25 @@ import (
 )
 
 const (
-	defaultChallengeTTL  = 5 * time.Minute
-	defaultRepairCodeTTL = 10 * time.Minute
+	defaultChallengeTTL    = 5 * time.Minute
+	defaultRepairCodeTTL   = 10 * time.Minute
 	defaultAccessTokenTTL  = 60 * time.Minute
 	defaultRefreshTokenTTL = 30 * 24 * time.Hour
 )
 
 var (
-	ErrAlreadyClaimed    = errors.New("device already claimed")
-	ErrInvalidClaimCode  = errors.New("invalid claim code")
-	ErrInvalidChallenge  = errors.New("invalid challenge")
-	ErrChallengeExpired  = errors.New("challenge expired")
-	ErrInvalidCredential = errors.New("invalid credential")
-	ErrTokenExpired      = errors.New("token expired")
+	ErrAlreadyClaimed      = errors.New("device already claimed")
+	ErrInvalidClaimCode    = errors.New("invalid claim code")
+	ErrInvalidChallenge    = errors.New("invalid challenge")
+	ErrChallengeExpired    = errors.New("challenge expired")
+	ErrInvalidCredential   = errors.New("invalid credential")
+	ErrTokenExpired        = errors.New("token expired")
 	ErrInvalidRefreshToken = errors.New("invalid refresh token")
 	ErrRefreshTokenExpired = errors.New("refresh token expired")
-	ErrKeyNotFound       = errors.New("key not found")
-	ErrRepairNotAllowed  = errors.New("repair flow is not allowed")
-	ErrInvalidRepairCode = errors.New("invalid repair code")
-	ErrRepairCodeExpired = errors.New("repair code expired")
+	ErrKeyNotFound         = errors.New("key not found")
+	ErrRepairNotAllowed    = errors.New("repair flow is not allowed")
+	ErrInvalidRepairCode   = errors.New("invalid repair code")
+	ErrRepairCodeExpired   = errors.New("repair code expired")
 )
 
 type Challenge struct {

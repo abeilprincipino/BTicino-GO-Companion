@@ -33,20 +33,49 @@ func TestRunReturnsLoadConfigErrorOnInvalidJSON(t *testing.T) {
 func TestLoadOrCreateConfigUsesConfiguredModelWhenMetadataUnknown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{
-  "auth": {
-    "claim_code": "abcd-1234"
-  },
-  "entrypoints": [
-    {
-      "id": "main",
-      "label": "Main Gate",
-      "devaddr": "20",
-      "has_stream": true,
-      "has_unlock": true,
-      "has_ring": true
+  "schema_version": 2,
+  "system": {
+    "control": {
+      "reboot": {
+        "enabled": true
+      }
+    },
+    "services": {
+      "dropbear": {
+        "enabled": true,
+        "exposed": true
+      }
     }
-  ],
-  "device_model": "C300X"
+  },
+  "intercom": {
+    "info": {
+      "model": "C300X"
+    },
+    "auth": {
+      "claim_code": "abcd-1234"
+    },
+    "config": {
+      "entrypoints": [
+        {
+          "id": "main",
+          "label": "Main Gate",
+          "devaddr": "20",
+          "has_stream": true,
+          "has_unlock": true,
+          "has_ring": true
+        }
+      ],
+      "audio": {
+        "enabled": true,
+        "exposed": true
+      },
+      "voicemail": {
+        "messages_dir": "/home/bticino/cfg/extra/47/messages",
+        "enabled": true,
+        "exposed": true
+      }
+    }
+  }
 }
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

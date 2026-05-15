@@ -220,10 +220,10 @@ func (r *Router) handleAuthRotate(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token_type":      "Bearer",
-		"access_token":    token,
-		"key_id":          keyID,
-		"replaced_key_id": prevKeyID,
+		"token_type":               "Bearer",
+		"access_token":             token,
+		"key_id":                   keyID,
+		"replaced_key_id":          prevKeyID,
 		"access_token_expires_at":  r.auth.AccessTokenExpiresAt().Format(time.RFC3339),
 		"refresh_token":            r.auth.RefreshToken(),
 		"refresh_token_expires_at": r.auth.RefreshTokenExpiresAt().Format(time.RFC3339),
@@ -250,10 +250,10 @@ func (r *Router) handleAuthRevoke(w http.ResponseWriter, req *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"revoked_key_id": body.KeyID,
-		"token_type":     "Bearer",
-		"access_token":   token,
-		"key_id":         keyID,
+		"revoked_key_id":           body.KeyID,
+		"token_type":               "Bearer",
+		"access_token":             token,
+		"key_id":                   keyID,
 		"access_token_expires_at":  r.auth.AccessTokenExpiresAt().Format(time.RFC3339),
 		"refresh_token":            r.auth.RefreshToken(),
 		"refresh_token_expires_at": r.auth.RefreshTokenExpiresAt().Format(time.RFC3339),

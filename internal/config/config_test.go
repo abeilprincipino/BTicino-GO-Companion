@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,7 +71,7 @@ func TestSaveLoadPersistsDeviceModel(t *testing.T) {
 	}
 }
 
-func TestSaveLoadPersistsDiagnosticMetadata(t *testing.T) {
+func TestSaveLoadDoesNotPersistRuntimeDiagnosticMetadata(t *testing.T) {
 	tDir := t.TempDir()
 	path := filepath.Join(tDir, "config.json")
 
@@ -89,25 +91,38 @@ func TestSaveLoadPersistsDiagnosticMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
-	if loaded.DeviceFirmware != cfg.DeviceFirmware {
-		t.Fatalf("expected firmware %q, got %q", cfg.DeviceFirmware, loaded.DeviceFirmware)
+	// Runtime diagnostics are not part of persisted schema config and
+	// should not be reloaded from disk.
+	if loaded.DeviceFirmware != "unknown" || loaded.DeviceHardware != "unknown" || loaded.DeviceKernel != "unknown" || loaded.DeviceDistribution != "unknown" || loaded.DeviceIP != "" || loaded.DeviceNetmask != "" || loaded.DeviceMAC != "" {
+		t.Fatalf("runtime diagnostics should not persist in config.json, got fw=%q hw=%q kernel=%q dist=%q ip=%q netmask=%q mac=%q", loaded.DeviceFirmware, loaded.DeviceHardware, loaded.DeviceKernel, loaded.DeviceDistribution, loaded.DeviceIP, loaded.DeviceNetmask, loaded.DeviceMAC)
 	}
-	if loaded.DeviceHardware != cfg.DeviceHardware {
-		t.Fatalf("expected hardware %q, got %q", cfg.DeviceHardware, loaded.DeviceHardware)
+}
+
+func TestSaveUsesNestedSystemAndConfigSchema(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.ExposeMuteControl = true
+	cfg.SystemRebootEnabled = true
+	cfg.SystemServices = map[string]SystemServiceConfig{"dropbear": {Enabled: true, Exposed: true}}
+	cfg.ExposeVoicemailToggle = true
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
 	}
-	if loaded.DeviceKernel != cfg.DeviceKernel {
-		t.Fatalf("expected kernel %q, got %q", cfg.DeviceKernel, loaded.DeviceKernel)
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
 	}
-	if loaded.DeviceDistribution != cfg.DeviceDistribution {
-		t.Fatalf("expected distribution %q, got %q", cfg.DeviceDistribution, loaded.DeviceDistribution)
+	text := string(raw)
+	if !strings.Contains(text, "\"system\"") {
+		t.Fatalf("expected nested system schema, got: %s", text)
 	}
-	if loaded.DeviceIP != cfg.DeviceIP {
-		t.Fatalf("expected ip %q, got %q", cfg.DeviceIP, loaded.DeviceIP)
+	if !strings.Contains(text, "\"intercom\"") {
+		t.Fatalf("expected nested intercom schema, got: %s", text)
 	}
-	if loaded.DeviceNetmask != cfg.DeviceNetmask {
-		t.Fatalf("expected netmask %q, got %q", cfg.DeviceNetmask, loaded.DeviceNetmask)
-	}
-	if loaded.DeviceMAC != cfg.DeviceMAC {
-		t.Fatalf("expected mac %q, got %q", cfg.DeviceMAC, loaded.DeviceMAC)
+	if !strings.Contains(text, "\"schema_version\": 2") {
+		t.Fatalf("expected schema version 2, got: %s", text)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
+	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
 	"bticino-go-companion/internal/system"
 )
@@ -230,16 +231,26 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
+	var audioClient *openwebnet.CommandClient
+	if cfg.MuteEnabled {
+		audioClient = commandClient
+	}
 	voicemailClient := commandClient
-	if strings.EqualFold(strings.TrimSpace(cfg.DeviceModel), "C100X") {
+	if !cfg.VoicemailEnabled || strings.EqualFold(strings.TrimSpace(cfg.DeviceModel), "C100X") {
 		voicemailClient = nil
 	}
-	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, commandClient, voicemailClient, func(ev event.Envelope) {
+	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, audioClient, voicemailClient, func(ev event.Envelope) {
 		publish(ev)
 	})
 	runtimeStatus.SetControlReady(true, "")
 
-	router := v2.NewRouter(cfg, authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker)
+	systemControl := systemcontrol.New(
+		system.NewInitServiceManager(),
+		cfg.SystemRebootEnabled,
+		cfg.SystemServices,
+	)
+
+	router := v2.NewRouter(cfg, authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker, systemControl)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
@@ -316,14 +327,12 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 			firmware = strings.TrimSpace(meta.Firmware)
 			if firmware != "" {
 				cfg.DeviceFirmware = firmware
-				changed = true
 			}
 		}
 		if strings.TrimSpace(cfg.DeviceIP) == "" {
 			ip := strings.TrimSpace(meta.Network.IP)
 			if ip != "" {
 				cfg.DeviceIP = ip
-				changed = true
 			}
 		}
 		if strings.TrimSpace(cfg.DeviceMAC) == "" || cfg.DeviceMAC == "00:00:00:00:00:00" {
@@ -335,12 +344,10 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 				mac = "00:00:00:00:00:00"
 			}
 			cfg.DeviceMAC = mac
-			changed = true
 		}
 		if cfg.DeviceWiFiRSSI == nil && meta.Network.WiFiRSSI != nil {
 			rssi := *meta.Network.WiFiRSSI
 			cfg.DeviceWiFiRSSI = &rssi
-			changed = true
 		}
 		if changed {
 			if saveErr := config.Save(path, cfg); saveErr != nil {
@@ -415,6 +422,7 @@ func normalizedDetectedModel(model string) string {
 }
 
 func enrichConfigWithDiagnosticMetadata(path string, cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+	_ = path
 	if cfg == nil || commandClient == nil {
 		return nil
 	}
@@ -426,31 +434,14 @@ func enrichConfigWithDiagnosticMetadata(path string, cfg *config.Config, command
 		return err
 	}
 
-	changed := false
-	changed = setIfNonEmpty(&cfg.DeviceIP, diagnostic.IP) || changed
-	changed = setIfNonEmpty(&cfg.DeviceNetmask, diagnostic.Netmask) || changed
-	changed = setIfNonEmpty(&cfg.DeviceMAC, diagnostic.MAC) || changed
-	changed = setIfNonEmpty(&cfg.DeviceFirmware, diagnostic.Firmware) || changed
-	changed = setIfNonEmpty(&cfg.DeviceHardware, diagnostic.Hardware) || changed
-	changed = setIfNonEmpty(&cfg.DeviceKernel, diagnostic.Kernel) || changed
-	changed = setIfNonEmpty(&cfg.DeviceDistribution, diagnostic.Distribution) || changed
-
-	if !changed {
-		return nil
-	}
-	if err := config.Save(path, *cfg); err != nil {
-		return fmt.Errorf("persist config diagnostics: %w", err)
-	}
-	logger.Printf(
-		"updated device diagnostics: ip=%s netmask=%s mac=%s fw=%s hw=%s kernel=%s distribution=%s",
-		cfg.DeviceIP,
-		cfg.DeviceNetmask,
-		cfg.DeviceMAC,
-		cfg.DeviceFirmware,
-		cfg.DeviceHardware,
-		cfg.DeviceKernel,
-		cfg.DeviceDistribution,
-	)
+	setIfNonEmpty(&cfg.DeviceIP, diagnostic.IP)
+	setIfNonEmpty(&cfg.DeviceNetmask, diagnostic.Netmask)
+	setIfNonEmpty(&cfg.DeviceMAC, diagnostic.MAC)
+	setIfNonEmpty(&cfg.DeviceFirmware, diagnostic.Firmware)
+	setIfNonEmpty(&cfg.DeviceHardware, diagnostic.Hardware)
+	setIfNonEmpty(&cfg.DeviceKernel, diagnostic.Kernel)
+	setIfNonEmpty(&cfg.DeviceDistribution, diagnostic.Distribution)
+	logger.Printf("refreshed runtime diagnostics snapshot")
 	return nil
 }
 

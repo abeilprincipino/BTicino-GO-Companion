@@ -63,6 +63,10 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 				"distribution": nullableString(r.cfg.DeviceDistribution),
 			},
 		},
+		"system_control": map[string]any{
+			"reboot_enabled": r.cfg.SystemRebootEnabled,
+			"services":       r.cfg.SystemServices,
+		},
 	}
 	if snap.LastEventType == "" {
 		delete(response, "last_event_type")
@@ -82,17 +86,29 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 		"events_v2",
 		"control_entrypoints_v2",
 		"control_call_v2",
-		"control_audio_v2",
 		"trace_openwebnet_v2",
 		"pairing_v2",
 		"auth_v2",
 	}
-	if !strings.EqualFold(strings.TrimSpace(r.cfg.DeviceModel), "C100X") {
+	if r.cfg.ExposeMuteControl {
+		capabilities = append(capabilities, "control_audio_v2")
+	}
+	if r.cfg.ExposeVoicemailToggle && !strings.EqualFold(strings.TrimSpace(r.cfg.DeviceModel), "C100X") {
 		capabilities = append(capabilities, "control_voicemail_v2", "voicemail_messages_v2")
+	}
+	if r.cfg.SystemRebootEnabled {
+		capabilities = append(capabilities, "control_system_reboot_v2")
+	}
+	if len(r.cfg.SystemServices) > 0 {
+		capabilities = append(capabilities, "control_system_services_v2")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"api_version":  "v2",
 		"capabilities": capabilities,
+		"system_control": map[string]any{
+			"reboot_enabled": r.cfg.SystemRebootEnabled,
+			"services":       r.cfg.SystemServices,
+		},
 	})
 }
 

@@ -11,7 +11,15 @@ import (
 	"bticino-go-companion/internal/domain/entrypoint"
 )
 
+const SchemaVersion = 2
+
+type SystemServiceConfig struct {
+	Enabled bool `json:"enabled"`
+	Exposed bool `json:"exposed"`
+}
+
 type Config struct {
+	SchemaVersion             int
 	ListenAddr                string
 	DataDir                   string
 	ClaimCode                 string
@@ -50,6 +58,13 @@ type Config struct {
 	MediaRTPVideoPort         int
 	VoicemailMessagesDir      string
 
+	SystemRebootEnabled   bool
+	SystemServices        map[string]SystemServiceConfig
+	MuteEnabled           bool
+	ExposeMuteControl     bool
+	VoicemailEnabled      bool
+	ExposeVoicemailToggle bool
+
 	Auth        AuthState
 	Entrypoints []entrypoint.Model
 }
@@ -66,22 +81,61 @@ type AuthState struct {
 }
 
 type PersistedConfig struct {
-	Auth                      AuthState          `json:"auth"`
-	Entrypoints               []entrypoint.Model `json:"entrypoints"`
-	OpenWebNetCommandPassword string             `json:"openwebnet_command_password,omitempty"`
-	VoicemailMessagesDir      string             `json:"voicemail_messages_dir,omitempty"`
-	DeviceModel               string             `json:"device_model,omitempty"`
-	DeviceFirmware            string             `json:"device_firmware,omitempty"`
-	DeviceHardware            string             `json:"device_hardware,omitempty"`
-	DeviceKernel              string             `json:"device_kernel,omitempty"`
-	DeviceDistribution        string             `json:"device_distribution,omitempty"`
-	DeviceIP                  string             `json:"device_ip,omitempty"`
-	DeviceNetmask             string             `json:"device_netmask,omitempty"`
-	DeviceMAC                 string             `json:"device_mac,omitempty"`
+	SchemaVersion             int               `json:"schema_version"`
+	System                    PersistedSystem   `json:"system"`
+	Intercom                  PersistedIntercom `json:"intercom"`
+	OpenWebNetCommandPassword string            `json:"openwebnet_command_password,omitempty"`
+}
+
+type PersistedSystem struct {
+	Control  PersistedSystemControl            `json:"control"`
+	Services map[string]PersistedSystemService `json:"services,omitempty"`
+	Future   map[string]any                    `json:"future,omitempty"`
+}
+
+type PersistedSystemControl struct {
+	Reboot PersistedSystemReboot `json:"reboot"`
+}
+
+type PersistedSystemReboot struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type PersistedSystemService struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	Exposed *bool `json:"exposed,omitempty"`
+}
+
+type PersistedIntercom struct {
+	Info   PersistedIntercomInfo   `json:"info"`
+	Auth   AuthState               `json:"auth"`
+	Config PersistedIntercomConfig `json:"config"`
+}
+
+type PersistedIntercomInfo struct {
+	Model string `json:"model,omitempty"`
+}
+
+type PersistedIntercomConfig struct {
+	Entrypoints []entrypoint.Model       `json:"entrypoints"`
+	Audio       PersistedIntercomAudio   `json:"audio"`
+	Voicemail   PersistedIntercomMailbox `json:"voicemail"`
+}
+
+type PersistedIntercomAudio struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	Exposed *bool `json:"exposed,omitempty"`
+}
+
+type PersistedIntercomMailbox struct {
+	MessagesDir string `json:"messages_dir,omitempty"`
+	Enabled     *bool  `json:"enabled,omitempty"`
+	Exposed     *bool  `json:"exposed,omitempty"`
 }
 
 func Default() Config {
 	return Config{
+		SchemaVersion:             SchemaVersion,
 		ListenAddr:                "0.0.0.0:8080",
 		DataDir:                   "/home/bticino/cfg/extra/companion",
 		ClaimCode:                 "",
@@ -119,6 +173,17 @@ func Default() Config {
 		MediaRTPAudioPort:         5000,
 		MediaRTPVideoPort:         5007,
 		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
+		SystemRebootEnabled:       true,
+		SystemServices: map[string]SystemServiceConfig{
+			"dropbear": {
+				Enabled: true,
+				Exposed: true,
+			},
+		},
+		MuteEnabled:           true,
+		ExposeMuteControl:     true,
+		VoicemailEnabled:      true,
+		ExposeVoicemailToggle: true,
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -154,39 +219,40 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse persisted config: %w", err)
 	}
 
-	cfg.Auth = persisted.Auth
-	cfg.ClaimCode = strings.TrimSpace(persisted.Auth.ClaimCode)
-	cfg.OpenWebNetCommandPassword = persisted.OpenWebNetCommandPassword
-	if strings.TrimSpace(persisted.DeviceModel) != "" {
-		cfg.DeviceModel = persisted.DeviceModel
+	if persisted.SchemaVersion > 0 {
+		cfg.SchemaVersion = persisted.SchemaVersion
 	}
-	if strings.TrimSpace(persisted.DeviceFirmware) != "" {
-		cfg.DeviceFirmware = persisted.DeviceFirmware
+	cfg.OpenWebNetCommandPassword = strings.TrimSpace(persisted.OpenWebNetCommandPassword)
+
+	cfg.DeviceModel = strings.TrimSpace(persisted.Intercom.Info.Model)
+	cfg.Auth = persisted.Intercom.Auth
+	cfg.ClaimCode = strings.TrimSpace(cfg.Auth.ClaimCode)
+
+	cfg.SystemRebootEnabled = boolFromPtr(persisted.System.Control.Reboot.Enabled, cfg.SystemRebootEnabled)
+	if len(persisted.System.Services) > 0 {
+		cfg.SystemServices = make(map[string]SystemServiceConfig, len(persisted.System.Services))
+		for rawName, rawCfg := range persisted.System.Services {
+			name := normalizeName(rawName)
+			if name == "" {
+				continue
+			}
+			cfg.SystemServices[name] = SystemServiceConfig{
+				Enabled: boolFromPtr(rawCfg.Enabled, true),
+				Exposed: boolFromPtr(rawCfg.Exposed, false),
+			}
+		}
 	}
-	if strings.TrimSpace(persisted.DeviceHardware) != "" {
-		cfg.DeviceHardware = persisted.DeviceHardware
+
+	if len(persisted.Intercom.Config.Entrypoints) > 0 {
+		cfg.Entrypoints = persisted.Intercom.Config.Entrypoints
 	}
-	if strings.TrimSpace(persisted.DeviceKernel) != "" {
-		cfg.DeviceKernel = persisted.DeviceKernel
+	cfg.MuteEnabled = boolFromPtr(persisted.Intercom.Config.Audio.Enabled, cfg.MuteEnabled)
+	cfg.ExposeMuteControl = boolFromPtr(persisted.Intercom.Config.Audio.Exposed, cfg.ExposeMuteControl)
+	if strings.TrimSpace(persisted.Intercom.Config.Voicemail.MessagesDir) != "" {
+		cfg.VoicemailMessagesDir = strings.TrimSpace(persisted.Intercom.Config.Voicemail.MessagesDir)
 	}
-	if strings.TrimSpace(persisted.DeviceDistribution) != "" {
-		cfg.DeviceDistribution = persisted.DeviceDistribution
-	}
-	if strings.TrimSpace(persisted.DeviceIP) != "" {
-		cfg.DeviceIP = persisted.DeviceIP
-	}
-	if strings.TrimSpace(persisted.DeviceNetmask) != "" {
-		cfg.DeviceNetmask = persisted.DeviceNetmask
-	}
-	if strings.TrimSpace(persisted.DeviceMAC) != "" {
-		cfg.DeviceMAC = persisted.DeviceMAC
-	}
-	if strings.TrimSpace(persisted.VoicemailMessagesDir) != "" {
-		cfg.VoicemailMessagesDir = persisted.VoicemailMessagesDir
-	}
-	if len(persisted.Entrypoints) > 0 {
-		cfg.Entrypoints = persisted.Entrypoints
-	}
+	cfg.VoicemailEnabled = boolFromPtr(persisted.Intercom.Config.Voicemail.Enabled, cfg.VoicemailEnabled)
+	cfg.ExposeVoicemailToggle = boolFromPtr(persisted.Intercom.Config.Voicemail.Exposed, cfg.ExposeVoicemailToggle)
 
 	cfg.normalize()
 	return cfg, nil
@@ -198,19 +264,42 @@ func Save(path string, cfg Config) error {
 	}
 	cfg.normalize()
 
+	persistedServices := make(map[string]PersistedSystemService, len(cfg.SystemServices))
+	for name, sc := range cfg.SystemServices {
+		persistedServices[name] = PersistedSystemService{
+			Enabled: boolPtr(sc.Enabled),
+			Exposed: boolPtr(sc.Exposed),
+		}
+	}
+
 	persisted := PersistedConfig{
-		Auth:                      configAuthState(cfg),
-		Entrypoints:               cfg.Entrypoints,
+		SchemaVersion:             SchemaVersion,
 		OpenWebNetCommandPassword: strings.TrimSpace(cfg.OpenWebNetCommandPassword),
-		VoicemailMessagesDir:      strings.TrimSpace(cfg.VoicemailMessagesDir),
-		DeviceModel:               strings.TrimSpace(cfg.DeviceModel),
-		DeviceFirmware:            strings.TrimSpace(cfg.DeviceFirmware),
-		DeviceHardware:            strings.TrimSpace(cfg.DeviceHardware),
-		DeviceKernel:              strings.TrimSpace(cfg.DeviceKernel),
-		DeviceDistribution:        strings.TrimSpace(cfg.DeviceDistribution),
-		DeviceIP:                  strings.TrimSpace(cfg.DeviceIP),
-		DeviceNetmask:             strings.TrimSpace(cfg.DeviceNetmask),
-		DeviceMAC:                 strings.TrimSpace(cfg.DeviceMAC),
+		System: PersistedSystem{
+			Control: PersistedSystemControl{
+				Reboot: PersistedSystemReboot{Enabled: boolPtr(cfg.SystemRebootEnabled)},
+			},
+			Services: persistedServices,
+			Future:   map[string]any{},
+		},
+		Intercom: PersistedIntercom{
+			Info: PersistedIntercomInfo{
+				Model: strings.TrimSpace(cfg.DeviceModel),
+			},
+			Auth: configAuthState(cfg),
+			Config: PersistedIntercomConfig{
+				Entrypoints: cfg.Entrypoints,
+				Audio: PersistedIntercomAudio{
+					Enabled: boolPtr(cfg.MuteEnabled),
+					Exposed: boolPtr(cfg.ExposeMuteControl),
+				},
+				Voicemail: PersistedIntercomMailbox{
+					MessagesDir: strings.TrimSpace(cfg.VoicemailMessagesDir),
+					Enabled:     boolPtr(cfg.VoicemailEnabled),
+					Exposed:     boolPtr(cfg.ExposeVoicemailToggle),
+				},
+			},
+		},
 	}
 
 	b, err := json.MarshalIndent(persisted, "", "  ")
@@ -233,6 +322,9 @@ func ResolvePath(path string) (string, error) {
 }
 
 func (c *Config) normalize() {
+	if c.SchemaVersion <= 0 {
+		c.SchemaVersion = SchemaVersion
+	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		c.ListenAddr = "0.0.0.0:8080"
 	}
@@ -347,6 +439,24 @@ func (c *Config) normalize() {
 			ep.DevAddr = "20"
 		}
 	}
+
+	c.SystemServices = normalizeSystemServices(c.SystemServices)
+	if len(c.SystemServices) == 0 {
+		c.SystemServices = map[string]SystemServiceConfig{
+			"dropbear": {Enabled: true, Exposed: true},
+		}
+	}
+
+	if !c.MuteEnabled {
+		c.ExposeMuteControl = false
+	}
+	if !c.VoicemailEnabled {
+		c.ExposeVoicemailToggle = false
+	}
+	if strings.EqualFold(c.DeviceModel, "C100X") {
+		c.VoicemailEnabled = false
+		c.ExposeVoicemailToggle = false
+	}
 }
 
 func configAuthState(cfg Config) AuthState {
@@ -356,4 +466,38 @@ func configAuthState(cfg Config) AuthState {
 		auth.ClaimCode = strings.TrimSpace(cfg.ClaimCode)
 	}
 	return auth
+}
+
+func normalizeSystemServices(raw map[string]SystemServiceConfig) map[string]SystemServiceConfig {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]SystemServiceConfig, len(raw))
+	for name, cfg := range raw {
+		normalized := normalizeName(name)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = SystemServiceConfig{Enabled: cfg.Enabled, Exposed: cfg.Exposed}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeName(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func boolPtr(v bool) *bool {
+	b := v
+	return &b
+}
+
+func boolFromPtr(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
 }

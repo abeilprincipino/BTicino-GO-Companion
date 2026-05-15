@@ -10,6 +10,7 @@ import (
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
+	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
 )
 
@@ -22,6 +23,7 @@ type Router struct {
 	events  *events.Broker
 	runtime *runtime.Status
 	trace   *trace.Broker
+	system  *systemcontrol.Service
 }
 
 func NewRouter(
@@ -33,6 +35,7 @@ func NewRouter(
 	eventBroker *events.Broker,
 	runtimeStatus *runtime.Status,
 	traceBroker *trace.Broker,
+	systemControl *systemcontrol.Service,
 ) *Router {
 	return &Router{
 		cfg:     cfg,
@@ -43,6 +46,7 @@ func NewRouter(
 		events:  eventBroker,
 		runtime: runtimeStatus,
 		trace:   traceBroker,
+		system:  systemControl,
 	}
 }
 
@@ -82,5 +86,9 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/unlock", r.withBearer(r.handleEntrypointUnlock))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/start", r.withBearer(r.handleEntrypointStreamStart))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/stop", r.withBearer(r.handleEntrypointStreamStop))
+	mux.HandleFunc("POST /api/v2/control/system/reboot", r.withBearer(r.handleSystemReboot))
+	mux.HandleFunc("GET /api/v2/control/system/services", r.withBearer(r.handleSystemServices))
+	mux.HandleFunc("GET /api/v2/control/system/services/{name}/status", r.withBearer(r.handleSystemServiceStatus))
+	mux.HandleFunc("POST /api/v2/control/system/services/{name}/restart", r.withBearer(r.handleSystemServiceRestart))
 	return mux
 }
