@@ -48,6 +48,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		logger.Printf("created default config at %s", resolvedConfigPath)
 	}
 
+	commandClient := openwebnet.NewCommandClient(cfg)
+	if cfg.OpenWebNetEnabled {
+		if err := enrichConfigWithDiagnosticMetadataWithRetry(resolvedConfigPath, &cfg, commandClient, logger); err != nil {
+			logger.Printf("device diagnostics bootstrap skipped: %v", err)
+		}
+	}
+
 	authStore, err := auth.NewStore(resolvedConfigPath, cfg.ClaimCode, cfg.DeviceModel, cfg.DeviceMAC)
 	if err != nil {
 		return fmt.Errorf("init auth store: %w", err)
@@ -132,7 +139,6 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}()
 
-	commandClient := openwebnet.NewCommandClient(cfg)
 	commandClient.SetTraceSink(func(direction string, payload map[string]any) {
 		rec := trace.Record{
 			Direction: direction,
@@ -406,4 +412,84 @@ func normalizedDetectedModel(model string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func enrichConfigWithDiagnosticMetadata(path string, cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+	if cfg == nil || commandClient == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	diagnostic, err := commandClient.DiagnosticSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	changed := false
+	changed = setIfNonEmpty(&cfg.DeviceIP, diagnostic.IP) || changed
+	changed = setIfNonEmpty(&cfg.DeviceNetmask, diagnostic.Netmask) || changed
+	changed = setIfNonEmpty(&cfg.DeviceMAC, diagnostic.MAC) || changed
+	changed = setIfNonEmpty(&cfg.DeviceFirmware, diagnostic.Firmware) || changed
+	changed = setIfNonEmpty(&cfg.DeviceHardware, diagnostic.Hardware) || changed
+	changed = setIfNonEmpty(&cfg.DeviceKernel, diagnostic.Kernel) || changed
+	changed = setIfNonEmpty(&cfg.DeviceDistribution, diagnostic.Distribution) || changed
+
+	if !changed {
+		return nil
+	}
+	if err := config.Save(path, *cfg); err != nil {
+		return fmt.Errorf("persist config diagnostics: %w", err)
+	}
+	logger.Printf(
+		"updated device diagnostics: ip=%s netmask=%s mac=%s fw=%s hw=%s kernel=%s distribution=%s",
+		cfg.DeviceIP,
+		cfg.DeviceNetmask,
+		cfg.DeviceMAC,
+		cfg.DeviceFirmware,
+		cfg.DeviceHardware,
+		cfg.DeviceKernel,
+		cfg.DeviceDistribution,
+	)
+	return nil
+}
+
+func enrichConfigWithDiagnosticMetadataWithRetry(path string, cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+	const (
+		maxAttempts = 5
+		retryDelay  = 2 * time.Second
+	)
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := enrichConfigWithDiagnosticMetadata(path, cfg, commandClient, logger); err != nil {
+			lastErr = err
+			if logger != nil {
+				logger.Printf("device diagnostics attempt %d/%d failed: %v", attempt, maxAttempts, err)
+			}
+			if attempt < maxAttempts {
+				time.Sleep(retryDelay)
+			}
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("diagnostic bootstrap failed with unknown error")
+}
+
+func setIfNonEmpty(dst *string, value string) bool {
+	if dst == nil {
+		return false
+	}
+	next := strings.TrimSpace(value)
+	if next == "" || strings.EqualFold(next, "unknown") {
+		return false
+	}
+	if strings.TrimSpace(*dst) == next {
+		return false
+	}
+	*dst = next
+	return true
 }

@@ -23,11 +23,6 @@ var (
 	ErrUnexpectedReply      = errors.New("openwebnet unexpected reply")
 )
 
-const (
-	ownAckFrame  = "*#*1##"
-	ownNackFrame = "*#*0##"
-)
-
 var frameRegexp = regexp.MustCompile(`\*#?.*?##`)
 
 type CommandClient struct {
@@ -42,6 +37,16 @@ type CommandClient struct {
 type VoicemailStatus struct {
 	Enabled               bool
 	WelcomeMessageEnabled bool
+}
+
+type DiagnosticSnapshot struct {
+	IP           string
+	Netmask      string
+	MAC          string
+	Firmware     string
+	Hardware     string
+	Kernel       string
+	Distribution string
 }
 
 type frameReader struct {
@@ -166,6 +171,59 @@ func (c *CommandClient) VoicemailStatus(ctx context.Context) (VoicemailStatus, e
 	return c.execVoicemailStatus(ctx)
 }
 
+func (c *CommandClient) DiagnosticSnapshot(ctx context.Context) (DiagnosticSnapshot, error) {
+	var snapshot DiagnosticSnapshot
+	err := c.exec(ctx, func(reader *frameReader) error {
+		snapshot.IP = c.queryDiagnosticValue(
+			reader,
+			"device.ip",
+			openwebnetproto.FrameDiagIPCmd,
+			openwebnetproto.ParseDiagnosticIP,
+		)
+		snapshot.Netmask = c.queryDiagnosticValue(
+			reader,
+			"device.netmask",
+			openwebnetproto.FrameDiagNetmaskCmd,
+			openwebnetproto.ParseDiagnosticNetmask,
+		)
+		snapshot.MAC = c.queryDiagnosticValue(
+			reader,
+			"device.mac",
+			openwebnetproto.FrameDiagMACCmd,
+			openwebnetproto.ParseDiagnosticMAC,
+		)
+		snapshot.Firmware = c.queryDiagnosticValue(
+			reader,
+			"device.firmware",
+			openwebnetproto.FrameDiagFirmwareCmd,
+			openwebnetproto.ParseDiagnosticFirmware,
+		)
+		snapshot.Hardware = c.queryDiagnosticValue(
+			reader,
+			"device.hardware",
+			openwebnetproto.FrameDiagHardwareCmd,
+			openwebnetproto.ParseDiagnosticHardware,
+		)
+		snapshot.Kernel = c.queryDiagnosticValue(
+			reader,
+			"device.kernel",
+			openwebnetproto.FrameDiagKernelCmd,
+			openwebnetproto.ParseDiagnosticKernel,
+		)
+		snapshot.Distribution = c.queryDiagnosticValue(
+			reader,
+			"device.distribution",
+			openwebnetproto.FrameDiagDistributionCmd,
+			openwebnetproto.ParseDiagnosticDistribution,
+		)
+		return nil
+	})
+	if err != nil {
+		return DiagnosticSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) error) error {
 	address := net.JoinHostPort(c.host, strconv.Itoa(c.port))
 	conn, err := net.DialTimeout("tcp", address, c.timeout)
@@ -178,7 +236,7 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 	}
 
 	reader := &frameReader{conn: conn}
-	handshake := "*99*0##"
+	handshake := openwebnetproto.FrameSessionStartCmd
 	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "handshake", "frame": handshake})
 	if _, err := conn.Write([]byte(handshake)); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
@@ -190,8 +248,8 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "handshake", "frame": resp, "mapped": false})
 
 	switch strings.TrimSpace(resp) {
-	case ownAckFrame:
-	case "*98*2##":
+	case openwebnetproto.FrameACK:
+	case openwebnetproto.FrameAuthRequired:
 		if c.password == "" {
 			return ErrAuthenticationNeeded
 		}
@@ -225,9 +283,9 @@ func (c *CommandClient) sendAndExpectFrame(reader *frameReader, operation string
 	accepted := false
 	terminal := ""
 	switch {
-	case resp == ownNackFrame:
+	case resp == openwebnetproto.FrameNACK:
 		terminal = "nack"
-	case resp == ownAckFrame:
+	case resp == openwebnetproto.FrameACK:
 		accepted = true
 		terminal = "ack"
 	case isAcceptedFrame(resp, acceptedFrames):
@@ -253,9 +311,9 @@ func (c *CommandClient) sendAndExpectFrame(reader *frameReader, operation string
 			}
 			frames = append(frames, next)
 			switch {
-			case next == ownAckFrame:
+			case next == openwebnetproto.FrameACK:
 				terminal = "ack"
-			case next == ownNackFrame:
+			case next == openwebnetproto.FrameNACK:
 				accepted = false
 				terminal = "nack"
 				i = 8
@@ -333,7 +391,7 @@ func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatu
 		frames := []string{frame}
 		finalFrame := frame
 
-		if frame == ownAckFrame {
+		if frame == openwebnetproto.FrameACK {
 			for i := 0; i < 8; i++ {
 				next, timedOut, readErr := readFrameWithTimeout(reader, 40*time.Millisecond)
 				if readErr != nil {
@@ -347,7 +405,7 @@ func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatu
 				}
 				frames = append(frames, next)
 				finalFrame = next
-				if next != ownAckFrame {
+				if next != openwebnetproto.FrameACK {
 					break
 				}
 			}
@@ -376,8 +434,8 @@ func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatu
 }
 
 func (c *CommandClient) authenticateHMAC(reader *frameReader) error {
-	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": ownAckFrame})
-	if _, err := reader.conn.Write([]byte(ownAckFrame)); err != nil {
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": openwebnetproto.FrameACK})
+	if _, err := reader.conn.Write([]byte(openwebnetproto.FrameACK)); err != nil {
 		return fmt.Errorf("send auth ack: %w", err)
 	}
 
@@ -413,8 +471,8 @@ func (c *CommandClient) authenticateHMAC(reader *frameReader) error {
 		return fmt.Errorf("unexpected auth server payload: %s", serverHMAC)
 	}
 
-	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": ownAckFrame})
-	if _, err := reader.conn.Write([]byte(ownAckFrame)); err != nil {
+	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": openwebnetproto.FrameACK})
+	if _, err := reader.conn.Write([]byte(openwebnetproto.FrameACK)); err != nil {
 		return fmt.Errorf("send auth final ack: %w", err)
 	}
 	finalAck, err := reader.readFrame()
@@ -422,7 +480,7 @@ func (c *CommandClient) authenticateHMAC(reader *frameReader) error {
 		return fmt.Errorf("read auth final ack: %w", err)
 	}
 	c.emitTrace("rx", map[string]any{"transport": "tcp_command", "phase": "auth", "frame": finalAck})
-	if strings.TrimSpace(finalAck) != ownAckFrame {
+	if strings.TrimSpace(finalAck) != openwebnetproto.FrameACK {
 		return fmt.Errorf("unexpected auth final ack: %s", finalAck)
 	}
 	return nil
@@ -546,4 +604,91 @@ func (c *CommandClient) emitTrace(direction string, payload map[string]any) {
 		return
 	}
 	c.traceSink(direction, payload)
+}
+
+func (c *CommandClient) queryDiagnosticValue(
+	reader *frameReader,
+	operation string,
+	frame string,
+	parser func(string) (string, bool),
+) string {
+	c.emitTrace("tx", map[string]any{
+		"transport": "tcp_command",
+		"operation": operation,
+		"frame":     frame,
+	})
+	if _, err := reader.conn.Write([]byte(frame)); err != nil {
+		c.emitTrace("rx", map[string]any{
+			"transport": "tcp_command",
+			"operation": operation,
+			"accepted":  false,
+			"terminal":  "write_error",
+			"error":     err.Error(),
+		})
+		return ""
+	}
+
+	first, err := reader.readFrame()
+	if err != nil {
+		c.emitTrace("rx", map[string]any{
+			"transport": "tcp_command",
+			"operation": operation,
+			"accepted":  false,
+			"terminal":  "read_error",
+			"error":     err.Error(),
+		})
+		return ""
+	}
+
+	frames := []string{first}
+	value := ""
+	accepted := false
+	finalFrame := first
+
+	if parsed, ok := parser(first); ok {
+		value = strings.TrimSpace(parsed)
+		accepted = value != ""
+	}
+
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		next, timedOut, readErr := readFrameWithTimeout(reader, 120*time.Millisecond)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			c.emitTrace("rx", map[string]any{
+				"transport": "tcp_command",
+				"operation": operation,
+				"frame":     finalFrame,
+				"frames":    frames,
+				"accepted":  accepted,
+				"terminal":  "read_error",
+				"error":     readErr.Error(),
+				"value":     value,
+			})
+			return value
+		}
+		if timedOut {
+			continue
+		}
+		frames = append(frames, next)
+		finalFrame = next
+		if parsed, ok := parser(next); ok {
+			value = strings.TrimSpace(parsed)
+			accepted = value != ""
+			break
+		}
+	}
+
+	c.emitTrace("rx", map[string]any{
+		"transport": "tcp_command",
+		"operation": operation,
+		"frame":     finalFrame,
+		"frames":    frames,
+		"accepted":  accepted,
+		"terminal":  "diagnostic",
+		"value":     value,
+	})
+	return value
 }
