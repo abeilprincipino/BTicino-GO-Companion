@@ -18,7 +18,11 @@ type Config struct {
 	DeviceName                string
 	DeviceModel               string
 	DeviceFirmware            string
+	DeviceHardware            string
+	DeviceKernel              string
+	DeviceDistribution        string
 	DeviceIP                  string
+	DeviceNetmask             string
 	DeviceMAC                 string
 	DeviceWiFiRSSI            *int
 	MDNSEnabled               bool
@@ -67,6 +71,13 @@ type PersistedConfig struct {
 	OpenWebNetCommandPassword string             `json:"openwebnet_command_password,omitempty"`
 	VoicemailMessagesDir      string             `json:"voicemail_messages_dir,omitempty"`
 	DeviceModel               string             `json:"device_model,omitempty"`
+	DeviceFirmware            string             `json:"device_firmware,omitempty"`
+	DeviceHardware            string             `json:"device_hardware,omitempty"`
+	DeviceKernel              string             `json:"device_kernel,omitempty"`
+	DeviceDistribution        string             `json:"device_distribution,omitempty"`
+	DeviceIP                  string             `json:"device_ip,omitempty"`
+	DeviceNetmask             string             `json:"device_netmask,omitempty"`
+	DeviceMAC                 string             `json:"device_mac,omitempty"`
 }
 
 func Default() Config {
@@ -77,7 +88,11 @@ func Default() Config {
 		DeviceName:                "BTicino Companion",
 		DeviceModel:               "unknown",
 		DeviceFirmware:            "unknown",
+		DeviceHardware:            "unknown",
+		DeviceKernel:              "unknown",
+		DeviceDistribution:        "unknown",
 		DeviceIP:                  "",
+		DeviceNetmask:             "",
 		DeviceMAC:                 "",
 		DeviceWiFiRSSI:            nil,
 		MDNSEnabled:               true,
@@ -145,6 +160,27 @@ func Load(path string) (Config, error) {
 	if strings.TrimSpace(persisted.DeviceModel) != "" {
 		cfg.DeviceModel = persisted.DeviceModel
 	}
+	if strings.TrimSpace(persisted.DeviceFirmware) != "" {
+		cfg.DeviceFirmware = persisted.DeviceFirmware
+	}
+	if strings.TrimSpace(persisted.DeviceHardware) != "" {
+		cfg.DeviceHardware = persisted.DeviceHardware
+	}
+	if strings.TrimSpace(persisted.DeviceKernel) != "" {
+		cfg.DeviceKernel = persisted.DeviceKernel
+	}
+	if strings.TrimSpace(persisted.DeviceDistribution) != "" {
+		cfg.DeviceDistribution = persisted.DeviceDistribution
+	}
+	if strings.TrimSpace(persisted.DeviceIP) != "" {
+		cfg.DeviceIP = persisted.DeviceIP
+	}
+	if strings.TrimSpace(persisted.DeviceNetmask) != "" {
+		cfg.DeviceNetmask = persisted.DeviceNetmask
+	}
+	if strings.TrimSpace(persisted.DeviceMAC) != "" {
+		cfg.DeviceMAC = persisted.DeviceMAC
+	}
 	if strings.TrimSpace(persisted.VoicemailMessagesDir) != "" {
 		cfg.VoicemailMessagesDir = persisted.VoicemailMessagesDir
 	}
@@ -168,6 +204,13 @@ func Save(path string, cfg Config) error {
 		OpenWebNetCommandPassword: strings.TrimSpace(cfg.OpenWebNetCommandPassword),
 		VoicemailMessagesDir:      strings.TrimSpace(cfg.VoicemailMessagesDir),
 		DeviceModel:               strings.TrimSpace(cfg.DeviceModel),
+		DeviceFirmware:            strings.TrimSpace(cfg.DeviceFirmware),
+		DeviceHardware:            strings.TrimSpace(cfg.DeviceHardware),
+		DeviceKernel:              strings.TrimSpace(cfg.DeviceKernel),
+		DeviceDistribution:        strings.TrimSpace(cfg.DeviceDistribution),
+		DeviceIP:                  strings.TrimSpace(cfg.DeviceIP),
+		DeviceNetmask:             strings.TrimSpace(cfg.DeviceNetmask),
+		DeviceMAC:                 strings.TrimSpace(cfg.DeviceMAC),
 	}
 
 	b, err := json.MarshalIndent(persisted, "", "  ")
@@ -200,7 +243,11 @@ func (c *Config) normalize() {
 	c.DeviceName = strings.TrimSpace(c.DeviceName)
 	c.DeviceModel = strings.TrimSpace(c.DeviceModel)
 	c.DeviceFirmware = strings.TrimSpace(c.DeviceFirmware)
+	c.DeviceHardware = strings.TrimSpace(c.DeviceHardware)
+	c.DeviceKernel = strings.TrimSpace(c.DeviceKernel)
+	c.DeviceDistribution = strings.TrimSpace(c.DeviceDistribution)
 	c.DeviceIP = strings.TrimSpace(c.DeviceIP)
+	c.DeviceNetmask = strings.TrimSpace(c.DeviceNetmask)
 	c.DeviceMAC = strings.TrimSpace(c.DeviceMAC)
 	c.MDNSServiceType = strings.TrimSpace(c.MDNSServiceType)
 	c.Auth.DeviceID = strings.TrimSpace(c.Auth.DeviceID)
@@ -222,6 +269,15 @@ func (c *Config) normalize() {
 	}
 	if c.DeviceFirmware == "" {
 		c.DeviceFirmware = "unknown"
+	}
+	if c.DeviceHardware == "" {
+		c.DeviceHardware = "unknown"
+	}
+	if c.DeviceKernel == "" {
+		c.DeviceKernel = "unknown"
+	}
+	if c.DeviceDistribution == "" {
+		c.DeviceDistribution = "unknown"
 	}
 	if c.MDNSServiceType == "" {
 		c.MDNSServiceType = "_bticomp._tcp"

@@ -1,7 +1,6 @@
 package openwebnetproto
 
 import (
-	"strings"
 	"time"
 
 	"bticino-go-companion/internal/domain/event"
@@ -55,7 +54,7 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 		return []event.Envelope{newEvent(event.TypeAudioMuted, map[string]any{"raw": raw})}
 	case raw == FrameAudioUnmuted:
 		return []event.Envelope{newEvent(event.TypeAudioUnmuted, map[string]any{"raw": raw})}
-	case strings.HasPrefix(raw, "*#8**40*"):
+	case IsVoicemailStatus(raw):
 		enabled, welcomeEnabled, ok := ParseVoicemailStatus(raw)
 		if !ok {
 			return nil

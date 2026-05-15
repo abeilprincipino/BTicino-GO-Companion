@@ -499,6 +499,111 @@ func TestCommandClientVoicemailStatus(t *testing.T) {
 	}
 }
 
+func TestCommandClientDiagnosticSnapshot(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**10##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**10*192*0*2*172##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**11##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**11*255*255*255*0##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**12##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**12*0*17*34*51*68*85##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**16##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**16*9*8*7##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**17##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**17*3*2*1##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**23##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**23*6*1*2##*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#13**24##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##*#13**24*1*2*3##*#*1##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	snap, err := c.DiagnosticSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostic snapshot failed: %v", err)
+	}
+	if snap.IP != "192.0.2.172" {
+		t.Fatalf("unexpected ip: %q", snap.IP)
+	}
+	if snap.Netmask != "255.255.255.0" {
+		t.Fatalf("unexpected netmask: %q", snap.Netmask)
+	}
+	if snap.MAC != "00:11:22:33:44:55" {
+		t.Fatalf("unexpected mac: %q", snap.MAC)
+	}
+	if snap.Firmware != "9.8.7" {
+		t.Fatalf("unexpected firmware: %q", snap.Firmware)
+	}
+	if snap.Hardware != "3.2.1" {
+		t.Fatalf("unexpected hardware: %q", snap.Hardware)
+	}
+	if snap.Kernel != "6.1.2" {
+		t.Fatalf("unexpected kernel: %q", snap.Kernel)
+	}
+	if snap.Distribution != "1.2.3" {
+		t.Fatalf("unexpected distribution: %q", snap.Distribution)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
 type errUnexpected string
 
 func (e errUnexpected) Error() string { return "unexpected frame: " + string(e) }

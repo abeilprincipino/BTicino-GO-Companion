@@ -3,11 +3,15 @@ package openwebnetproto
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 const (
 	FrameACK                 = "*#*1##"
+	FrameNACK                = "*#*0##"
+	FrameSessionStartCmd     = "*99*0##"
+	FrameAuthRequired        = "*98*2##"
 	FrameStop                = "*7*0*##"
 	FrameStreamProbe         = "*7*73#0#0*##"
 	FrameAudioStatusCmd      = "*#8**33##"
@@ -18,6 +22,13 @@ const (
 	FrameVoicemailStatusCmd  = "*#8**40##"
 	FrameVoicemailEnableCmd  = "*8*91##"
 	FrameVoicemailDisableCmd = "*8*92##"
+	FrameDiagIPCmd           = "*#13**10##"
+	FrameDiagNetmaskCmd      = "*#13**11##"
+	FrameDiagMACCmd          = "*#13**12##"
+	FrameDiagFirmwareCmd     = "*#13**16##"
+	FrameDiagHardwareCmd     = "*#13**17##"
+	FrameDiagKernelCmd       = "*#13**23##"
+	FrameDiagDistributionCmd = "*#13**24##"
 )
 
 var voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
@@ -90,6 +101,11 @@ func ParseVoicemailStatus(frame string) (enabled bool, welcomeMessageEnabled boo
 	return enabled, welcomeMessageEnabled, true
 }
 
+func IsVoicemailStatus(frame string) bool {
+	_, _, ok := ParseVoicemailStatus(frame)
+	return ok
+}
+
 func ExtractAddress(frame string) string {
 	if IsViewRequest(frame) {
 		if addr := extractViewRequestAddress(frame); addr != "" {
@@ -124,4 +140,81 @@ func extractViewRequestAddress(frame string) string {
 		return ""
 	}
 	return strings.TrimSpace(segment[idx+1:])
+}
+
+func ParseDiagnosticReply(frame string) (code string, values []string, ok bool) {
+	trimmed := strings.TrimSpace(frame)
+	if !strings.HasPrefix(trimmed, "*#13**") || !strings.HasSuffix(trimmed, "##") {
+		return "", nil, false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(trimmed, "*#13**"), "##")
+	if body == "" {
+		return "", nil, false
+	}
+	parts := strings.Split(body, "*")
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+	code = strings.TrimSpace(parts[0])
+	if code == "" {
+		return "", nil, false
+	}
+	values = make([]string, 0, len(parts)-1)
+	for _, part := range parts[1:] {
+		values = append(values, strings.TrimSpace(part))
+	}
+	return code, values, true
+}
+
+func ParseDiagnosticIP(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "10")
+}
+
+func ParseDiagnosticNetmask(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "11")
+}
+
+func ParseDiagnosticFirmware(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "16")
+}
+
+func ParseDiagnosticHardware(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "17")
+}
+
+func ParseDiagnosticKernel(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "23")
+}
+
+func ParseDiagnosticDistribution(frame string) (string, bool) {
+	return parseDiagnosticDotString(frame, "24")
+}
+
+func ParseDiagnosticMAC(frame string) (string, bool) {
+	code, values, ok := ParseDiagnosticReply(frame)
+	if !ok || code != "12" || len(values) != 6 {
+		return "", false
+	}
+	var parts [6]string
+	for i, raw := range values {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 0 || v > 255 {
+			return "", false
+		}
+		parts[i] = fmt.Sprintf("%02x", v)
+	}
+	return strings.Join(parts[:], ":"), true
+}
+
+func parseDiagnosticDotString(frame string, expectedCode string) (string, bool) {
+	code, values, ok := ParseDiagnosticReply(frame)
+	if !ok || code != expectedCode || len(values) == 0 {
+		return "", false
+	}
+	out := strings.Join(values, ".")
+	out = strings.TrimSpace(strings.Trim(out, "."))
+	if out == "" {
+		return "", false
+	}
+	return out, true
 }

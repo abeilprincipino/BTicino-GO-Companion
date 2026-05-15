@@ -18,13 +18,13 @@ func TestParseFirmwareVersionFromGeneralInfo(t *testing.T) {
 	content := `<?xml version="1.0"?>
 <Root_Element>
 	<general_info>
-		<ver_webserver>1.7.19</ver_webserver>
+		<ver_webserver>9.8.7</ver_webserver>
 	</general_info>
 </Root_Element>`
 
 	got, ok := parseFirmwareVersion(content)
-	if !ok || got != "1.7.19" {
-		t.Fatalf("expected firmware 1.7.19, got %q ok=%v", got, ok)
+	if !ok || got != "9.8.7" {
+		t.Fatalf("expected firmware 9.8.7, got %q ok=%v", got, ok)
 	}
 }
 
@@ -32,18 +32,18 @@ func TestParseFirmwareVersionWithISO88591Declaration(t *testing.T) {
 	content := `<?xml version="1.0" encoding="ISO-8859-1" ?>
 <Root_Element>
 	<general_info>
-		<ver_webserver>1.7.19</ver_webserver>
+		<ver_webserver>9.8.7</ver_webserver>
 	</general_info>
 </Root_Element>`
 
 	got, ok := parseFirmwareVersion(content)
-	if !ok || got != "1.7.19" {
-		t.Fatalf("expected firmware 1.7.19 with ISO-8859-1 declaration, got %q ok=%v", got, ok)
+	if !ok || got != "9.8.7" {
+		t.Fatalf("expected firmware 9.8.7 with ISO-8859-1 declaration, got %q ok=%v", got, ok)
 	}
 }
 
 func TestParseFirmwareVersionRejectsMalformedXML(t *testing.T) {
-	content := `<broken><xml><ver_webserver>1.7.19</ver_webserver>`
+	content := `<broken><xml><ver_webserver>9.8.7</ver_webserver>`
 	got, ok := parseFirmwareVersion(content)
 	if ok || got != "" {
 		t.Fatalf("expected empty firmware for malformed xml, got %q ok=%v", got, ok)
@@ -75,7 +75,7 @@ func TestParseConnManServiceBlock(t *testing.T) {
                      )
                      dict entry(
                         string "Address"
-                        variant                            string "00:03:50:96:2E:38"
+                        variant                            string "00:11:22:33:44:55"
                      )
                   ]
             )
@@ -84,7 +84,7 @@ func TestParseConnManServiceBlock(t *testing.T) {
                variant                   array [
                      dict entry(
                         string "Address"
-                        variant                            string "10.0.0.172"
+                        variant                            string "192.0.2.172"
                      )
                   ]
             )
@@ -101,10 +101,10 @@ func TestParseConnManServiceBlock(t *testing.T) {
 	if svc.Interface != "wlan0" {
 		t.Fatalf("unexpected interface: %s", svc.Interface)
 	}
-	if svc.IP != "10.0.0.172" {
+	if svc.IP != "192.0.2.172" {
 		t.Fatalf("unexpected ip: %s", svc.IP)
 	}
-	if svc.MAC != "00:03:50:96:2E:38" {
+	if svc.MAC != "00:11:22:33:44:55" {
 		t.Fatalf("unexpected mac: %s", svc.MAC)
 	}
 	if svc.Strength == nil || *svc.Strength != 61 {
@@ -139,7 +139,7 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                      )
                      dict entry(
                         string "Address"
-                        variant                            string "00:03:50:96:2E:39"
+                        variant                            string "00:11:22:33:44:56"
                      )
                   ]
             )
@@ -148,7 +148,7 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                variant                   array [
                      dict entry(
                         string "Address"
-                        variant                            string "10.0.0.173"
+                        variant                            string "192.0.2.173"
                      )
                   ]
             )
@@ -178,7 +178,7 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                      )
                      dict entry(
                         string "Address"
-                        variant                            string "00:03:50:96:2E:38"
+                        variant                            string "00:11:22:33:44:55"
                      )
                   ]
             )
@@ -187,7 +187,7 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                variant                   array [
                      dict entry(
                         string "Address"
-                        variant                            string "10.0.0.172"
+                        variant                            string "192.0.2.172"
                      )
                   ]
             )

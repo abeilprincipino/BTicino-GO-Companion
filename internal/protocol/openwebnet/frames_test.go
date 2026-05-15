@@ -78,3 +78,40 @@ func TestExtractAddress(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDiagnosticFrames(t *testing.T) {
+	ip, ok := ParseDiagnosticIP("*#13**10*192*0*2*172##")
+	if !ok || ip != "192.0.2.172" {
+		t.Fatalf("unexpected ip parse: ok=%v ip=%q", ok, ip)
+	}
+
+	netmask, ok := ParseDiagnosticNetmask("*#13**11*255*255*255*0##")
+	if !ok || netmask != "255.255.255.0" {
+		t.Fatalf("unexpected netmask parse: ok=%v netmask=%q", ok, netmask)
+	}
+
+	mac, ok := ParseDiagnosticMAC("*#13**12*0*17*34*51*68*85##")
+	if !ok || mac != "00:11:22:33:44:55" {
+		t.Fatalf("unexpected mac parse: ok=%v mac=%q", ok, mac)
+	}
+
+	firmware, ok := ParseDiagnosticFirmware("*#13**16*9*8*7##")
+	if !ok || firmware != "9.8.7" {
+		t.Fatalf("unexpected firmware parse: ok=%v fw=%q", ok, firmware)
+	}
+
+	hardware, ok := ParseDiagnosticHardware("*#13**17*3*2*1##")
+	if !ok || hardware != "3.2.1" {
+		t.Fatalf("unexpected hardware parse: ok=%v hw=%q", ok, hardware)
+	}
+
+	kernel, ok := ParseDiagnosticKernel("*#13**23*6*1*2##")
+	if !ok || kernel != "6.1.2" {
+		t.Fatalf("unexpected kernel parse: ok=%v kernel=%q", ok, kernel)
+	}
+
+	distribution, ok := ParseDiagnosticDistribution("*#13**24*1*2*3##")
+	if !ok || distribution != "1.2.3" {
+		t.Fatalf("unexpected distribution parse: ok=%v distribution=%q", ok, distribution)
+	}
+}

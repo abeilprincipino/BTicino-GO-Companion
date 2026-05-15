@@ -14,7 +14,7 @@ func newTestStore(t *testing.T) *Store {
 		filepath.Join(t.TempDir(), "config.json"),
 		"abcd-1234",
 		"C300X",
-		"00:03:50:96:2e:38",
+		"00:11:22:33:44:55",
 	)
 	if err != nil {
 		t.Fatalf("new test store: %v", err)
@@ -24,7 +24,7 @@ func newTestStore(t *testing.T) *Store {
 
 func TestStoreUsesMACBasedDeviceID(t *testing.T) {
 	store := newTestStore(t)
-	if got, want := store.DeviceID(), "c300x_000350962e38"; got != want {
+	if got, want := store.DeviceID(), "c300x_001122334455"; got != want {
 		t.Fatalf("unexpected device id: got %q want %q", got, want)
 	}
 }

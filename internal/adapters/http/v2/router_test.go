@@ -58,7 +58,7 @@ func newTestRuntimeStatus() *runtime.Status {
 
 func newClaimedAuth(t *testing.T) (*auth.Store, string) {
 	t.Helper()
-	store, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:03:50:96:2e:38")
+	store, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:11:22:33:44:55")
 	if err != nil {
 		t.Fatalf("new auth store: %v", err)
 	}
@@ -118,6 +118,9 @@ func TestRouterStateEndpoint(t *testing.T) {
 	if _, ok := body.Device["model"]; !ok {
 		t.Fatalf("expected device model in state payload: %+v", body.Device)
 	}
+	if _, ok := body.Device["hardware"]; !ok {
+		t.Fatalf("expected device hardware in state payload: %+v", body.Device)
+	}
 }
 
 func TestRouterRejectsUnauthorizedProtectedEndpoint(t *testing.T) {
@@ -131,7 +134,7 @@ func TestRouterRejectsUnauthorizedProtectedEndpoint(t *testing.T) {
 }
 
 func TestRouterPairChallengeAndClaim(t *testing.T) {
-	authStore, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:03:50:96:2e:38")
+	authStore, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:11:22:33:44:55")
 	if err != nil {
 		t.Fatalf("new auth store: %v", err)
 	}

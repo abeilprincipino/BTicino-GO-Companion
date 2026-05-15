@@ -27,6 +27,7 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 	snap := r.state.Snapshot()
 	network := map[string]any{
 		"ip":            nullableString(r.cfg.DeviceIP),
+		"netmask":       nullableString(r.cfg.DeviceNetmask),
 		"mac":           nullableString(r.cfg.DeviceMAC),
 		"wifi_rssi":     r.cfg.DeviceWiFiRSSI,
 		"wifi_strength": r.cfg.DeviceWiFiRSSI,
@@ -53,9 +54,14 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 			"name":     nullableString(r.cfg.DeviceModel),
 			"model":    nullableString(r.cfg.DeviceModel),
 			"firmware": nullableString(r.cfg.DeviceFirmware),
+			"hardware": nullableString(r.cfg.DeviceHardware),
 		},
 		"diagnostics": map[string]any{
 			"network": network,
+			"system": map[string]any{
+				"kernel":       nullableString(r.cfg.DeviceKernel),
+				"distribution": nullableString(r.cfg.DeviceDistribution),
+			},
 		},
 	}
 	if snap.LastEventType == "" {
