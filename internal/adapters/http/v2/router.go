@@ -12,6 +12,7 @@ import (
 	"bticino-go-companion/internal/services/state"
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
+	"bticino-go-companion/internal/services/update"
 )
 
 type Router struct {
@@ -24,6 +25,7 @@ type Router struct {
 	runtime *runtime.Status
 	trace   *trace.Broker
 	system  *systemcontrol.Service
+	update  *update.Manager
 }
 
 func NewRouter(
@@ -36,6 +38,7 @@ func NewRouter(
 	runtimeStatus *runtime.Status,
 	traceBroker *trace.Broker,
 	systemControl *systemcontrol.Service,
+	updateManager *update.Manager,
 ) *Router {
 	return &Router{
 		cfg:     cfg,
@@ -47,6 +50,7 @@ func NewRouter(
 		runtime: runtimeStatus,
 		trace:   traceBroker,
 		system:  systemControl,
+		update:  updateManager,
 	}
 }
 
@@ -90,5 +94,9 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v2/control/system/services", r.withBearer(r.handleSystemServices))
 	mux.HandleFunc("GET /api/v2/control/system/services/{name}/status", r.withBearer(r.handleSystemServiceStatus))
 	mux.HandleFunc("POST /api/v2/control/system/services/{name}/restart", r.withBearer(r.handleSystemServiceRestart))
+	mux.HandleFunc("GET /api/v2/control/system/update/status", r.withBearer(r.handleSystemUpdateStatus))
+	mux.HandleFunc("POST /api/v2/control/system/update/check", r.withBearer(r.handleSystemUpdateCheck))
+	mux.HandleFunc("POST /api/v2/control/system/update/apply", r.withBearer(r.handleSystemUpdateApply))
+	mux.HandleFunc("POST /api/v2/control/system/update/rollback", r.withBearer(r.handleSystemUpdateRollback))
 	return mux
 }

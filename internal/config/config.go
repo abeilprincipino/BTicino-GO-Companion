@@ -13,6 +13,13 @@ import (
 
 const SchemaVersion = 2
 
+var (
+	BuildVersion     = "0.1.0-dev"
+	BuildGitSHA      = "dev"
+	BuildDate        = "unknown"
+	BuildReleaseRepo = ""
+)
+
 type SystemServiceConfig struct {
 	Enabled bool `json:"enabled"`
 	Exposed bool `json:"exposed"`
@@ -20,6 +27,9 @@ type SystemServiceConfig struct {
 
 type Config struct {
 	SchemaVersion             int
+	Version                   string
+	GitSHA                    string
+	BuildDate                 string
 	ListenAddr                string
 	DataDir                   string
 	ClaimCode                 string
@@ -58,12 +68,23 @@ type Config struct {
 	MediaRTPVideoPort         int
 	VoicemailMessagesDir      string
 
-	SystemRebootEnabled   bool
-	SystemServices        map[string]SystemServiceConfig
-	MuteEnabled           bool
-	ExposeMuteControl     bool
-	VoicemailEnabled      bool
-	ExposeVoicemailToggle bool
+	SystemRebootEnabled       bool
+	SystemUpdateEnabled       bool
+	SystemUpdateExposed       bool
+	SystemUpdateAllowApply    bool
+	SystemUpdateAllowRollback bool
+	SystemServices            map[string]SystemServiceConfig
+	UpdateManifestPath        string
+	UpdateReleaseAPI          string
+	UpdateReleaseRepo         string
+	UpdateReleaseAsset        string
+	UpdateServiceScript       string
+	UpdateAllowSelfRestart    bool
+	UpdateHealthTimeoutSec    int
+	MuteEnabled               bool
+	ExposeMuteControl         bool
+	VoicemailEnabled          bool
+	ExposeVoicemailToggle     bool
 
 	Auth        AuthState
 	Entrypoints []entrypoint.Model
@@ -95,10 +116,24 @@ type PersistedSystem struct {
 
 type PersistedSystemControl struct {
 	Reboot PersistedSystemReboot `json:"reboot"`
+	Update PersistedSystemUpdate `json:"update"`
 }
 
 type PersistedSystemReboot struct {
 	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type PersistedSystemUpdate struct {
+	Enabled       *bool  `json:"enabled,omitempty"`
+	Exposed       *bool  `json:"exposed,omitempty"`
+	AllowApply    *bool  `json:"allow_apply,omitempty"`
+	AllowRollback *bool  `json:"allow_rollback,omitempty"`
+	ManifestPath  string `json:"manifest_path,omitempty"`
+	ReleaseAPI    string `json:"release_api,omitempty"`
+	ReleaseRepo   string `json:"release_repo,omitempty"`
+	ReleaseAsset  string `json:"release_asset,omitempty"`
+	ServiceScript string `json:"service_script,omitempty"`
+	HealthTimeout *int   `json:"health_timeout_sec,omitempty"`
 }
 
 type PersistedSystemService struct {
@@ -136,6 +171,9 @@ type PersistedIntercomMailbox struct {
 func Default() Config {
 	return Config{
 		SchemaVersion:             SchemaVersion,
+		Version:                   BuildVersion,
+		GitSHA:                    BuildGitSHA,
+		BuildDate:                 BuildDate,
 		ListenAddr:                "0.0.0.0:8080",
 		DataDir:                   "/home/bticino/cfg/extra/companion",
 		ClaimCode:                 "",
@@ -174,16 +212,27 @@ func Default() Config {
 		MediaRTPVideoPort:         5007,
 		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
 		SystemRebootEnabled:       true,
+		SystemUpdateEnabled:       true,
+		SystemUpdateExposed:       false,
+		SystemUpdateAllowApply:    false,
+		SystemUpdateAllowRollback: false,
 		SystemServices: map[string]SystemServiceConfig{
 			"dropbear": {
 				Enabled: true,
 				Exposed: true,
 			},
 		},
-		MuteEnabled:           true,
-		ExposeMuteControl:     true,
-		VoicemailEnabled:      true,
-		ExposeVoicemailToggle: true,
+		UpdateManifestPath:     "",
+		UpdateReleaseAPI:       "https://api.github.com",
+		UpdateReleaseRepo:      strings.TrimSpace(BuildReleaseRepo),
+		UpdateReleaseAsset:     "companion",
+		UpdateServiceScript:    "/etc/init.d/companion",
+		UpdateAllowSelfRestart: false,
+		UpdateHealthTimeoutSec: 8,
+		MuteEnabled:            true,
+		ExposeMuteControl:      true,
+		VoicemailEnabled:       true,
+		ExposeVoicemailToggle:  true,
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -229,6 +278,28 @@ func Load(path string) (Config, error) {
 	cfg.ClaimCode = strings.TrimSpace(cfg.Auth.ClaimCode)
 
 	cfg.SystemRebootEnabled = boolFromPtr(persisted.System.Control.Reboot.Enabled, cfg.SystemRebootEnabled)
+	cfg.SystemUpdateEnabled = boolFromPtr(persisted.System.Control.Update.Enabled, cfg.SystemUpdateEnabled)
+	cfg.SystemUpdateExposed = boolFromPtr(persisted.System.Control.Update.Exposed, cfg.SystemUpdateExposed)
+	cfg.SystemUpdateAllowApply = boolFromPtr(persisted.System.Control.Update.AllowApply, cfg.SystemUpdateAllowApply)
+	cfg.SystemUpdateAllowRollback = boolFromPtr(persisted.System.Control.Update.AllowRollback, cfg.SystemUpdateAllowRollback)
+	if strings.TrimSpace(persisted.System.Control.Update.ManifestPath) != "" {
+		cfg.UpdateManifestPath = strings.TrimSpace(persisted.System.Control.Update.ManifestPath)
+	}
+	if strings.TrimSpace(persisted.System.Control.Update.ReleaseAPI) != "" {
+		cfg.UpdateReleaseAPI = strings.TrimSpace(persisted.System.Control.Update.ReleaseAPI)
+	}
+	if strings.TrimSpace(persisted.System.Control.Update.ReleaseRepo) != "" {
+		cfg.UpdateReleaseRepo = strings.TrimSpace(persisted.System.Control.Update.ReleaseRepo)
+	}
+	if strings.TrimSpace(persisted.System.Control.Update.ReleaseAsset) != "" {
+		cfg.UpdateReleaseAsset = strings.TrimSpace(persisted.System.Control.Update.ReleaseAsset)
+	}
+	if strings.TrimSpace(persisted.System.Control.Update.ServiceScript) != "" {
+		cfg.UpdateServiceScript = strings.TrimSpace(persisted.System.Control.Update.ServiceScript)
+	}
+	if persisted.System.Control.Update.HealthTimeout != nil && *persisted.System.Control.Update.HealthTimeout > 0 {
+		cfg.UpdateHealthTimeoutSec = *persisted.System.Control.Update.HealthTimeout
+	}
 	if len(persisted.System.Services) > 0 {
 		cfg.SystemServices = make(map[string]SystemServiceConfig, len(persisted.System.Services))
 		for rawName, rawCfg := range persisted.System.Services {
@@ -278,6 +349,18 @@ func Save(path string, cfg Config) error {
 		System: PersistedSystem{
 			Control: PersistedSystemControl{
 				Reboot: PersistedSystemReboot{Enabled: boolPtr(cfg.SystemRebootEnabled)},
+				Update: PersistedSystemUpdate{
+					Enabled:       boolPtr(cfg.SystemUpdateEnabled),
+					Exposed:       boolPtr(cfg.SystemUpdateExposed),
+					AllowApply:    boolPtr(cfg.SystemUpdateAllowApply),
+					AllowRollback: boolPtr(cfg.SystemUpdateAllowRollback),
+					ManifestPath:  strings.TrimSpace(cfg.UpdateManifestPath),
+					ReleaseAPI:    strings.TrimSpace(cfg.UpdateReleaseAPI),
+					ReleaseRepo:   strings.TrimSpace(cfg.UpdateReleaseRepo),
+					ReleaseAsset:  strings.TrimSpace(cfg.UpdateReleaseAsset),
+					ServiceScript: strings.TrimSpace(cfg.UpdateServiceScript),
+					HealthTimeout: intPtrPositive(cfg.UpdateHealthTimeoutSec),
+				},
 			},
 			Services: persistedServices,
 			Future:   map[string]any{},
@@ -321,9 +404,33 @@ func ResolvePath(path string) (string, error) {
 	return filepath.Join(filepath.Dir(exe), "config.json"), nil
 }
 
+func (c Config) UpdateBinCurrentPath() string {
+	return filepath.Join(c.DataDir, "companion")
+}
+
+func (c Config) UpdateBinPreviousPath() string {
+	return filepath.Join(c.DataDir, "companion.previous")
+}
+
+func (c Config) UpdateBinCandidatePath() string {
+	return filepath.Join(c.DataDir, "companion.candidate")
+}
+
 func (c *Config) normalize() {
 	if c.SchemaVersion <= 0 {
 		c.SchemaVersion = SchemaVersion
+	}
+	c.Version = strings.TrimSpace(c.Version)
+	c.GitSHA = strings.TrimSpace(c.GitSHA)
+	c.BuildDate = strings.TrimSpace(c.BuildDate)
+	if c.Version == "" {
+		c.Version = BuildVersion
+	}
+	if c.GitSHA == "" {
+		c.GitSHA = BuildGitSHA
+	}
+	if c.BuildDate == "" {
+		c.BuildDate = BuildDate
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		c.ListenAddr = "0.0.0.0:8080"
@@ -394,6 +501,11 @@ func (c *Config) normalize() {
 	}
 	c.OpenWebNetCommandPassword = strings.TrimSpace(c.OpenWebNetCommandPassword)
 	c.VoicemailMessagesDir = strings.TrimSpace(c.VoicemailMessagesDir)
+	c.UpdateManifestPath = strings.TrimSpace(c.UpdateManifestPath)
+	c.UpdateReleaseAPI = strings.TrimSpace(c.UpdateReleaseAPI)
+	c.UpdateReleaseRepo = strings.TrimSpace(c.UpdateReleaseRepo)
+	c.UpdateReleaseAsset = strings.TrimSpace(c.UpdateReleaseAsset)
+	c.UpdateServiceScript = strings.TrimSpace(c.UpdateServiceScript)
 	if strings.TrimSpace(c.MediaSIPTransport) == "" {
 		c.MediaSIPTransport = "tcp"
 	}
@@ -421,6 +533,18 @@ func (c *Config) normalize() {
 	if c.VoicemailMessagesDir == "" {
 		c.VoicemailMessagesDir = "/home/bticino/cfg/extra/47/messages"
 	}
+	if c.UpdateReleaseAPI == "" {
+		c.UpdateReleaseAPI = "https://api.github.com"
+	}
+	if c.UpdateReleaseAsset == "" {
+		c.UpdateReleaseAsset = "companion"
+	}
+	if c.UpdateServiceScript == "" {
+		c.UpdateServiceScript = "/etc/init.d/companion"
+	}
+	if c.UpdateHealthTimeoutSec <= 0 {
+		c.UpdateHealthTimeoutSec = 8
+	}
 	if len(c.Entrypoints) == 0 {
 		c.Entrypoints = Default().Entrypoints
 	}
@@ -445,6 +569,15 @@ func (c *Config) normalize() {
 		c.SystemServices = map[string]SystemServiceConfig{
 			"dropbear": {Enabled: true, Exposed: true},
 		}
+	}
+	if !c.SystemUpdateEnabled {
+		c.SystemUpdateExposed = false
+		c.SystemUpdateAllowApply = false
+		c.SystemUpdateAllowRollback = false
+	}
+	if !c.SystemUpdateExposed {
+		c.SystemUpdateAllowApply = false
+		c.SystemUpdateAllowRollback = false
 	}
 
 	if !c.MuteEnabled {
@@ -500,4 +633,12 @@ func boolFromPtr(v *bool, fallback bool) bool {
 		return fallback
 	}
 	return *v
+}
+
+func intPtrPositive(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	value := v
+	return &value
 }

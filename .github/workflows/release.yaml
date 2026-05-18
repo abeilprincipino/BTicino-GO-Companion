@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release binary
+        env:
+          VERSION: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          mkdir -p dist
+          GIT_SHA="$(git rev-parse --short=7 "$GITHUB_SHA")"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+            go build \
+            -buildvcs=false \
+            -trimpath \
+            -ldflags "-s -w -X bticino-go-companion/internal/config.BuildVersion=${VERSION} -X bticino-go-companion/internal/config.BuildGitSHA=${GIT_SHA} -X bticino-go-companion/internal/config.BuildDate=${BUILD_DATE} -X bticino-go-companion/internal/config.BuildReleaseRepo=${RELEASE_REPO}" \
+            -o dist/companion \
+            ./cmd/companion
+
+          sha256sum dist/companion > dist/companion.sha256
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bticino-go-companion-${{ github.ref_name }}
+          path: |
+            dist/companion
+            dist/companion.sha256
+
+      - name: Prepare release body
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+          cat > /tmp/release-notes.md <<EOF
+          ## Install
+
+          \`\`\`sh
+          wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/${TAG}/scripts/install.sh"
+
+          sh /tmp/companion-install.sh
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: |
+            dist/companion
+            dist/companion.sha256
+          body_path: /tmp/release-notes.md
+          append_body: true
+          generate_release_notes: true

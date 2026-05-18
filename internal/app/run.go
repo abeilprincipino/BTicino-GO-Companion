@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"bticino-go-companion/internal/services/state"
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
+	"bticino-go-companion/internal/services/update"
 	"bticino-go-companion/internal/system"
 )
 
@@ -258,8 +260,20 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.SystemRebootEnabled,
 		cfg.SystemServices,
 	)
+	updateManager := update.NewManager(cfg, logger, selfHealthCheck(cfg))
 
-	router := v2.NewRouter(cfg, authStore, guard, projector, controlService, eventBroker, runtimeStatus, traceBroker, systemControl)
+	router := v2.NewRouter(
+		cfg,
+		authStore,
+		guard,
+		projector,
+		controlService,
+		eventBroker,
+		runtimeStatus,
+		traceBroker,
+		systemControl,
+		updateManager,
+	)
 	srv.Handler = router.Handler()
 
 	if cfg.OpenWebNetEnabled {
@@ -492,4 +506,35 @@ func setIfNonEmpty(dst *string, value string) bool {
 	}
 	*dst = next
 	return true
+}
+
+func selfHealthCheck(cfg config.Config) func(context.Context) error {
+	client := &http.Client{}
+	target := "127.0.0.1:8080"
+	if host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.ListenAddr)); err == nil {
+		_ = host
+		if strings.TrimSpace(port) != "" {
+			target = net.JoinHostPort("127.0.0.1", strings.TrimSpace(port))
+		}
+	}
+	return func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodGet,
+			"http://"+target+"/api/v2/health",
+			nil,
+		)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("health endpoint status=%d", resp.StatusCode)
+		}
+		return nil
+	}
 }

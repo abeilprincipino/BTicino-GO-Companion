@@ -7,6 +7,7 @@ require (
 	github.com/emiago/sipgo v1.3.1
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/pion/rtp v1.10.2
+	golang.org/x/mod v0.27.0
 )
 
 require (

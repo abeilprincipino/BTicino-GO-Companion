@@ -66,6 +66,7 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		"system_control": map[string]any{
 			"reboot_enabled": r.cfg.SystemRebootEnabled,
 			"services":       r.cfg.SystemServices,
+			"update":         r.systemUpdateSnapshot(),
 		},
 	}
 	if snap.LastEventType == "" {
@@ -102,12 +103,16 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 	if len(r.cfg.SystemServices) > 0 {
 		capabilities = append(capabilities, "control_system_services_v2")
 	}
+	if r.cfg.SystemUpdateEnabled && r.cfg.SystemUpdateExposed {
+		capabilities = append(capabilities, "control_system_update_v2")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"api_version":  "v2",
 		"capabilities": capabilities,
 		"system_control": map[string]any{
 			"reboot_enabled": r.cfg.SystemRebootEnabled,
 			"services":       r.cfg.SystemServices,
+			"update":         r.systemUpdateSnapshot(),
 		},
 	})
 }
@@ -132,4 +137,17 @@ func stateEntrypointValue(value string) string {
 		return "none"
 	}
 	return value
+}
+
+func (r *Router) systemUpdateSnapshot() map[string]any {
+	out := map[string]any{
+		"enabled":        r.cfg.SystemUpdateEnabled,
+		"exposed":        r.cfg.SystemUpdateExposed,
+		"allow_apply":    r.cfg.SystemUpdateAllowApply,
+		"allow_rollback": r.cfg.SystemUpdateAllowRollback,
+	}
+	if r.update != nil {
+		out["status"] = r.update.Status()
+	}
+	return out
 }

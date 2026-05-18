@@ -125,4 +125,34 @@ func TestSaveUsesNestedSystemAndConfigSchema(t *testing.T) {
 	if !strings.Contains(text, "\"schema_version\": 2") {
 		t.Fatalf("expected schema version 2, got: %s", text)
 	}
+	if !strings.Contains(text, "\"update\"") {
+		t.Fatalf("expected system.control.update block, got: %s", text)
+	}
+}
+
+func TestSaveLoadPersistsSystemUpdateControl(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.SystemUpdateEnabled = true
+	cfg.SystemUpdateExposed = true
+	cfg.SystemUpdateAllowApply = true
+	cfg.SystemUpdateAllowRollback = true
+	cfg.UpdateReleaseRepo = "owner/repo"
+	cfg.UpdateReleaseAsset = "companion"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if !loaded.SystemUpdateEnabled || !loaded.SystemUpdateExposed || !loaded.SystemUpdateAllowApply || !loaded.SystemUpdateAllowRollback {
+		t.Fatalf("expected persisted update controls, got enabled=%v exposed=%v apply=%v rollback=%v", loaded.SystemUpdateEnabled, loaded.SystemUpdateExposed, loaded.SystemUpdateAllowApply, loaded.SystemUpdateAllowRollback)
+	}
+	if loaded.UpdateReleaseRepo != "owner/repo" {
+		t.Fatalf("expected persisted release repo owner/repo, got %q", loaded.UpdateReleaseRepo)
+	}
 }
