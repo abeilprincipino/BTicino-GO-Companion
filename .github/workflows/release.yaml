@@ -47,6 +47,17 @@ jobs:
 
           sha256sum dist/companion > dist/companion.sha256
 
+      - name: Build install bundle
+        run: |
+          set -eu
+          rm -rf dist/companion-bundle
+          mkdir -p dist/companion-bundle/companion/init.d
+          cp scripts/install.sh dist/companion-bundle/companion/install.sh
+          cp scripts/init.d/companion dist/companion-bundle/companion/init.d/companion
+          cp dist/companion dist/companion-bundle/companion/companion
+          chmod 755 dist/companion-bundle/companion/install.sh dist/companion-bundle/companion/init.d/companion dist/companion-bundle/companion/companion
+          tar -C dist/companion-bundle -czf dist/companion.tar.gz companion
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -54,19 +65,18 @@ jobs:
           path: |
             dist/companion
             dist/companion.sha256
+            dist/companion.tar.gz
 
       - name: Prepare release body
         run: |
           set -eu
-          TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
           cat > /tmp/release-notes.md <<EOF
           ## Install
 
           \`\`\`sh
-          wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/${TAG}/scripts/install.sh"
-
-          sh /tmp/companion-install.sh
+          wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh"
+          COMPANION_RELEASE_REPO="${REPO}" sh /tmp/companion-install.sh
           \`\`\`
           EOF
 
@@ -77,6 +87,7 @@ jobs:
           files: |
             dist/companion
             dist/companion.sha256
+            dist/companion.tar.gz
           body_path: /tmp/release-notes.md
           append_body: true
           generate_release_notes: true
