@@ -93,13 +93,6 @@ func (g *Guard) Begin(scope Scope, ip string) Decision {
 	pruneActors(s, now)
 	actor := g.getActor(s, ip, now)
 
-	if now.Before(actor.LockedUntil) {
-		return Decision{Allowed: false, Code: "ip_locked", Message: "too many failed attempts", RetryAfter: actor.LockedUntil.Sub(now)}
-	}
-	if now.Before(s.GlobalLockedTil) {
-		return Decision{Allowed: false, Code: "global_locked", Message: "service temporarily locked", RetryAfter: s.GlobalLockedTil.Sub(now)}
-	}
-
 	if !withinWindow(&actor.Limiter, now, s.Policy.Window) {
 		actor.Limiter = limiterState{WindowStart: now}
 	}
@@ -148,22 +141,6 @@ func (g *Guard) Failure(scope Scope, ip string) {
 	actor := g.getActor(s, ip, now)
 	actor.Failures++
 	s.GlobalFailures++
-
-	if actor.Failures >= s.Policy.FailureThreshold {
-		lock := lockoutDuration(s.Policy, actor.Failures-s.Policy.FailureThreshold)
-		until := now.Add(lock)
-		if until.After(actor.LockedUntil) {
-			actor.LockedUntil = until
-		}
-	}
-
-	if s.GlobalFailures >= s.Policy.FailureThreshold*3 {
-		lock := lockoutDuration(s.Policy, s.GlobalFailures-(s.Policy.FailureThreshold*3))
-		s.GlobalLockedTil = now.Add(lock)
-		if s.GlobalFailures > 0 {
-			s.GlobalFailures = s.Policy.FailureThreshold
-		}
-	}
 }
 
 func (g *Guard) Snapshot() map[string]any {

@@ -21,6 +21,7 @@ var (
 	ErrHandshakeFailed      = errors.New("openwebnet handshake failed")
 	ErrAuthenticationNeeded = errors.New("openwebnet authentication required")
 	ErrUnexpectedReply      = errors.New("openwebnet unexpected reply")
+	ErrStatusUnavailable    = errors.New("openwebnet status unavailable")
 )
 
 var frameRegexp = regexp.MustCompile(`\*#?.*?##`)
@@ -345,7 +346,7 @@ func (c *CommandClient) sendAndExpectFrame(reader *frameReader, operation string
 func (c *CommandClient) execAudioMutedStatus(ctx context.Context) (bool, error) {
 	muted := false
 	err := c.exec(ctx, func(reader *frameReader) error {
-		frame, err := c.sendAndExpectFrame(
+		frame, frames, err := c.sendStatusAndAwaitFrame(
 			reader,
 			"audio.status",
 			openwebnetproto.FrameAudioStatusCmd,
@@ -355,6 +356,14 @@ func (c *CommandClient) execAudioMutedStatus(ctx context.Context) (bool, error) 
 		if err != nil {
 			return fmt.Errorf("audio status: %w", err)
 		}
+		c.emitTrace("rx", map[string]any{
+			"transport": "tcp_command",
+			"operation": "audio.status",
+			"frame":     frame,
+			"frames":    frames,
+			"accepted":  true,
+			"terminal":  "status_frame",
+		})
 		switch strings.TrimSpace(frame) {
 		case openwebnetproto.FrameAudioMuted:
 			muted = true
@@ -375,53 +384,25 @@ func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatu
 	status := VoicemailStatus{}
 	err := c.exec(ctx, func(reader *frameReader) error {
 		const operation = "voicemail.status"
-		c.emitTrace("tx", map[string]any{
-			"transport": "tcp_command",
-			"operation": operation,
-			"frame":     openwebnetproto.FrameVoicemailStatusCmd,
-		})
-		if _, err := reader.conn.Write([]byte(openwebnetproto.FrameVoicemailStatusCmd)); err != nil {
-			return fmt.Errorf("voicemail status send: %w", err)
-		}
-
-		frame, err := reader.readFrame()
+		frame, frames, err := c.sendStatusAndAwaitFrame(
+			reader,
+			operation,
+			openwebnetproto.FrameVoicemailStatusCmd,
+		)
 		if err != nil {
-			return fmt.Errorf("voicemail status read: %w", err)
+			return fmt.Errorf("voicemail status: %w", err)
 		}
-		frames := []string{frame}
-		finalFrame := frame
-
-		if frame == openwebnetproto.FrameACK {
-			for i := 0; i < 8; i++ {
-				next, timedOut, readErr := readFrameWithTimeout(reader, 40*time.Millisecond)
-				if readErr != nil {
-					if errors.Is(readErr, io.EOF) {
-						break
-					}
-					return fmt.Errorf("voicemail status read continuation: %w", readErr)
-				}
-				if timedOut {
-					break
-				}
-				frames = append(frames, next)
-				finalFrame = next
-				if next != openwebnetproto.FrameACK {
-					break
-				}
-			}
-		}
-
-		enabled, welcomeEnabled, ok := openwebnetproto.ParseVoicemailStatus(finalFrame)
+		enabled, welcomeEnabled, ok := openwebnetproto.ParseVoicemailStatus(frame)
 		c.emitTrace("rx", map[string]any{
 			"transport": "tcp_command",
 			"operation": operation,
-			"frame":     finalFrame,
+			"frame":     frame,
 			"frames":    frames,
 			"accepted":  ok,
 			"terminal":  "status_frame",
 		})
 		if !ok {
-			return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(finalFrame))
+			return fmt.Errorf("%w: %s", ErrUnexpectedReply, strings.TrimSpace(frame))
 		}
 		status.Enabled = enabled
 		status.WelcomeMessageEnabled = welcomeEnabled
@@ -431,6 +412,67 @@ func (c *CommandClient) execVoicemailStatus(ctx context.Context) (VoicemailStatu
 		return VoicemailStatus{}, err
 	}
 	return status, nil
+}
+
+func (c *CommandClient) sendStatusAndAwaitFrame(
+	reader *frameReader,
+	operation string,
+	commandFrame string,
+	acceptedFrames ...string,
+) (string, []string, error) {
+	c.emitTrace("tx", map[string]any{
+		"transport": "tcp_command",
+		"operation": operation,
+		"frame":     commandFrame,
+	})
+	if _, err := reader.conn.Write([]byte(commandFrame)); err != nil {
+		return "", nil, err
+	}
+
+	first, err := reader.readFrame()
+	if err != nil {
+		return "", nil, err
+	}
+	frames := []string{first}
+	firstTrimmed := strings.TrimSpace(first)
+	switch firstTrimmed {
+	case openwebnetproto.FrameNACK:
+		return first, frames, fmt.Errorf("%w: %s", ErrStatusUnavailable, strings.TrimSpace(first))
+	}
+	if len(acceptedFrames) == 0 && firstTrimmed != openwebnetproto.FrameACK {
+		return first, frames, nil
+	}
+	if isAcceptedFrame(first, acceptedFrames) {
+		return first, frames, nil
+	}
+
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		next, timedOut, readErr := readFrameWithTimeout(reader, 120*time.Millisecond)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return "", frames, readErr
+		}
+		if timedOut {
+			continue
+		}
+		frames = append(frames, next)
+		nextTrimmed := strings.TrimSpace(next)
+		if nextTrimmed == openwebnetproto.FrameNACK {
+			return next, frames, fmt.Errorf("%w: %s", ErrStatusUnavailable, nextTrimmed)
+		}
+		if len(acceptedFrames) == 0 && nextTrimmed != openwebnetproto.FrameACK {
+			return next, frames, nil
+		}
+		if isAcceptedFrame(next, acceptedFrames) {
+			return next, frames, nil
+		}
+	}
+
+	last := frames[len(frames)-1]
+	return last, frames, fmt.Errorf("%w: %s", ErrStatusUnavailable, strings.TrimSpace(last))
 }
 
 func (c *CommandClient) authenticateHMAC(reader *frameReader) error {

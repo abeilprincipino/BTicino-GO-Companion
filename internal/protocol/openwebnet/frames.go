@@ -13,6 +13,7 @@ const (
 	FrameSessionStartCmd     = "*99*0##"
 	FrameAuthRequired        = "*98*2##"
 	FrameStop                = "*7*0*##"
+	FrameFreeAVResources     = "*7*9**##"
 	FrameStreamProbe         = "*7*73#0#0*##"
 	FrameAudioStatusCmd      = "*#8**33##"
 	FrameAudioMuteCmd        = "*#8**#33*0##"
@@ -49,6 +50,10 @@ func BuildStreamStartAudio(port int) string {
 	return fmt.Sprintf("*7*300#127#0#0#1#%d#2*##", port)
 }
 
+func BuildReceiveVideo(where string) string {
+	return fmt.Sprintf("*7*0*%s##", strings.TrimSpace(where))
+}
+
 func IsACK(frame string) bool {
 	return strings.TrimSpace(frame) == FrameACK
 }
@@ -74,21 +79,61 @@ func IsUnlockClose(frame string) bool {
 }
 
 func IsStreamStartVideo(frame string) bool {
-	f := strings.TrimSpace(frame)
-	return strings.HasPrefix(f, "*7*300#") && strings.Contains(f, "#5007#")
+	channel, ok := parseStreamStartChannel(frame)
+	return ok && (channel == "0" || channel == "1")
 }
 
 func IsStreamStartAudio(frame string) bool {
-	f := strings.TrimSpace(frame)
-	return strings.HasPrefix(f, "*7*300#") && strings.Contains(f, "#5000#2*##")
+	channel, ok := parseStreamStartChannel(frame)
+	return ok && channel == "2"
 }
 
 func IsStreamStop(frame string) bool {
 	return strings.TrimSpace(frame) == FrameStop
 }
 
+func IsFreeAVResources(frame string) bool {
+	return strings.TrimSpace(frame) == FrameFreeAVResources
+}
+
+func ParseReceiveVideoWhere(frame string) (string, bool) {
+	f := strings.TrimSpace(frame)
+	if f == FrameStop || !strings.HasPrefix(f, "*7*0*") || !strings.HasSuffix(f, "##") {
+		return "", false
+	}
+	where := strings.TrimSuffix(strings.TrimPrefix(f, "*7*0*"), "##")
+	where = strings.TrimSpace(where)
+	if where == "" {
+		return "", false
+	}
+	return where, true
+}
+
+func IsReceiveVideo(frame string) bool {
+	_, ok := ParseReceiveVideoWhere(frame)
+	return ok
+}
+
 func IsStreamProbe(frame string) bool {
 	return strings.TrimSpace(frame) == FrameStreamProbe
+}
+
+func parseStreamStartChannel(frame string) (string, bool) {
+	f := strings.TrimSpace(frame)
+	if !strings.HasPrefix(f, "*7*300#") || !strings.HasSuffix(f, "*##") {
+		return "", false
+	}
+	trimmed := strings.TrimPrefix(f, "*7*300#")
+	trimmed = strings.TrimSuffix(trimmed, "*##")
+	parts := strings.Split(trimmed, "#")
+	if len(parts) < 2 {
+		return "", false
+	}
+	channel := strings.TrimSpace(parts[len(parts)-1])
+	if channel == "" {
+		return "", false
+	}
+	return channel, true
 }
 
 func ParseVoicemailStatus(frame string) (enabled bool, welcomeMessageEnabled bool, ok bool) {

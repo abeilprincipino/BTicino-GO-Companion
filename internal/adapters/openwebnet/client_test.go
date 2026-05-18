@@ -377,6 +377,54 @@ func TestCommandClientAudioMutedStatus(t *testing.T) {
 	}
 }
 
+func TestCommandClientAudioMutedStatusACKOnlyReturnsUnavailable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**33##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	_, err = c.AudioMutedStatus(context.Background())
+	if !errors.Is(err, ErrStatusUnavailable) {
+		t.Fatalf("expected ErrStatusUnavailable, got %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
 func TestCommandClientVoicemailEnableDisable(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -493,6 +541,54 @@ func TestCommandClientVoicemailStatus(t *testing.T) {
 	}
 	if status.WelcomeMessageEnabled {
 		t.Fatal("expected welcome message enabled=false")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server flow failed: %v", err)
+	}
+}
+
+func TestCommandClientVoicemailStatusACKOnlyReturnsUnavailable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &testFrameReader{conn: conn}
+
+		if got := reader.readFrame(t); got != "*99*0##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+
+		if got := reader.readFrame(t); got != "*#8**40##" {
+			done <- errUnexpected(got)
+			return
+		}
+		_, _ = conn.Write([]byte("*#*1##"))
+		done <- nil
+	}()
+
+	host, portRaw, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portRaw)
+	cfg := config.Default()
+	cfg.OpenWebNetCommandHost = host
+	cfg.OpenWebNetCommandPort = port
+	cfg.OpenWebNetCommandSec = 1
+
+	c := NewCommandClient(cfg)
+	_, err = c.VoicemailStatus(context.Background())
+	if !errors.Is(err, ErrStatusUnavailable) {
+		t.Fatalf("expected ErrStatusUnavailable, got %v", err)
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("server flow failed: %v", err)

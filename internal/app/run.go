@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -156,7 +157,11 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			defer cancel()
 			muted, err := commandClient.AudioMutedStatus(bootCtx)
 			if err != nil {
-				logger.Printf("audio status bootstrap skipped: %v", err)
+				if errors.Is(err, openwebnet.ErrStatusUnavailable) {
+					logger.Printf("audio status bootstrap unavailable; waiting for runtime events")
+				} else {
+					logger.Printf("audio status bootstrap skipped: %v", err)
+				}
 				return
 			}
 			kind := event.TypeAudioUnmuted
@@ -178,7 +183,11 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 				defer cancel()
 				voicemailStatus, err := commandClient.VoicemailStatus(bootCtx)
 				if err != nil {
-					logger.Printf("voicemail status bootstrap skipped: %v", err)
+					if errors.Is(err, openwebnet.ErrStatusUnavailable) {
+						logger.Printf("voicemail status bootstrap unavailable; waiting for runtime events")
+					} else {
+						logger.Printf("voicemail status bootstrap skipped: %v", err)
+					}
 					return
 				}
 				kind := event.TypeVoicemailDisabled

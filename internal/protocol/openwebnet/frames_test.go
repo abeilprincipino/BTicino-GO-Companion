@@ -15,6 +15,9 @@ func TestFrameBuilders(t *testing.T) {
 	if got := BuildStreamStartAudio(5000); got != "*7*300#127#0#0#1#5000#2*##" {
 		t.Fatalf("unexpected stream audio frame: %s", got)
 	}
+	if got := BuildReceiveVideo("4000"); got != "*7*0*4000##" {
+		t.Fatalf("unexpected receive video frame: %s", got)
+	}
 }
 
 func TestFramePredicates(t *testing.T) {
@@ -27,11 +30,29 @@ func TestFramePredicates(t *testing.T) {
 	if !IsStreamStop("*7*0*##") {
 		t.Fatal("expected stream stop")
 	}
+	if !IsFreeAVResources("*7*9**##") {
+		t.Fatal("expected free audio/video resources")
+	}
+	if where, ok := ParseReceiveVideoWhere("*7*0*4001##"); !ok || where != "4001" {
+		t.Fatalf("expected receive video where=4001, ok=true; got where=%q ok=%v", where, ok)
+	}
+	if IsReceiveVideo("*7*0*##") {
+		t.Fatal("did not expect stop frame to be classified as receive-video frame")
+	}
 	if !IsStreamStartVideo("*7*300#127#0#0#1#5007#0*##") {
 		t.Fatal("expected video start")
 	}
+	if !IsStreamStartVideo("*7*300#127#0#0#1#5002#1*##") {
+		t.Fatal("expected low-res video start")
+	}
 	if !IsStreamStartAudio("*7*300#127#0#0#1#5000#2*##") {
 		t.Fatal("expected audio start")
+	}
+	if IsStreamStartAudio("*7*300#127#0#0#1#5007#0*##") {
+		t.Fatal("did not expect audio start for video channel")
+	}
+	if FrameFreeAVResources != "*7*9**##" {
+		t.Fatalf("unexpected free resources frame: %s", FrameFreeAVResources)
 	}
 }
 

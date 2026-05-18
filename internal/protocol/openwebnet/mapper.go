@@ -1,6 +1,7 @@
 package openwebnetproto
 
 import (
+	"strings"
 	"time"
 
 	"bticino-go-companion/internal/domain/event"
@@ -8,19 +9,27 @@ import (
 
 type Mapper struct {
 	floorRinging bool
+	recentFrames map[string]time.Time
+	dedupeWindow time.Duration
 }
 
 func NewMapper() *Mapper {
-	return &Mapper{}
+	return &Mapper{
+		recentFrames: make(map[string]time.Time),
+		dedupeWindow: 300 * time.Millisecond,
+	}
 }
 
 func (m *Mapper) Map(msg Message) []event.Envelope {
-	if msg.System != "OPEN" {
+	if !isMappableSystem(msg.System) {
 		return nil
 	}
 
 	now := time.Now()
 	raw := msg.Raw
+	if m.isDuplicateRaw(raw, now) {
+		return nil
+	}
 
 	newEvent := func(kind string, payload map[string]any) event.Envelope {
 		return event.Envelope{
@@ -73,9 +82,14 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 		return []event.Envelope{newEvent(event.TypeStreamStarted, map[string]any{"raw": raw, "channel": "video"})}
 	case IsStreamStartAudio(raw):
 		return []event.Envelope{newEvent(event.TypeStreamStarted, map[string]any{"raw": raw, "channel": "audio"})}
+	case IsReceiveVideo(raw):
+		where, _ := ParseReceiveVideoWhere(raw)
+		return []event.Envelope{
+			newEvent(event.TypeCallViewRequested, map[string]any{"raw": raw, "entrance": "default", "where": where}),
+		}
 	case IsStreamProbe(raw):
 		return nil
-	case IsStreamStop(raw):
+	case IsStreamStop(raw), IsFreeAVResources(raw):
 		events := []event.Envelope{
 			newEvent(event.TypeStreamStopped, map[string]any{"raw": raw}),
 			newEvent(event.TypeRingEnded, map[string]any{"raw": raw}),
@@ -89,4 +103,31 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 	default:
 		return nil
 	}
+}
+
+func isMappableSystem(system string) bool {
+	switch strings.ToLower(strings.TrimSpace(system)) {
+	case "open", "aswm":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Mapper) isDuplicateRaw(raw string, now time.Time) bool {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return false
+	}
+	for frame, ts := range m.recentFrames {
+		if now.Sub(ts) > m.dedupeWindow {
+			delete(m.recentFrames, frame)
+		}
+	}
+	if ts, ok := m.recentFrames[key]; ok && now.Sub(ts) <= m.dedupeWindow {
+		m.recentFrames[key] = now
+		return true
+	}
+	m.recentFrames[key] = now
+	return false
 }
