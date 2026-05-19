@@ -5,7 +5,6 @@ import (
 
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
-	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
@@ -18,7 +17,6 @@ import (
 type Router struct {
 	cfg     config.Config
 	auth    *auth.Store
-	guard   *security.Guard
 	state   *state.Projector
 	control *control.Service
 	events  *events.Broker
@@ -31,7 +29,6 @@ type Router struct {
 func NewRouter(
 	cfg config.Config,
 	authStore *auth.Store,
-	guard *security.Guard,
 	projector *state.Projector,
 	controlService *control.Service,
 	eventBroker *events.Broker,
@@ -43,7 +40,6 @@ func NewRouter(
 	return &Router{
 		cfg:     cfg,
 		auth:    authStore,
-		guard:   guard,
 		state:   projector,
 		control: controlService,
 		events:  eventBroker,
@@ -62,7 +58,6 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v2/pair/challenge", r.handlePairChallenge)
 	mux.HandleFunc("POST /api/v2/pair/claim", r.handlePairClaim)
 	mux.HandleFunc("GET /api/v2/auth/status", r.handleAuthStatus)
-	mux.HandleFunc("POST /api/v2/auth/refresh", r.handleAuthRefresh)
 
 	// Protected auth lifecycle and admin recovery endpoints.
 	mux.HandleFunc("POST /api/v2/auth/rotate", r.withBearer(r.handleAuthRotate))

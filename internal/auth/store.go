@@ -16,25 +16,20 @@ import (
 )
 
 const (
-	defaultChallengeTTL    = 5 * time.Minute
-	defaultRepairCodeTTL   = 10 * time.Minute
-	defaultAccessTokenTTL  = 60 * time.Minute
-	defaultRefreshTokenTTL = 30 * 24 * time.Hour
+	defaultChallengeTTL  = 5 * time.Minute
+	defaultRepairCodeTTL = 10 * time.Minute
 )
 
 var (
-	ErrAlreadyClaimed      = errors.New("device already claimed")
-	ErrInvalidClaimCode    = errors.New("invalid claim code")
-	ErrInvalidChallenge    = errors.New("invalid challenge")
-	ErrChallengeExpired    = errors.New("challenge expired")
-	ErrInvalidCredential   = errors.New("invalid credential")
-	ErrTokenExpired        = errors.New("token expired")
-	ErrInvalidRefreshToken = errors.New("invalid refresh token")
-	ErrRefreshTokenExpired = errors.New("refresh token expired")
-	ErrKeyNotFound         = errors.New("key not found")
-	ErrRepairNotAllowed    = errors.New("repair flow is not allowed")
-	ErrInvalidRepairCode   = errors.New("invalid repair code")
-	ErrRepairCodeExpired   = errors.New("repair code expired")
+	ErrAlreadyClaimed    = errors.New("device already claimed")
+	ErrInvalidClaimCode  = errors.New("invalid claim code")
+	ErrInvalidChallenge  = errors.New("invalid challenge")
+	ErrChallengeExpired  = errors.New("challenge expired")
+	ErrInvalidCredential = errors.New("invalid credential")
+	ErrKeyNotFound       = errors.New("key not found")
+	ErrRepairNotAllowed  = errors.New("repair flow is not allowed")
+	ErrInvalidRepairCode = errors.New("invalid repair code")
+	ErrRepairCodeExpired = errors.New("repair code expired")
 )
 
 type Challenge struct {
@@ -50,14 +45,11 @@ type ClaimRequest struct {
 }
 
 type persistedState struct {
-	DeviceID              string    `json:"device_id"`
-	Claimed               bool      `json:"claimed"`
-	ClaimCode             string    `json:"claim_code"`
-	BearerToken           string    `json:"bearer_token"`
-	KeyID                 string    `json:"key_id"`
-	AccessTokenExpiresAt  time.Time `json:"access_token_expires_at,omitempty"`
-	RefreshToken          string    `json:"refresh_token,omitempty"`
-	RefreshTokenExpiresAt time.Time `json:"refresh_token_expires_at,omitempty"`
+	DeviceID    string `json:"device_id"`
+	Claimed     bool   `json:"claimed"`
+	ClaimCode   string `json:"claim_code"`
+	BearerToken string `json:"bearer_token"`
+	KeyID       string `json:"key_id"`
 }
 
 type Store struct {
@@ -121,9 +113,6 @@ func (s *Store) ValidateBearer(token string) error {
 	if !s.hasClaimedBearerLocked() {
 		return ErrInvalidCredential
 	}
-	if !s.state.AccessTokenExpiresAt.IsZero() && time.Now().After(s.state.AccessTokenExpiresAt) {
-		return ErrTokenExpired
-	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.state.BearerToken)) != 1 {
 		return ErrInvalidCredential
 	}
@@ -134,24 +123,6 @@ func (s *Store) CurrentKeyID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.state.KeyID
-}
-
-func (s *Store) AccessTokenExpiresAt() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.state.AccessTokenExpiresAt
-}
-
-func (s *Store) RefreshTokenExpiresAt() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.state.RefreshTokenExpiresAt
-}
-
-func (s *Store) RefreshToken() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.state.RefreshToken
 }
 
 func (s *Store) StartChallenge() (Challenge, error) {
@@ -195,48 +166,11 @@ func (s *Store) Claim(req ClaimRequest) (token string, keyID string, err error) 
 	}
 
 	s.rotateBearerLocked()
-	s.rotateRefreshLocked()
 	s.state.Claimed = true
 	if err := s.persistLocked(); err != nil {
 		return "", "", err
 	}
 	return s.state.BearerToken, s.state.KeyID, nil
-}
-
-func (s *Store) Refresh(refreshToken string) (
-	accessToken string,
-	keyID string,
-	accessExpiresAt time.Time,
-	newRefreshToken string,
-	refreshExpiresAt time.Time,
-	err error,
-) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.state.Claimed {
-		return "", "", time.Time{}, "", time.Time{}, ErrInvalidCredential
-	}
-	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(s.state.RefreshToken) == "" {
-		return "", "", time.Time{}, "", time.Time{}, ErrInvalidRefreshToken
-	}
-	if subtle.ConstantTimeCompare(
-		[]byte(strings.TrimSpace(refreshToken)),
-		[]byte(strings.TrimSpace(s.state.RefreshToken)),
-	) != 1 {
-		return "", "", time.Time{}, "", time.Time{}, ErrInvalidRefreshToken
-	}
-	if !s.state.RefreshTokenExpiresAt.IsZero() && time.Now().After(s.state.RefreshTokenExpiresAt) {
-		return "", "", time.Time{}, "", time.Time{}, ErrRefreshTokenExpired
-	}
-
-	s.rotateBearerLocked()
-	s.rotateRefreshLocked()
-	if err := s.persistLocked(); err != nil {
-		return "", "", time.Time{}, "", time.Time{}, err
-	}
-
-	return s.state.BearerToken, s.state.KeyID, s.state.AccessTokenExpiresAt, s.state.RefreshToken, s.state.RefreshTokenExpiresAt, nil
 }
 
 func (s *Store) Rotate() (token string, keyID string, prevKeyID string, err error) {
@@ -247,7 +181,6 @@ func (s *Store) Rotate() (token string, keyID string, prevKeyID string, err erro
 	}
 	prevKeyID = s.state.KeyID
 	s.rotateBearerLocked()
-	s.rotateRefreshLocked()
 	if err := s.persistLocked(); err != nil {
 		return "", "", "", err
 	}
@@ -264,7 +197,6 @@ func (s *Store) RevokeAndReplace(keyID string) (token string, newKeyID string, e
 		return "", "", ErrKeyNotFound
 	}
 	s.rotateBearerLocked()
-	s.rotateRefreshLocked()
 	if err := s.persistLocked(); err != nil {
 		return "", "", err
 	}
@@ -307,9 +239,6 @@ func (s *Store) ResetClaim(repairCode string) (claimCode string, err error) {
 	s.state.Claimed = false
 	s.state.BearerToken = ""
 	s.state.KeyID = ""
-	s.state.AccessTokenExpiresAt = time.Time{}
-	s.state.RefreshToken = ""
-	s.state.RefreshTokenExpiresAt = time.Time{}
 	s.state.ClaimCode = randHumanCode()
 	s.challenges = map[string]Challenge{}
 	s.repairCode = repairCodeState{}
@@ -334,21 +263,17 @@ func (s *Store) load(initialClaimCode string) error {
 	}
 
 	loaded := persistedState{
-		DeviceID:              cfg.Auth.DeviceID,
-		Claimed:               cfg.Auth.Claimed,
-		ClaimCode:             cfg.Auth.ClaimCode,
-		BearerToken:           cfg.Auth.BearerToken,
-		KeyID:                 cfg.Auth.KeyID,
-		AccessTokenExpiresAt:  cfg.Auth.AccessTokenExpiresAt,
-		RefreshToken:          cfg.Auth.RefreshToken,
-		RefreshTokenExpiresAt: cfg.Auth.RefreshTokenExpiresAt,
+		DeviceID:    cfg.Auth.DeviceID,
+		Claimed:     cfg.Auth.Claimed,
+		ClaimCode:   cfg.Auth.ClaimCode,
+		BearerToken: cfg.Auth.BearerToken,
+		KeyID:       cfg.Auth.KeyID,
 	}
 
 	loaded.DeviceID = s.preferredDeviceID
 	loaded.ClaimCode = strings.TrimSpace(loaded.ClaimCode)
 	loaded.BearerToken = strings.TrimSpace(loaded.BearerToken)
 	loaded.KeyID = strings.TrimSpace(loaded.KeyID)
-	loaded.RefreshToken = strings.TrimSpace(loaded.RefreshToken)
 
 	if loaded.ClaimCode == "" {
 		if missing {
@@ -367,22 +292,10 @@ func (s *Store) load(initialClaimCode string) error {
 		if loaded.BearerToken == "" {
 			loaded.Claimed = false
 		}
-		if loaded.AccessTokenExpiresAt.IsZero() {
-			loaded.AccessTokenExpiresAt = time.Now().Add(defaultAccessTokenTTL)
-		}
-		if loaded.RefreshToken == "" {
-			loaded.RefreshToken = randHex(48)
-		}
-		if loaded.RefreshTokenExpiresAt.IsZero() {
-			loaded.RefreshTokenExpiresAt = time.Now().Add(defaultRefreshTokenTTL)
-		}
 	}
 	if !loaded.Claimed {
 		loaded.BearerToken = ""
 		loaded.KeyID = ""
-		loaded.AccessTokenExpiresAt = time.Time{}
-		loaded.RefreshToken = ""
-		loaded.RefreshTokenExpiresAt = time.Time{}
 	}
 	s.state = loaded
 	return s.persistLocked()
@@ -394,14 +307,11 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	cfg.Auth = config.AuthState{
-		DeviceID:              s.state.DeviceID,
-		Claimed:               s.state.Claimed,
-		ClaimCode:             s.state.ClaimCode,
-		BearerToken:           s.state.BearerToken,
-		KeyID:                 s.state.KeyID,
-		AccessTokenExpiresAt:  s.state.AccessTokenExpiresAt,
-		RefreshToken:          s.state.RefreshToken,
-		RefreshTokenExpiresAt: s.state.RefreshTokenExpiresAt,
+		DeviceID:    s.state.DeviceID,
+		Claimed:     s.state.Claimed,
+		ClaimCode:   s.state.ClaimCode,
+		BearerToken: s.state.BearerToken,
+		KeyID:       s.state.KeyID,
 	}
 	return config.Save(s.path, cfg)
 }
@@ -462,12 +372,6 @@ func (s *Store) hasClaimedBearerLocked() bool {
 func (s *Store) rotateBearerLocked() {
 	s.state.BearerToken = randHex(32)
 	s.state.KeyID = "kid_" + randHex(8)
-	s.state.AccessTokenExpiresAt = time.Now().Add(defaultAccessTokenTTL)
-}
-
-func (s *Store) rotateRefreshLocked() {
-	s.state.RefreshToken = randHex(48)
-	s.state.RefreshTokenExpiresAt = time.Now().Add(defaultRefreshTokenTTL)
 }
 
 func (s *Store) pruneExpiredChallengesLocked() {

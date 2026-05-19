@@ -9,7 +9,8 @@ INIT_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 LOCAL_INIT_TEMPLATE="${SCRIPT_DIR}/init.d/companion"
 
-REPO="${COMPANION_RELEASE_REPO:-}"
+DEFAULT_RELEASE_REPO="r0bb10/BTicino-GO-Companion"
+REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"
 CHECKSUM_ASSET="${COMPANION_RELEASE_CHECKSUM_ASSET:-companion.sha256}"
 BINARY_NAME="${COMPANION_RELEASE_BINARY_ASSET:-companion}"
@@ -401,7 +402,7 @@ resolve_local_install_inputs() {
 
 download_latest_artifacts() {
 	if [ -z "${BASE_URL}" ]; then
-		log "Set COMPANION_RELEASE_REPO or COMPANION_RELEASE_BASE_URL."
+		log "Set COMPANION_RELEASE_BASE_URL (or override COMPANION_RELEASE_REPO)."
 		exit 1
 	fi
 
@@ -427,7 +428,7 @@ download_latest_artifacts() {
 	if [ -z "${binary_path}" ] || [ -z "${init_template_path}" ]; then
 		log "Bundle asset not found on latest release yet, falling back to binary+template download."
 		if [ -z "${INIT_TEMPLATE_URL}" ]; then
-			log "Fallback requires COMPANION_INIT_TEMPLATE_URL (or COMPANION_RELEASE_REPO)."
+			log "Fallback requires COMPANION_INIT_TEMPLATE_URL (or override COMPANION_RELEASE_REPO)."
 			exit 1
 		fi
 		mkdir -p "${bundle_dir}/init.d"

@@ -13,7 +13,6 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/domain/event"
-	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
@@ -88,7 +87,7 @@ func newAuthedRouter(t *testing.T) (*Router, string) {
 	authStore, token := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil)
+	r := NewRouter(config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil)
 	return r, token
 }
 
@@ -147,7 +146,7 @@ func TestRouterPairChallengeAndClaim(t *testing.T) {
 	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, security.NewGuard(), p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil)
+	r := NewRouter(config.Default(), authStore, p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
 	rr := httptest.NewRecorder()

@@ -76,7 +76,7 @@ jobs:
 
           \`\`\`sh
           wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh"
-          COMPANION_RELEASE_REPO="${REPO}" sh /tmp/companion-install.sh
+          sh /tmp/companion-install.sh
           \`\`\`
           EOF
 

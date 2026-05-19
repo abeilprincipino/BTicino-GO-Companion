@@ -22,7 +22,6 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/protocol/openwebnet"
-	"bticino-go-companion/internal/security"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/discovery"
 	"bticino-go-companion/internal/services/events"
@@ -69,8 +68,6 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			logger.Printf("mdns service stopped: %v", err)
 		}
 	}()
-
-	guard := security.NewGuard()
 
 	projector := state.NewProjector(cfg.Entrypoints)
 	eventBroker := events.New(512)
@@ -265,7 +262,6 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	router := v2.NewRouter(
 		cfg,
 		authStore,
-		guard,
 		projector,
 		controlService,
 		eventBroker,
