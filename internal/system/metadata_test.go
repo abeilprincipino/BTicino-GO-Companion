@@ -216,3 +216,38 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
 		t.Fatalf("unexpected best strength: %#v", best.Strength)
 	}
 }
+
+func TestParseDBusHelpers(t *testing.T) {
+	if key, ok := parseDBusKey(`string "Type"`); !ok || key != "Type" {
+		t.Fatalf("unexpected parseDBusKey result key=%q ok=%v", key, ok)
+	}
+	if _, ok := parseDBusKey("variant string \"wifi\""); ok {
+		t.Fatal("expected parseDBusKey false for non-key line")
+	}
+
+	if v, ok := parseDBusVariantValue(`variant                   string "wifi"`); !ok || v != "wifi" {
+		t.Fatalf("unexpected string variant parse result value=%q ok=%v", v, ok)
+	}
+	if v, ok := parseDBusVariantValue(`variant                   byte 61`); !ok || v != "61" {
+		t.Fatalf("unexpected byte variant parse result value=%q ok=%v", v, ok)
+	}
+	if _, ok := parseDBusVariantValue(`variant array [`); ok {
+		t.Fatal("expected unsupported variant type to be rejected")
+	}
+}
+
+func TestConnManServiceScoreAndNormalizeMAC(t *testing.T) {
+	if connManServiceScore("online") <= connManServiceScore("idle") {
+		t.Fatalf("expected online score to be higher than idle")
+	}
+	if connManServiceScore("unknown-state") != 5 {
+		t.Fatalf("expected default score for unknown state")
+	}
+
+	if got := normalizeMACString("00-11-22-33-44-55"); got != "00:11:22:33:44:55" {
+		t.Fatalf("unexpected normalized mac: %q", got)
+	}
+	if got := normalizeMACString("bad"); got != "" {
+		t.Fatalf("expected invalid mac to normalize to empty, got %q", got)
+	}
+}

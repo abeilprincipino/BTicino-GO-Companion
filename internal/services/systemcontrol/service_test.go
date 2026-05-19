@@ -92,3 +92,46 @@ func TestServiceStatusPassThrough(t *testing.T) {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 }
+
+func TestServiceAccessorsAndUnavailablePaths(t *testing.T) {
+	var svc *Service
+	if svc.RebootEnabled() {
+		t.Fatal("nil service should report reboot disabled")
+	}
+	if cfg := svc.ServiceConfigs(); cfg != nil {
+		t.Fatalf("nil service should return nil configs, got %+v", cfg)
+	}
+
+	stub := &managerStub{}
+	configs := map[string]config.SystemServiceConfig{
+		" DROPBEAR ": {Enabled: true, Exposed: true},
+	}
+	svc = New(stub, true, configs)
+	if !svc.RebootEnabled() {
+		t.Fatal("expected reboot enabled")
+	}
+	got := svc.ServiceConfigs()
+	if _, ok := got["dropbear"]; !ok {
+		t.Fatalf("expected normalized service key dropbear, got %+v", got)
+	}
+
+	if err := svc.Reboot(context.Background()); err != nil {
+		t.Fatalf("expected reboot passthrough to manager, got %v", err)
+	}
+}
+
+func TestServiceUnavailableManagerAndInvalidName(t *testing.T) {
+	svc := New(nil, true, map[string]config.SystemServiceConfig{"dropbear": {Enabled: true, Exposed: true}})
+	if err := svc.Reboot(context.Background()); !errors.Is(err, ErrSystemControlUnavailable) {
+		t.Fatalf("expected ErrSystemControlUnavailable on reboot, got %v", err)
+	}
+	if err := svc.RestartService(context.Background(), ""); !errors.Is(err, ErrSystemControlUnavailable) {
+		t.Fatalf("expected ErrSystemControlUnavailable on restart, got %v", err)
+	}
+
+	stub := &managerStub{}
+	svc = New(stub, true, map[string]config.SystemServiceConfig{"dropbear": {Enabled: true, Exposed: true}})
+	if err := svc.RestartService(context.Background(), " "); !errors.Is(err, ErrServiceNameInvalid) {
+		t.Fatalf("expected ErrServiceNameInvalid, got %v", err)
+	}
+}

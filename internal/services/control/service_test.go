@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"bticino-go-companion/internal/domain/entrypoint"
@@ -201,5 +202,50 @@ func TestServiceVoicemailEnableDisable(t *testing.T) {
 	}
 	if len(emitted) != 2 || emitted[0].Type != event.TypeVoicemailEnabled || emitted[1].Type != event.TypeVoicemailDisabled {
 		t.Fatalf("unexpected emitted events: %+v", emitted)
+	}
+}
+
+func TestServiceErrorBranches(t *testing.T) {
+	svc := New([]entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: false, HasUnlock: false}}, &streamStub{}, &unlockStub{}, nil, nil, nil, nil)
+
+	if err := svc.UnlockEntrypoint(context.Background(), "missing"); !errors.Is(err, ErrEntrypointNotFound) {
+		t.Fatalf("expected ErrEntrypointNotFound, got %v", err)
+	}
+	if err := svc.UnlockEntrypoint(context.Background(), "main"); !errors.Is(err, ErrCapabilityNotEnabled) {
+		t.Fatalf("expected ErrCapabilityNotEnabled for unlock, got %v", err)
+	}
+	if err := svc.StartEntrypointStream(context.Background(), "main"); !errors.Is(err, ErrCapabilityNotEnabled) {
+		t.Fatalf("expected ErrCapabilityNotEnabled for stream start, got %v", err)
+	}
+	if err := svc.StopEntrypointStream(context.Background(), "main"); !errors.Is(err, ErrCapabilityNotEnabled) {
+		t.Fatalf("expected ErrCapabilityNotEnabled for stream stop, got %v", err)
+	}
+	if err := svc.AnswerCall(context.Background()); !errors.Is(err, ErrNoIncomingCall) {
+		t.Fatalf("expected ErrNoIncomingCall, got %v", err)
+	}
+	if err := svc.HangupCall(context.Background()); !errors.Is(err, ErrNoActiveCall) {
+		t.Fatalf("expected ErrNoActiveCall, got %v", err)
+	}
+	if err := svc.MuteAudio(context.Background()); !errors.Is(err, ErrAudioControlDisabled) {
+		t.Fatalf("expected ErrAudioControlDisabled, got %v", err)
+	}
+	if err := svc.EnableVoicemail(context.Background()); !errors.Is(err, ErrVoicemailUnavailable) {
+		t.Fatalf("expected ErrVoicemailUnavailable, got %v", err)
+	}
+}
+
+func TestMapCallError(t *testing.T) {
+	if err := mapCallError(nil); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if err := mapCallError(errors.New("No incoming event")); !errors.Is(err, ErrNoIncomingCall) {
+		t.Fatalf("expected ErrNoIncomingCall, got %v", err)
+	}
+	if err := mapCallError(errors.New("no active call right now")); !errors.Is(err, ErrNoActiveCall) {
+		t.Fatalf("expected ErrNoActiveCall, got %v", err)
+	}
+	other := errors.New("transport failure")
+	if err := mapCallError(other); !errors.Is(err, other) {
+		t.Fatalf("expected original error passthrough, got %v", err)
 	}
 }

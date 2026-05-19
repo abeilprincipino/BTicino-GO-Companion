@@ -8,6 +8,7 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
@@ -91,5 +92,49 @@ func TestServerDescribeUnknownPath(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != base.StatusNotFound {
 		t.Fatalf("unexpected describe response: %+v", resp)
+	}
+}
+
+func TestServerHelperFunctions(t *testing.T) {
+	cfg := config.Default()
+	cfg.Entrypoints = []entrypoint.Model{
+		{ID: "main", DevAddr: "20", HasStream: true},
+	}
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	if id, dev, ok := s.resolveEntrypoint("/doorbell-main"); !ok || id != "main" || dev != "20" {
+		t.Fatalf("unexpected resolveEntrypoint result: id=%q dev=%q ok=%v", id, dev, ok)
+	}
+	if _, _, ok := s.resolveEntrypoint("/missing"); ok {
+		t.Fatal("expected unresolved entrypoint for missing path")
+	}
+
+	if !isExpectedPayloadType(description.MediaTypeVideo, 96) {
+		t.Fatal("expected video payload type 96 to match")
+	}
+	if isExpectedPayloadType(description.MediaTypeVideo, 110) {
+		t.Fatal("did not expect video payload type 110 to match")
+	}
+	if !isExpectedPayloadType(description.MediaTypeAudio, 110) {
+		t.Fatal("expected audio payload type 110 to match")
+	}
+	if isExpectedPayloadType(description.MediaTypeAudio, 96) {
+		t.Fatal("did not expect audio payload type 96 to match")
+	}
+
+	got := sortedRoutePaths(map[string]entrypoint.StreamRoute{
+		"doorbell-b": {},
+		"doorbell-a": {},
+	})
+	if len(got) != 2 || got[0] != "doorbell-a" || got[1] != "doorbell-b" {
+		t.Fatalf("unexpected sorted paths: %+v", got)
+	}
+
+	s.touchReader(nil)
+	s.removeReader(nil)
+	s.writeIngestPacket(description.MediaTypeVideo, nil)
+
+	if id := sessionID(&gortsplib.ServerSession{}); id == "" {
+		t.Fatal("expected non-empty session id")
 	}
 }

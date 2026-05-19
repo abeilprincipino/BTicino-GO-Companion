@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -108,4 +109,63 @@ func testConfig() config.Config {
 	cfg.DeviceModel = "C300X"
 	cfg.DeviceFirmware = "1.7.19"
 	return cfg
+}
+
+func TestParseValidPort(t *testing.T) {
+	if got, ok := parseValidPort("8080"); !ok || got != 8080 {
+		t.Fatalf("expected valid 8080, got=%d ok=%v", got, ok)
+	}
+	if _, ok := parseValidPort("0"); ok {
+		t.Fatal("expected invalid 0 port")
+	}
+	if _, ok := parseValidPort("70000"); ok {
+		t.Fatal("expected invalid out-of-range port")
+	}
+	if _, ok := parseValidPort("abc"); ok {
+		t.Fatal("expected invalid non-numeric port")
+	}
+}
+
+func TestNormalizeNameAndTXT(t *testing.T) {
+	if got := normalizeTXT(" BTicino Companion "); got != "BTicino_Companion" {
+		t.Fatalf("unexpected normalizeTXT output: %q", got)
+	}
+	if got := normalizeTXT(" "); got != "" {
+		t.Fatalf("expected empty normalizeTXT for blank input, got %q", got)
+	}
+	if got := normalizeName(" BTicino Companion "); got != "BTicino_Companion" {
+		t.Fatalf("unexpected normalizeName output: %q", got)
+	}
+	if got := normalizeName(" "); got != "" {
+		t.Fatalf("expected empty normalizeName for blank input, got %q", got)
+	}
+}
+
+func TestInterfaceHelpersDefensivePaths(t *testing.T) {
+	iface, ok := interfaceForIP(nil)
+	if ok || iface.Name != "" {
+		t.Fatalf("expected no interface for nil ip, got iface=%+v ok=%v", iface, ok)
+	}
+
+	// Ensure helper paths are safe to call in tests across environments.
+	_ = outboundIPv4()
+	_ = advertisementInterfaces()
+}
+
+func TestStartDisabledReturnsImmediately(t *testing.T) {
+	cfg := config.Default()
+	cfg.MDNSEnabled = false
+	if err := Start(context.Background(), cfg, nil, nil, nil); err != nil {
+		t.Fatalf("expected disabled mdns start to return nil, got %v", err)
+	}
+}
+
+func TestSnapshotWithNilCallbacks(t *testing.T) {
+	state := snapshot("BTicino_Companion", nil, nil)
+	if state.instanceName != "BTicino_Companion" {
+		t.Fatalf("unexpected instance name: %s", state.instanceName)
+	}
+	if state.deviceID != "" || state.needsClaim {
+		t.Fatalf("unexpected state with nil callbacks: %+v", state)
+	}
 }
