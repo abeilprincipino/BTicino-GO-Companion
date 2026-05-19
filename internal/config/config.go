@@ -97,10 +97,10 @@ type AuthState struct {
 }
 
 type PersistedConfig struct {
-	SchemaVersion             int               `json:"schema_version"`
-	System                    PersistedSystem   `json:"system"`
-	Intercom                  PersistedIntercom `json:"intercom"`
-	OpenWebNetCommandPassword string            `json:"openwebnet_command_password,omitempty"`
+	SchemaVersion             int                `json:"schema_version"`
+	System                    PersistedSystem    `json:"system"`
+	Companion                 PersistedCompanion `json:"companion"`
+	OpenWebNetCommandPassword string             `json:"openwebnet_command_password,omitempty"`
 }
 
 type PersistedSystem struct {
@@ -136,28 +136,28 @@ type PersistedSystemService struct {
 	Exposed *bool `json:"exposed,omitempty"`
 }
 
-type PersistedIntercom struct {
-	Info   PersistedIntercomInfo   `json:"info"`
-	Auth   AuthState               `json:"auth"`
-	Config PersistedIntercomConfig `json:"config"`
+type PersistedCompanion struct {
+	Info   PersistedCompanionInfo   `json:"info"`
+	Auth   AuthState                `json:"auth"`
+	Config PersistedCompanionConfig `json:"config"`
 }
 
-type PersistedIntercomInfo struct {
+type PersistedCompanionInfo struct {
 	Model string `json:"model,omitempty"`
 }
 
-type PersistedIntercomConfig struct {
-	Entrypoints []entrypoint.Model       `json:"entrypoints"`
-	Audio       PersistedIntercomAudio   `json:"audio"`
-	Voicemail   PersistedIntercomMailbox `json:"voicemail"`
+type PersistedCompanionConfig struct {
+	Entrypoints []entrypoint.Model        `json:"entrypoints"`
+	Audio       PersistedCompanionAudio   `json:"audio"`
+	Voicemail   PersistedCompanionMailbox `json:"voicemail"`
 }
 
-type PersistedIntercomAudio struct {
+type PersistedCompanionAudio struct {
 	Enabled *bool `json:"enabled,omitempty"`
 	Exposed *bool `json:"exposed,omitempty"`
 }
 
-type PersistedIntercomMailbox struct {
+type PersistedCompanionMailbox struct {
 	MessagesDir string `json:"messages_dir,omitempty"`
 	Enabled     *bool  `json:"enabled,omitempty"`
 	Exposed     *bool  `json:"exposed,omitempty"`
@@ -267,8 +267,8 @@ func Load(path string) (Config, error) {
 	}
 	cfg.OpenWebNetCommandPassword = strings.TrimSpace(persisted.OpenWebNetCommandPassword)
 
-	cfg.DeviceModel = strings.TrimSpace(persisted.Intercom.Info.Model)
-	cfg.Auth = persisted.Intercom.Auth
+	cfg.DeviceModel = strings.TrimSpace(persisted.Companion.Info.Model)
+	cfg.Auth = persisted.Companion.Auth
 	cfg.ClaimCode = strings.TrimSpace(cfg.Auth.ClaimCode)
 
 	cfg.SystemRebootEnabled = boolFromPtr(persisted.System.Control.Reboot.Enabled, cfg.SystemRebootEnabled)
@@ -308,16 +308,16 @@ func Load(path string) (Config, error) {
 		}
 	}
 
-	if len(persisted.Intercom.Config.Entrypoints) > 0 {
-		cfg.Entrypoints = persisted.Intercom.Config.Entrypoints
+	if len(persisted.Companion.Config.Entrypoints) > 0 {
+		cfg.Entrypoints = persisted.Companion.Config.Entrypoints
 	}
-	cfg.MuteEnabled = boolFromPtr(persisted.Intercom.Config.Audio.Enabled, cfg.MuteEnabled)
-	cfg.ExposeMuteControl = boolFromPtr(persisted.Intercom.Config.Audio.Exposed, cfg.ExposeMuteControl)
-	if strings.TrimSpace(persisted.Intercom.Config.Voicemail.MessagesDir) != "" {
-		cfg.VoicemailMessagesDir = strings.TrimSpace(persisted.Intercom.Config.Voicemail.MessagesDir)
+	cfg.MuteEnabled = boolFromPtr(persisted.Companion.Config.Audio.Enabled, cfg.MuteEnabled)
+	cfg.ExposeMuteControl = boolFromPtr(persisted.Companion.Config.Audio.Exposed, cfg.ExposeMuteControl)
+	if strings.TrimSpace(persisted.Companion.Config.Voicemail.MessagesDir) != "" {
+		cfg.VoicemailMessagesDir = strings.TrimSpace(persisted.Companion.Config.Voicemail.MessagesDir)
 	}
-	cfg.VoicemailEnabled = boolFromPtr(persisted.Intercom.Config.Voicemail.Enabled, cfg.VoicemailEnabled)
-	cfg.ExposeVoicemailToggle = boolFromPtr(persisted.Intercom.Config.Voicemail.Exposed, cfg.ExposeVoicemailToggle)
+	cfg.VoicemailEnabled = boolFromPtr(persisted.Companion.Config.Voicemail.Enabled, cfg.VoicemailEnabled)
+	cfg.ExposeVoicemailToggle = boolFromPtr(persisted.Companion.Config.Voicemail.Exposed, cfg.ExposeVoicemailToggle)
 
 	cfg.normalize()
 	return cfg, nil
@@ -359,18 +359,18 @@ func Save(path string, cfg Config) error {
 			Services: persistedServices,
 			Future:   map[string]any{},
 		},
-		Intercom: PersistedIntercom{
-			Info: PersistedIntercomInfo{
+		Companion: PersistedCompanion{
+			Info: PersistedCompanionInfo{
 				Model: strings.TrimSpace(cfg.DeviceModel),
 			},
 			Auth: configAuthState(cfg),
-			Config: PersistedIntercomConfig{
+			Config: PersistedCompanionConfig{
 				Entrypoints: cfg.Entrypoints,
-				Audio: PersistedIntercomAudio{
+				Audio: PersistedCompanionAudio{
 					Enabled: boolPtr(cfg.MuteEnabled),
 					Exposed: boolPtr(cfg.ExposeMuteControl),
 				},
-				Voicemail: PersistedIntercomMailbox{
+				Voicemail: PersistedCompanionMailbox{
 					MessagesDir: strings.TrimSpace(cfg.VoicemailMessagesDir),
 					Enabled:     boolPtr(cfg.VoicemailEnabled),
 					Exposed:     boolPtr(cfg.ExposeVoicemailToggle),

@@ -119,8 +119,8 @@ func TestSaveUsesNestedSystemAndConfigSchema(t *testing.T) {
 	if !strings.Contains(text, "\"system\"") {
 		t.Fatalf("expected nested system schema, got: %s", text)
 	}
-	if !strings.Contains(text, "\"intercom\"") {
-		t.Fatalf("expected nested intercom schema, got: %s", text)
+	if !strings.Contains(text, "\"companion\"") {
+		t.Fatalf("expected nested companion schema, got: %s", text)
 	}
 	if !strings.Contains(text, "\"schema_version\": 2") {
 		t.Fatalf("expected schema version 2, got: %s", text)

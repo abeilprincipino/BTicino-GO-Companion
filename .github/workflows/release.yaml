@@ -74,8 +74,15 @@ jobs:
           cat > /tmp/release-notes.md <<EOF
           ## Install
 
+          ### 1) Download installer
+
           \`\`\`sh
           wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh"
+          \`\`\`
+
+          ### 2) Run installer
+
+          \`\`\`sh
           sh /tmp/companion-install.sh
           \`\`\`
           EOF

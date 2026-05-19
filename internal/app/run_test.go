@@ -47,7 +47,7 @@ func TestLoadOrCreateConfigUsesConfiguredModelWhenMetadataUnknown(t *testing.T) 
       }
     }
   },
-  "intercom": {
+  "companion": {
     "info": {
       "model": "C300X"
     },

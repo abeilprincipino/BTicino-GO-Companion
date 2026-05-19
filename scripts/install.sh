@@ -14,6 +14,7 @@ REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"
 CHECKSUM_ASSET="${COMPANION_RELEASE_CHECKSUM_ASSET:-companion.sha256}"
 BINARY_NAME="${COMPANION_RELEASE_BINARY_ASSET:-companion}"
+HEALTHCHECK_TIMEOUT_SEC="${COMPANION_HEALTHCHECK_TIMEOUT_SEC:-45}"
 
 BASE_URL="${COMPANION_RELEASE_BASE_URL:-}"
 if [ -z "${BASE_URL}" ] && [ -n "${REPO}" ]; then
@@ -28,15 +29,20 @@ fi
 ROOT=""
 ROOT_WAS_REMOUNTED=0
 FAILURES=0
+POST_CHECK_FAILURES=0
 SELECTED_BINARY_PATH=""
 SELECTED_INIT_TEMPLATE=""
 
 log() {
-	printf '%s\n' "$*"
+	printf 'INFO: %s\n' "$*"
 }
 
 ok() {
 	printf 'OK: %s\n' "$*"
+}
+
+warn() {
+	printf 'WARN: %s\n' "$*"
 }
 
 fail() {
@@ -140,7 +146,7 @@ ensure_persistent_firewall_port_value() {
 	port="$1"
 
 	if [ ! -f "${hook}" ]; then
-		log "Warning: ${hook} not found, skipping persistent firewall patch."
+		warn "${hook} not found, skipping persistent firewall patch."
 		return 0
 	fi
 
@@ -200,10 +206,10 @@ ensure_persistent_firewall_port_value() {
 	rc=$?
 	rm -f "${tmp}"
 	if [ "${rc}" -eq 42 ]; then
-		log "Warning: could not find SSH/SIP firewall block in ${hook}; no persistent patch applied."
+		warn "could not find SSH/SIP firewall block in ${hook}; no persistent patch applied."
 		return 0
 	fi
-	log "Warning: failed to patch ${hook} for companion port ${port}."
+	warn "failed to patch ${hook} for companion port ${port}."
 	return 0
 }
 
@@ -212,7 +218,7 @@ ensure_persistent_firewall_udp_port_value() {
 	port="$1"
 
 	if [ ! -f "${hook}" ]; then
-		log "Warning: ${hook} not found, skipping persistent firewall patch."
+		warn "${hook} not found, skipping persistent firewall patch."
 		return 0
 	fi
 
@@ -242,10 +248,10 @@ ensure_persistent_firewall_udp_port_value() {
 	rc=$?
 	rm -f "${tmp}"
 	if [ "${rc}" -eq 42 ]; then
-		log "Warning: could not find firewall policy marker in ${hook}; no mDNS persistent patch applied."
+		warn "could not find firewall policy marker in ${hook}; no mDNS persistent patch applied."
 		return 0
 	fi
-	log "Warning: failed to patch ${hook} for companion mDNS port ${port}."
+	warn "failed to patch ${hook} for companion mDNS port ${port}."
 	return 0
 }
 
@@ -320,6 +326,33 @@ health_url() {
 	printf '%s\n' "http://127.0.0.1:8080/api/v2/health"
 }
 
+health_endpoint_reachable() {
+	url="$1"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsS --max-time 3 "${url}" >/dev/null 2>&1
+		return $?
+	fi
+	if command -v wget >/dev/null 2>&1; then
+		wget -q -T 3 -O /dev/null "${url}" >/dev/null 2>&1
+		return $?
+	fi
+	return 127
+}
+
+wait_for_health() {
+	url="$1"
+	max_wait_sec="$2"
+	elapsed=0
+	while [ "${elapsed}" -lt "${max_wait_sec}" ]; do
+		if health_endpoint_reachable "${url}"; then
+			return 0
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	return 1
+}
+
 post_install_checks() {
 	FAILURES=0
 	pidfile="/var/run/${SERVICE_NAME}.pid"
@@ -356,17 +389,12 @@ post_install_checks() {
 	fi
 
 	url="$(health_url)"
-	if command -v curl >/dev/null 2>&1; then
-		if curl -fsS --max-time 3 "${url}" >/dev/null 2>&1; then
+	if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+		log "Waiting for health endpoint (up to ${HEALTHCHECK_TIMEOUT_SEC}s): ${url}"
+		if wait_for_health "${url}" "${HEALTHCHECK_TIMEOUT_SEC}"; then
 			ok "Health endpoint reachable at ${url}"
 		else
-			fail "Health endpoint not reachable at ${url}"
-		fi
-	elif command -v wget >/dev/null 2>&1; then
-		if wget -q -T 3 -O /dev/null "${url}" >/dev/null 2>&1; then
-			ok "Health endpoint reachable at ${url}"
-		else
-			fail "Health endpoint not reachable at ${url}"
+			fail "Health endpoint not reachable at ${url} after ${HEALTHCHECK_TIMEOUT_SEC}s"
 		fi
 	else
 		fail "Neither curl nor wget available for health check"
@@ -383,6 +411,7 @@ post_install_checks() {
 	else
 		log "Post-install checks passed."
 	fi
+	POST_CHECK_FAILURES="${FAILURES}"
 }
 
 resolve_local_install_inputs() {
@@ -459,9 +488,11 @@ download_latest_artifacts() {
 
 main() {
 	require_root
+	log "Starting companion installation"
 
 	input_binary="${1:-}"
 	if [ -n "${input_binary}" ]; then
+		log "Using local binary input: ${input_binary}"
 		resolve_local_install_inputs "${input_binary}" "${LOCAL_INIT_TEMPLATE}"
 	else
 		download_latest_artifacts
@@ -472,6 +503,10 @@ main() {
 	start_service
 	restore_root_ro
 	post_install_checks
+	if [ "${POST_CHECK_FAILURES}" -ne 0 ]; then
+		log "Installation finished with ${POST_CHECK_FAILURES} failed check(s)."
+		exit 1
+	fi
 	log "Installation complete."
 }
 
