@@ -1,6 +1,11 @@
 package discovery
 
-import "testing"
+import (
+	"net"
+	"testing"
+
+	"bticino-go-companion/internal/config"
+)
 
 func TestNormalizeServiceType(t *testing.T) {
 	tests := []struct {
@@ -56,4 +61,51 @@ func TestSnapshotPrefersDeviceIDForInstance(t *testing.T) {
 	if !state.needsClaim {
 		t.Fatal("expected needsClaim to be true")
 	}
+}
+
+func TestTXTRecordsIncludeHomeAssistantDiscoveryHints(t *testing.T) {
+	state := advertisementState{
+		deviceName: "BTicino Companion",
+		deviceID:   "c300x_123",
+		needsClaim: true,
+	}
+	records := txtRecords(testConfig(), state)
+
+	want := map[string]bool{
+		"api=v2":                 false,
+		"scheme=http":            false,
+		"name=BTicino_Companion": false,
+		"device_id=c300x_123":    false,
+		"needs_claim=true":       false,
+	}
+	for _, record := range records {
+		if _, ok := want[record]; ok {
+			want[record] = true
+		}
+	}
+	for record, found := range want {
+		if !found {
+			t.Fatalf("missing TXT record %q in %v", record, records)
+		}
+	}
+}
+
+func TestAddrContainsIP(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.0.0.172/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !addrContainsIP(network, net.ParseIP("10.0.0.172")) {
+		t.Fatal("expected network to contain IP")
+	}
+	if addrContainsIP(network, net.ParseIP("192.168.129.1")) {
+		t.Fatal("did not expect network to contain USB-side IP")
+	}
+}
+
+func testConfig() config.Config {
+	cfg := config.Default()
+	cfg.DeviceModel = "C300X"
+	cfg.DeviceFirmware = "1.7.19"
+	return cfg
 }

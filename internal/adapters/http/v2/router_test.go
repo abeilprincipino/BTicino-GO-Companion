@@ -102,9 +102,13 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 
 	var body struct {
-		CallState   string             `json:"call_state"`
-		Entrypoints []entrypoint.Model `json:"entrypoints"`
-		Device      map[string]any     `json:"device"`
+		CallState   string `json:"call_state"`
+		Entrypoints []struct {
+			entrypoint.Model
+			RTSPPath string `json:"rtsp_path"`
+			RTSPPort int    `json:"rtsp_port"`
+		} `json:"entrypoints"`
+		Device map[string]any `json:"device"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -114,6 +118,9 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 	if len(body.Entrypoints) != 1 || body.Entrypoints[0].ID != "main" {
 		t.Fatalf("unexpected entrypoints payload: %+v", body.Entrypoints)
+	}
+	if body.Entrypoints[0].RTSPPath != "doorbell-main" || body.Entrypoints[0].RTSPPort != 8554 {
+		t.Fatalf("unexpected rtsp entrypoint payload: %+v", body.Entrypoints[0])
 	}
 	if _, ok := body.Device["model"]; !ok {
 		t.Fatalf("expected device model in state payload: %+v", body.Device)

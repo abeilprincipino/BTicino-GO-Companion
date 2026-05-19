@@ -36,10 +36,3 @@ func (t *Transport) OnGetParameter(sessionID string) {
 	}
 	t.lifecycle.ReaderTouch(sessionID)
 }
-
-func (t *Transport) OnSetParameter(sessionID string) {
-	if t.lifecycle == nil {
-		return
-	}
-	t.lifecycle.ReaderTouch(sessionID)
-}

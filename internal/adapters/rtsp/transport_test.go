@@ -44,9 +44,8 @@ func TestTransportDelegatesLifecycle(t *testing.T) {
 		t.Fatalf("on pause failed: %v", err)
 	}
 	transport.OnGetParameter("s1")
-	transport.OnSetParameter("s1")
 
-	if lifecycle.joinCalls != 1 || lifecycle.leaveCalls != 1 || lifecycle.touchCalls != 2 {
+	if lifecycle.joinCalls != 1 || lifecycle.leaveCalls != 1 || lifecycle.touchCalls != 1 {
 		t.Fatalf("unexpected lifecycle counters: %+v", lifecycle)
 	}
 	if lifecycle.lastEntryp != "main" || lifecycle.lastDevAddr != "20" {

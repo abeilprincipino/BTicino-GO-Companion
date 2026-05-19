@@ -39,7 +39,6 @@ func (r *lifecycleRecorder) ReaderTouch(_ string) {
 
 func TestServerPathAndLifecycleHooks(t *testing.T) {
 	cfg := config.Default()
-	cfg.MediaRTSPPathMain = "doorbell"
 	cfg.Entrypoints = []entrypoint.Model{
 		{ID: "gate1", DevAddr: "20", HasStream: true},
 		{ID: "gate2", DevAddr: "21", HasStream: true},

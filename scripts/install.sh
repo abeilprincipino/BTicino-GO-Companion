@@ -155,7 +155,7 @@ ensure_persistent_firewall_port_value() {
 		}
 		END { exit(found ? 0 : 1) }
 	' "${hook}"; then
-		log "Persistent firewall already allows TCP ${port}."
+		log "Persistent firewall already allows companion port ${port}."
 		return 0
 	fi
 
@@ -206,10 +206,53 @@ ensure_persistent_firewall_port_value() {
 	return 0
 }
 
+ensure_persistent_firewall_udp_port_value() {
+	hook="/etc/network/if-pre-up.d/iptables"
+	port="$1"
+
+	if [ ! -f "${hook}" ]; then
+		log "Warning: ${hook} not found, skipping persistent firewall patch."
+		return 0
+	fi
+
+	if grep -Eq "udp.*--dport[[:space:]]+${port}.*-j[[:space:]]+ACCEPT" "${hook}"; then
+		log "Persistent firewall already allows UDP ${port}."
+		return 0
+	fi
+
+	tmp="${hook}.tmp.$$"
+	if awk -v port="${port}" '
+		BEGIN { patched=0 }
+		/^#disable all other stuff/ && !patched {
+			print "# companion mdns discovery"
+			print "iptables -A INPUT -p udp -m udp --dport " port " -j ACCEPT"
+			print ""
+			patched=1
+		}
+		{ print }
+		END { if (!patched) exit 42 }
+	' "${hook}" > "${tmp}"; then
+		cp "${tmp}" "${hook}"
+		rm -f "${tmp}"
+		log "Persisted companion mDNS firewall port ${port} in ${hook}."
+		return 0
+	fi
+
+	rc=$?
+	rm -f "${tmp}"
+	if [ "${rc}" -eq 42 ]; then
+		log "Warning: could not find firewall policy marker in ${hook}; no mDNS persistent patch applied."
+		return 0
+	fi
+	log "Warning: failed to patch ${hook} for companion mDNS port ${port}."
+	return 0
+}
+
 ensure_persistent_firewall_ports() {
 	for port in $(companion_firewall_ports); do
 		ensure_persistent_firewall_port_value "${port}"
 	done
+	ensure_persistent_firewall_udp_port_value 5353
 }
 
 install_binary() {

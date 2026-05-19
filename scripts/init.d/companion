@@ -21,19 +21,40 @@ if [ -f /etc/init.d/functions ]; then
 	. /etc/init.d/functions
 fi
 
-listen_ports() {
+tcp_listen_ports() {
 	echo "8080 8554"
+}
+
+udp_listen_ports() {
+	echo "5353"
+}
+
+ensure_firewall_rule() {
+	proto="$1"
+	port="$2"
+	if /usr/sbin/iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1; then
+		return 0
+	fi
+	/usr/sbin/iptables -I INPUT 1 -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || true
 }
 
 ensure_firewall() {
 	if [ ! -x /usr/sbin/iptables ]; then
 		return 0
 	fi
-	for port in $(listen_ports); do
-		if /usr/sbin/iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT >/dev/null 2>&1; then
-			continue
-		fi
-		/usr/sbin/iptables -I INPUT 1 -p tcp --dport "${port}" -j ACCEPT >/dev/null 2>&1 || true
+	for port in $(tcp_listen_ports); do
+		ensure_firewall_rule tcp "${port}"
+	done
+	for port in $(udp_listen_ports); do
+		ensure_firewall_rule udp "${port}"
+	done
+}
+
+remove_firewall_rule() {
+	proto="$1"
+	port="$2"
+	while /usr/sbin/iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1; do
+		/usr/sbin/iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || break
 	done
 }
 
@@ -41,10 +62,11 @@ remove_firewall() {
 	if [ ! -x /usr/sbin/iptables ]; then
 		return 0
 	fi
-	for port in $(listen_ports); do
-		while /usr/sbin/iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT >/dev/null 2>&1; do
-			/usr/sbin/iptables -D INPUT -p tcp --dport "${port}" -j ACCEPT >/dev/null 2>&1 || break
-		done
+	for port in $(tcp_listen_ports); do
+		remove_firewall_rule tcp "${port}"
+	done
+	for port in $(udp_listen_ports); do
+		remove_firewall_rule udp "${port}"
 	done
 }
 

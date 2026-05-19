@@ -93,6 +93,23 @@ func (g *Guard) Begin(scope Scope, ip string) Decision {
 	pruneActors(s, now)
 	actor := g.getActor(s, ip, now)
 
+	if now.Before(actor.LockedUntil) {
+		return Decision{
+			Allowed:    false,
+			Code:       "locked_ip",
+			Message:    "ip temporarily locked",
+			RetryAfter: actor.LockedUntil.Sub(now),
+		}
+	}
+	if now.Before(s.GlobalLockedTil) {
+		return Decision{
+			Allowed:    false,
+			Code:       "locked_global",
+			Message:    "scope temporarily locked",
+			RetryAfter: s.GlobalLockedTil.Sub(now),
+		}
+	}
+
 	if !withinWindow(&actor.Limiter, now, s.Policy.Window) {
 		actor.Limiter = limiterState{WindowStart: now}
 	}
@@ -125,9 +142,9 @@ func (g *Guard) Success(scope Scope, ip string) {
 	s := g.pick(scope)
 	actor := g.getActor(s, ip, now)
 	actor.Failures = 0
-	if s.GlobalFailures > 0 {
-		s.GlobalFailures--
-	}
+	s.GlobalFailures = 0
+	actor.LockedUntil = time.Time{}
+	s.GlobalLockedTil = time.Time{}
 }
 
 func (g *Guard) Failure(scope Scope, ip string) {
@@ -141,6 +158,13 @@ func (g *Guard) Failure(scope Scope, ip string) {
 	actor := g.getActor(s, ip, now)
 	actor.Failures++
 	s.GlobalFailures++
+	if actor.Failures >= s.Policy.FailureThreshold {
+		actor.LockedUntil = now.Add(lockoutDuration(s.Policy, actor.Failures-s.Policy.FailureThreshold))
+	}
+	globalThreshold := globalFailureThreshold(s.Policy)
+	if s.GlobalFailures >= globalThreshold {
+		s.GlobalLockedTil = now.Add(lockoutDuration(s.Policy, s.GlobalFailures-globalThreshold))
+	}
 }
 
 func (g *Guard) Snapshot() map[string]any {
@@ -235,6 +259,21 @@ func retryAfterWindow(limit limiterState, now time.Time, window time.Duration) t
 		return 0
 	}
 	return retry
+}
+
+func globalFailureThreshold(p policy) int {
+	scale := 1
+	if p.PerIPLimit > 0 {
+		scale = p.GlobalLimit / p.PerIPLimit
+	}
+	if scale < 1 {
+		scale = 1
+	}
+	threshold := p.FailureThreshold * scale
+	if threshold < p.FailureThreshold {
+		return p.FailureThreshold
+	}
+	return threshold
 }
 
 func normalizeIP(ip string) string {

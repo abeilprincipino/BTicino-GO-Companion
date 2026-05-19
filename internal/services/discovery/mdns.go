@@ -107,15 +107,20 @@ func Start(
 }
 
 func register(service string, port int, cfg config.Config, state advertisementState) (*zeroconf.Server, error) {
+	return zeroconf.Register(state.instanceName, service, "local.", port, txtRecords(cfg, state), advertisementInterfaces())
+}
+
+func txtRecords(cfg config.Config, state advertisementState) []string {
 	txt := []string{
 		"api=v2",
+		"scheme=http",
 		"model=" + normalizeTXT(cfg.DeviceModel),
 		"fw=" + normalizeTXT(cfg.DeviceFirmware),
 		"name=" + normalizeTXT(state.deviceName),
 		"device_id=" + normalizeTXT(state.deviceID),
 		"needs_claim=" + strconv.FormatBool(state.needsClaim),
 	}
-	return zeroconf.Register(state.instanceName, service, "local.", port, txt, nil)
+	return txt
 }
 
 func snapshot(baseName string, needsClaimFn func() bool, deviceIDFn func() string) advertisementState {
@@ -141,9 +146,7 @@ func normalizeServiceType(raw string) string {
 	if service == "" {
 		return defaultMDNSServiceType
 	}
-	if strings.HasSuffix(service, ".") {
-		service = strings.TrimSuffix(service, ".")
-	}
+	service = strings.TrimSuffix(service, ".")
 	if !strings.HasPrefix(service, "_") {
 		service = "_" + service
 	}
@@ -184,6 +187,68 @@ func parseValidPort(raw string) (int, bool) {
 		return 0, false
 	}
 	return port, true
+}
+
+func advertisementInterfaces() []net.Interface {
+	ip := outboundIPv4()
+	if ip == nil {
+		return nil
+	}
+	iface, ok := interfaceForIP(ip)
+	if !ok {
+		return nil
+	}
+	return []net.Interface{iface}
+}
+
+func outboundIPv4() net.IP {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return addr.IP.To4()
+}
+
+func interfaceForIP(ip net.IP) (net.Interface, bool) {
+	if ip == nil {
+		return net.Interface{}, false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return net.Interface{}, false
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			if addrContainsIP(addr, ip) {
+				return iface, true
+			}
+		}
+	}
+	return net.Interface{}, false
+}
+
+func addrContainsIP(addr net.Addr, ip net.IP) bool {
+	switch typed := addr.(type) {
+	case *net.IPNet:
+		return typed.Contains(ip)
+	case *net.IPAddr:
+		return typed.IP.Equal(ip)
+	default:
+		return false
+	}
 }
 
 func normalizeName(raw string) string {

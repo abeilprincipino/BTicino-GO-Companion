@@ -50,19 +50,6 @@ func (s *Service) RebootEnabled() bool {
 	return s != nil && s.rebootEnabled
 }
 
-func (s *Service) ExposedServices() []string {
-	if s == nil || len(s.serviceConfigs) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(s.serviceConfigs))
-	for name, cfg := range s.serviceConfigs {
-		if cfg.Exposed {
-			out = append(out, name)
-		}
-	}
-	return out
-}
-
 func (s *Service) ServiceConfigs() map[string]config.SystemServiceConfig {
 	if s == nil || len(s.serviceConfigs) == 0 {
 		return nil

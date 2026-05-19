@@ -34,11 +34,6 @@ type readerInfo struct {
 	LastSeen     time.Time
 }
 
-type streamRoute struct {
-	EntrypointID string
-	DevAddr      string
-}
-
 type Server struct {
 	cfg    config.Config
 	logger *log.Logger
@@ -52,13 +47,12 @@ type Server struct {
 	videoMed *description.Media
 	audioMed *description.Media
 	readers  map[*gortsplib.ServerSession]readerInfo
-	paths    map[string]streamRoute
+	paths    map[string]entrypoint.StreamRoute
 	pathList []string
 }
 
 func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Server {
-	pathPrefix := normalizePath(cfg.MediaRTSPPathMain, "doorbell")
-	paths := buildStreamRoutes(pathPrefix, cfg.Entrypoints)
+	paths := entrypoint.RTSPRoutes(cfg.Entrypoints)
 
 	s := &Server{
 		cfg:       cfg,
@@ -104,14 +98,6 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.watchReaderSessions(ctx)
 
 	return nil
-}
-
-func (s *Server) StreamURL(host string) string {
-	path := "doorbell"
-	if len(s.pathList) > 0 {
-		path = s.pathList[0]
-	}
-	return fmt.Sprintf("rtsp://%s/%s", net.JoinHostPort(extractHost(host), extractPortString(s.cfg.MediaRTSPAddress, 8554)), path)
 }
 
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
@@ -389,47 +375,8 @@ func (s *Server) isKnownPath(path string) bool {
 	return ok
 }
 
-func normalizePath(raw string, fallback string) string {
-	val := strings.TrimSpace(raw)
-	val = strings.TrimPrefix(val, "/")
-	if val == "" {
-		return fallback
-	}
-	return val
-}
-
 func sessionID(session *gortsplib.ServerSession) string {
 	return fmt.Sprintf("%p", session)
-}
-
-func extractHost(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	host, _, err := net.SplitHostPort(trimmed)
-	if err == nil {
-		return strings.Trim(host, "[]")
-	}
-	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-		return strings.Trim(trimmed, "[]")
-	}
-	if trimmed == "" {
-		return "127.0.0.1"
-	}
-	return trimmed
-}
-
-func extractPortString(raw string, fallback int) string {
-	addr := strings.TrimSpace(raw)
-	if strings.HasPrefix(addr, ":") {
-		p := strings.TrimPrefix(addr, ":")
-		if p != "" {
-			return p
-		}
-	}
-	_, p, err := net.SplitHostPort(addr)
-	if err == nil && strings.TrimSpace(p) != "" {
-		return strings.TrimSpace(p)
-	}
-	return fmt.Sprintf("%d", fallback)
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -438,70 +385,11 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-func buildStreamRoutes(prefix string, entrypoints []entrypoint.Model) map[string]streamRoute {
-	routes := make(map[string]streamRoute)
-	for idx, ep := range entrypoints {
-		if !ep.HasStream {
-			continue
-		}
-		id := strings.TrimSpace(ep.ID)
-		if id == "" {
-			continue
-		}
-		token := sanitizePathToken(id)
-		if token == "" {
-			token = fmt.Sprintf("entrypoint%d", idx+1)
-		}
-		basePath := fmt.Sprintf("%s-%s", prefix, token)
-		path := basePath
-		for n := 2; ; n++ {
-			if _, exists := routes[path]; !exists {
-				break
-			}
-			path = fmt.Sprintf("%s-%d", basePath, n)
-		}
-		routes[path] = streamRoute{
-			EntrypointID: id,
-			DevAddr:      strings.TrimSpace(ep.DevAddr),
-		}
-	}
-	return routes
-}
-
-func sortedRoutePaths(routes map[string]streamRoute) []string {
+func sortedRoutePaths(routes map[string]entrypoint.StreamRoute) []string {
 	paths := make([]string, 0, len(routes))
 	for path := range routes {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 	return paths
-}
-
-func sanitizePathToken(raw string) string {
-	val := strings.ToLower(strings.TrimSpace(raw))
-	if val == "" {
-		return ""
-	}
-
-	var out strings.Builder
-	lastDash := false
-	for _, r := range val {
-		switch {
-		case r >= 'a' && r <= 'z':
-			out.WriteRune(r)
-			lastDash = false
-		case r >= '0' && r <= '9':
-			out.WriteRune(r)
-			lastDash = false
-		case r == '-' || r == '_':
-			out.WriteRune(r)
-			lastDash = false
-		default:
-			if !lastDash {
-				out.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-	return strings.Trim(out.String(), "-")
 }

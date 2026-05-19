@@ -54,7 +54,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 
 	commandClient := openwebnet.NewCommandClient(cfg)
 	if cfg.OpenWebNetEnabled {
-		if err := enrichConfigWithDiagnosticMetadataWithRetry(resolvedConfigPath, &cfg, commandClient, logger); err != nil {
+		if err := enrichConfigWithDiagnosticMetadataWithRetry(&cfg, commandClient, logger); err != nil {
 			logger.Printf("device diagnostics bootstrap skipped: %v", err)
 		}
 	}
@@ -444,8 +444,7 @@ func normalizedDetectedModel(model string) string {
 	return trimmed
 }
 
-func enrichConfigWithDiagnosticMetadata(path string, cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
-	_ = path
+func enrichConfigWithDiagnosticMetadata(cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
 	if cfg == nil || commandClient == nil {
 		return nil
 	}
@@ -464,18 +463,20 @@ func enrichConfigWithDiagnosticMetadata(path string, cfg *config.Config, command
 	setIfNonEmpty(&cfg.DeviceHardware, diagnostic.Hardware)
 	setIfNonEmpty(&cfg.DeviceKernel, diagnostic.Kernel)
 	setIfNonEmpty(&cfg.DeviceDistribution, diagnostic.Distribution)
-	logger.Printf("refreshed runtime diagnostics snapshot")
+	if logger != nil {
+		logger.Printf("refreshed runtime diagnostics snapshot")
+	}
 	return nil
 }
 
-func enrichConfigWithDiagnosticMetadataWithRetry(path string, cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+func enrichConfigWithDiagnosticMetadataWithRetry(cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
 	const (
 		maxAttempts = 5
 		retryDelay  = 2 * time.Second
 	)
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := enrichConfigWithDiagnosticMetadata(path, cfg, commandClient, logger); err != nil {
+		if err := enrichConfigWithDiagnosticMetadata(cfg, commandClient, logger); err != nil {
 			lastErr = err
 			if logger != nil {
 				logger.Printf("device diagnostics attempt %d/%d failed: %v", attempt, maxAttempts, err)

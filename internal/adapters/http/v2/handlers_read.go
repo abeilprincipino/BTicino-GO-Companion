@@ -1,12 +1,21 @@
 package v2
 
 import (
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/observability"
 	"bticino-go-companion/internal/services/runtime"
 )
+
+type entrypointResponse struct {
+	entrypoint.Model
+	RTSPPath string `json:"rtsp_path,omitempty"`
+	RTSPPort int    `json:"rtsp_port,omitempty"`
+}
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	if !requireMethod(w, req, http.MethodGet) {
@@ -48,7 +57,7 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		"floor_ringing":   snap.FloorRinging,
 		"last_event_type": snap.LastEventType,
 		"last_event_ts":   snap.LastEventTS,
-		"entrypoints":     snap.Entrypoints,
+		"entrypoints":     r.entrypointResponses(snap.Entrypoints),
 		"device": map[string]any{
 			"id":       nullableString(r.auth.DeviceID()),
 			"name":     nullableString(r.cfg.DeviceModel),
@@ -122,7 +131,7 @@ func (r *Router) handleEntrypoints(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	snap := r.state.Snapshot()
-	writeJSON(w, http.StatusOK, map[string]any{"entrypoints": snap.Entrypoints})
+	writeJSON(w, http.StatusOK, map[string]any{"entrypoints": r.entrypointResponses(snap.Entrypoints)})
 }
 
 func nullableString(value string) any {
@@ -137,6 +146,45 @@ func stateEntrypointValue(value string) string {
 		return "none"
 	}
 	return value
+}
+
+func (r *Router) entrypointResponses(entrypoints []entrypoint.Model) []entrypointResponse {
+	paths := entrypoint.RTSPPathByEntrypointID(entrypoints)
+	port := rtspPort(r.cfg.MediaRTSPAddress)
+	out := make([]entrypointResponse, 0, len(entrypoints))
+	for _, ep := range entrypoints {
+		row := entrypointResponse{Model: ep}
+		if ep.HasStream {
+			row.RTSPPath = paths[strings.TrimSpace(ep.ID)]
+			row.RTSPPort = port
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func rtspPort(address string) int {
+	const fallback = 8554
+	raw := strings.TrimSpace(address)
+	if raw == "" {
+		return fallback
+	}
+	if strings.HasPrefix(raw, ":") {
+		port, err := strconv.Atoi(strings.TrimPrefix(raw, ":"))
+		if err == nil && port > 0 && port <= 65535 {
+			return port
+		}
+		return fallback
+	}
+	_, portString, err := net.SplitHostPort(raw)
+	if err != nil {
+		return fallback
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portString))
+	if err != nil || port <= 0 || port > 65535 {
+		return fallback
+	}
+	return port
 }
 
 func (r *Router) systemUpdateSnapshot() map[string]any {

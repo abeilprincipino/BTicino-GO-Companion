@@ -18,8 +18,8 @@ func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	if cfg.OpenWebNetCommandPassword != "" {
 		t.Fatalf("expected empty openwebnet command password by default, got %q", cfg.OpenWebNetCommandPassword)
 	}
-	if !cfg.MediaRTSPEnabled || cfg.MediaRTSPAddress != ":8554" || cfg.MediaRTSPPathMain != "doorbell" {
-		t.Fatalf("unexpected rtsp defaults: enabled=%v addr=%s main=%s", cfg.MediaRTSPEnabled, cfg.MediaRTSPAddress, cfg.MediaRTSPPathMain)
+	if !cfg.MediaRTSPEnabled || cfg.MediaRTSPAddress != ":8554" {
+		t.Fatalf("unexpected rtsp defaults: enabled=%v addr=%s", cfg.MediaRTSPEnabled, cfg.MediaRTSPAddress)
 	}
 	if cfg.MediaRTPAudioPort != 5000 || cfg.MediaRTPVideoPort != 5007 {
 		t.Fatalf("unexpected rtp defaults: audio=%d video=%d", cfg.MediaRTPAudioPort, cfg.MediaRTPVideoPort)

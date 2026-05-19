@@ -63,7 +63,6 @@ type Config struct {
 	MediaSIPAuthPass          string
 	MediaRTSPEnabled          bool
 	MediaRTSPAddress          string
-	MediaRTSPPathMain         string
 	MediaRTPAudioPort         int
 	MediaRTPVideoPort         int
 	VoicemailMessagesDir      string
@@ -207,7 +206,6 @@ func Default() Config {
 		MediaSIPAuthPass:          "",
 		MediaRTSPEnabled:          true,
 		MediaRTSPAddress:          ":8554",
-		MediaRTSPPathMain:         "doorbell",
 		MediaRTPAudioPort:         5000,
 		MediaRTPVideoPort:         5007,
 		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
@@ -520,9 +518,6 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.MediaRTSPAddress) == "" {
 		c.MediaRTSPAddress = ":8554"
-	}
-	if strings.TrimSpace(c.MediaRTSPPathMain) == "" {
-		c.MediaRTSPPathMain = "doorbell"
 	}
 	if c.MediaRTPAudioPort <= 0 || c.MediaRTPAudioPort > 65535 {
 		c.MediaRTPAudioPort = 5000
