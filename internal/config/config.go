@@ -68,7 +68,6 @@ type Config struct {
 	SystemRebootEnabled       bool
 	SystemUpdateEnabled       bool
 	SystemUpdateExposed       bool
-	SystemUpdateAllowApply    bool
 	SystemUpdateAllowRollback bool
 	SystemServices            map[string]SystemServiceConfig
 	UpdateManifestPath        string
@@ -76,7 +75,6 @@ type Config struct {
 	UpdateReleaseRepo         string
 	UpdateReleaseAsset        string
 	UpdateServiceScript       string
-	UpdateAllowSelfRestart    bool
 	UpdateHealthTimeoutSec    int
 	MuteEnabled               bool
 	ExposeMuteControl         bool
@@ -120,7 +118,6 @@ type PersistedSystemReboot struct {
 type PersistedSystemUpdate struct {
 	Enabled       *bool  `json:"enabled,omitempty"`
 	Exposed       *bool  `json:"exposed,omitempty"`
-	AllowApply    *bool  `json:"allow_apply,omitempty"`
 	AllowRollback *bool  `json:"allow_rollback,omitempty"`
 	ManifestPath  string `json:"manifest_path,omitempty"`
 	ReleaseAPI    string `json:"release_api,omitempty"`
@@ -206,7 +203,6 @@ func Default() Config {
 		SystemRebootEnabled:       true,
 		SystemUpdateEnabled:       true,
 		SystemUpdateExposed:       false,
-		SystemUpdateAllowApply:    false,
 		SystemUpdateAllowRollback: false,
 		SystemServices: map[string]SystemServiceConfig{
 			"dropbear": {
@@ -219,7 +215,6 @@ func Default() Config {
 		UpdateReleaseRepo:      strings.TrimSpace(BuildReleaseRepo),
 		UpdateReleaseAsset:     "companion",
 		UpdateServiceScript:    "/etc/init.d/companion",
-		UpdateAllowSelfRestart: false,
 		UpdateHealthTimeoutSec: 8,
 		MuteEnabled:            true,
 		ExposeMuteControl:      true,
@@ -272,7 +267,6 @@ func Load(path string) (Config, error) {
 	cfg.SystemRebootEnabled = boolFromPtr(persisted.System.Control.Reboot.Enabled, cfg.SystemRebootEnabled)
 	cfg.SystemUpdateEnabled = boolFromPtr(persisted.System.Control.Update.Enabled, cfg.SystemUpdateEnabled)
 	cfg.SystemUpdateExposed = boolFromPtr(persisted.System.Control.Update.Exposed, cfg.SystemUpdateExposed)
-	cfg.SystemUpdateAllowApply = boolFromPtr(persisted.System.Control.Update.AllowApply, cfg.SystemUpdateAllowApply)
 	cfg.SystemUpdateAllowRollback = boolFromPtr(persisted.System.Control.Update.AllowRollback, cfg.SystemUpdateAllowRollback)
 	if strings.TrimSpace(persisted.System.Control.Update.ManifestPath) != "" {
 		cfg.UpdateManifestPath = strings.TrimSpace(persisted.System.Control.Update.ManifestPath)
@@ -344,7 +338,6 @@ func Save(path string, cfg Config) error {
 				Update: PersistedSystemUpdate{
 					Enabled:       boolPtr(cfg.SystemUpdateEnabled),
 					Exposed:       boolPtr(cfg.SystemUpdateExposed),
-					AllowApply:    boolPtr(cfg.SystemUpdateAllowApply),
 					AllowRollback: boolPtr(cfg.SystemUpdateAllowRollback),
 					ManifestPath:  strings.TrimSpace(cfg.UpdateManifestPath),
 					ReleaseAPI:    strings.TrimSpace(cfg.UpdateReleaseAPI),
@@ -560,11 +553,9 @@ func (c *Config) normalize() {
 	}
 	if !c.SystemUpdateEnabled {
 		c.SystemUpdateExposed = false
-		c.SystemUpdateAllowApply = false
 		c.SystemUpdateAllowRollback = false
 	}
 	if !c.SystemUpdateExposed {
-		c.SystemUpdateAllowApply = false
 		c.SystemUpdateAllowRollback = false
 	}
 

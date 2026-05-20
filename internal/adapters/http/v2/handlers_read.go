@@ -193,7 +193,6 @@ func (r *Router) systemUpdateSnapshot() map[string]any {
 	out := map[string]any{
 		"enabled":        r.cfg.SystemUpdateEnabled,
 		"exposed":        r.cfg.SystemUpdateExposed,
-		"allow_apply":    r.cfg.SystemUpdateAllowApply,
 		"allow_rollback": r.cfg.SystemUpdateAllowRollback,
 	}
 	if r.update != nil {

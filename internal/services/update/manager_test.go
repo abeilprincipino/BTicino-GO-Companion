@@ -25,7 +25,6 @@ func TestApplyAndRollbackLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Version = "1.0.0"
 	cfg.DataDir = filepath.Join(tempDir, "companion")
-	cfg.UpdateAllowSelfRestart = false
 
 	current := cfg.UpdateBinCurrentPath()
 	if err := os.MkdirAll(filepath.Dir(current), 0o755); err != nil {
@@ -41,6 +40,7 @@ func TestApplyAndRollbackLifecycle(t *testing.T) {
 	}
 
 	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m.SetRestartForTest(func() error { return nil })
 	applyStatus, err := m.Apply(&Artifact{Version: "1.1.0", Path: candidatePath})
 	if err != nil {
 		t.Fatalf("apply failed: %v", err)
@@ -48,8 +48,8 @@ func TestApplyAndRollbackLifecycle(t *testing.T) {
 	if applyStatus.Stage != StageHealthy {
 		t.Fatalf("expected healthy stage, got %s", applyStatus.Stage)
 	}
-	if !applyStatus.RestartRequired {
-		t.Fatalf("expected restart_required=true after apply")
+	if applyStatus.RestartRequired {
+		t.Fatalf("expected restart_required=false after successful apply")
 	}
 	if applyStatus.CurrentVersion != "1.1.0" {
 		t.Fatalf("expected current version 1.1.0, got %s", applyStatus.CurrentVersion)
@@ -130,7 +130,6 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 	cfg := config.Default()
 	cfg.Version = "v0.0.1"
 	cfg.DataDir = filepath.Join(tempDir, "companion")
-	cfg.UpdateAllowSelfRestart = false
 
 	current := cfg.UpdateBinCurrentPath()
 	if err := os.MkdirAll(filepath.Dir(current), 0o755); err != nil {
@@ -149,6 +148,7 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 	defer artifactServer.Close()
 
 	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m.SetRestartForTest(func() error { return nil })
 	applyStatus, err := m.Apply(&Artifact{
 		Version: "v0.0.2",
 		Path:    artifactServer.URL + "/companion",

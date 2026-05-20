@@ -35,6 +35,13 @@ import (
 	"bticino-go-companion/internal/system"
 )
 
+const (
+	updateCheckInterval   = 3 * time.Hour
+	updateCheckStartDelay = 20 * time.Second
+	updateRetryBaseDelay  = 2 * time.Minute
+	updateRetryMaxDelay   = 1 * time.Hour
+)
+
 func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	if logger == nil {
 		logger = log.Default()
@@ -262,6 +269,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	diagnosticsService.Refresh()
 	go diagnosticsService.Start(ctx)
 	updateManager := update.NewManager(cfg, logger, selfHealthCheck(cfg))
+	startUpdateCheckLoop(ctx, cfg, updateManager, logger)
 
 	router := v2.NewRouter(
 		cfg,
@@ -499,6 +507,71 @@ func setIfNonEmpty(dst *string, value string) bool {
 	}
 	*dst = next
 	return true
+}
+
+func startUpdateCheckLoop(ctx context.Context, cfg config.Config, manager *update.Manager, logger *log.Logger) {
+	if manager == nil || !cfg.SystemUpdateEnabled {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(updateCheckStartDelay)
+		defer timer.Stop()
+		retryCount := 0
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+
+			nextDelay := updateCheckInterval
+			status, err := manager.Check(nil)
+			if err != nil {
+				retryCount++
+				nextDelay = updateRetryDelay(retryCount)
+				if logger != nil {
+					logger.Printf("update check failed (retry %d in %s): %v", retryCount, nextDelay, err)
+				}
+			} else {
+				retryCount = 0
+				if logger != nil {
+					available := ""
+					if status.Available != nil {
+						available = strings.TrimSpace(status.Available.Version)
+					}
+					if available == "" {
+						available = "none"
+					}
+					logger.Printf(
+						"update check completed stage=%s current=%s available=%s next=%s",
+						status.Stage,
+						strings.TrimSpace(status.CurrentVersion),
+						available,
+						nextDelay,
+					)
+				}
+			}
+			timer.Reset(nextDelay)
+		}
+	}()
+}
+
+func updateRetryDelay(retryCount int) time.Duration {
+	if retryCount <= 0 {
+		return updateRetryBaseDelay
+	}
+	delay := updateRetryBaseDelay
+	for i := 1; i < retryCount; i++ {
+		delay *= 2
+		if delay >= updateRetryMaxDelay {
+			return updateRetryMaxDelay
+		}
+	}
+	if delay > updateRetryMaxDelay {
+		return updateRetryMaxDelay
+	}
+	return delay
 }
 
 func selfHealthCheck(cfg config.Config) func(context.Context) error {

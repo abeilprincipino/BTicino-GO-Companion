@@ -100,18 +100,16 @@ func NewManager(cfg config.Config, logger *log.Logger, healthFn func(context.Con
 			Stage:          StageIdle,
 		},
 	}
-	if cfg.UpdateAllowSelfRestart {
-		m.restart = func() error {
-			if strings.TrimSpace(cfg.UpdateServiceScript) == "" {
-				return errors.New("update service restart script is empty")
-			}
-			cmd := exec.Command(cfg.UpdateServiceScript, "restart")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("service restart failed: %w output=%s", err, strings.TrimSpace(string(out)))
-			}
-			return nil
+	m.restart = func() error {
+		if strings.TrimSpace(cfg.UpdateServiceScript) == "" {
+			return errors.New("update service restart script is empty")
 		}
+		cmd := exec.Command(cfg.UpdateServiceScript, "restart")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("service restart failed: %w output=%s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
 	}
 	return m
 }
@@ -216,37 +214,30 @@ func (m *Manager) Apply(override *Artifact) (Status, error) {
 	m.status.LastAppliedAt = m.now().Format(time.RFC3339)
 	m.mu.Unlock()
 
-	if m.cfg.UpdateAllowSelfRestart && m.restart != nil {
-		m.mu.Lock()
-		m.setStageLocked(StageRestarting, "")
-		m.mu.Unlock()
+	m.mu.Lock()
+	m.setStageLocked(StageRestarting, "")
+	m.mu.Unlock()
 
-		if err := m.restart(); err != nil {
-			_, _ = m.rollbackInternal("restart failed: " + err.Error())
-			m.mu.Lock()
-			m.setStageLocked(StageFailed, err.Error())
-			out := m.status
-			m.mu.Unlock()
-			return out, err
-		}
-
-		if err := m.healthWindowCheck(); err != nil {
-			_, _ = m.rollbackInternal("health check failed: " + err.Error())
-			m.mu.Lock()
-			m.setStageLocked(StageFailed, err.Error())
-			out := m.status
-			m.mu.Unlock()
-			return out, err
-		}
+	if err := m.restart(); err != nil {
+		_, _ = m.rollbackInternal("restart failed: " + err.Error())
 		m.mu.Lock()
-		m.status.RestartRequired = false
-		m.setStageLocked(StageHealthy, "")
+		m.setStageLocked(StageFailed, err.Error())
 		out := m.status
 		m.mu.Unlock()
-		return out, nil
+		return out, err
+	}
+
+	if err := m.healthWindowCheck(); err != nil {
+		_, _ = m.rollbackInternal("health check failed: " + err.Error())
+		m.mu.Lock()
+		m.setStageLocked(StageFailed, err.Error())
+		out := m.status
+		m.mu.Unlock()
+		return out, err
 	}
 
 	m.mu.Lock()
+	m.status.RestartRequired = false
 	m.setStageLocked(StageHealthy, "")
 	out := m.status
 	m.mu.Unlock()
@@ -281,19 +272,17 @@ func (m *Manager) rollbackInternal(reason string) (Status, error) {
 		return m.Status(), fmt.Errorf("restore previous binary: %w", err)
 	}
 
-	if m.cfg.UpdateAllowSelfRestart && m.restart != nil {
-		if err := m.restart(); err != nil {
-			return m.Status(), err
-		}
-		if err := m.healthWindowCheck(); err != nil {
-			return m.Status(), err
-		}
+	if err := m.restart(); err != nil {
+		return m.Status(), err
+	}
+	if err := m.healthWindowCheck(); err != nil {
+		return m.Status(), err
 	}
 
 	m.mu.Lock()
 	m.status.CurrentVersion = firstNonEmpty(m.rollbackToVersion, m.cfg.Version, m.status.CurrentVersion)
 	m.status.LastRollbackAt = m.now().Format(time.RFC3339)
-	m.status.RestartRequired = !m.cfg.UpdateAllowSelfRestart
+	m.status.RestartRequired = false
 	m.setStageLocked(StageHealthy, "")
 	out := m.status
 	m.mu.Unlock()

@@ -176,9 +176,7 @@ func TestUpdateHandlersLifecycle(t *testing.T) {
 	cfg.Version = "v1.0.0"
 	cfg.SystemUpdateEnabled = true
 	cfg.SystemUpdateExposed = true
-	cfg.SystemUpdateAllowApply = true
 	cfg.SystemUpdateAllowRollback = true
-	cfg.UpdateAllowSelfRestart = false
 	cfg.DataDir = filepath.Join(t.TempDir(), "companion")
 
 	currentPath := cfg.UpdateBinCurrentPath()
@@ -194,6 +192,7 @@ func TestUpdateHandlersLifecycle(t *testing.T) {
 	}
 
 	updateMgr := update.NewManager(cfg, log.New(io.Discard, "", 0), nil)
+	updateMgr.SetRestartForTest(func() error { return nil })
 	r, token := newAuthedRouterWithDeps(t, cfg, nil, updateMgr)
 
 	checkBody := `{"available_version":"v1.1.0","artifact_path":"` + candidatePath + `"}`
@@ -243,7 +242,6 @@ func TestUpdateHandlersGatesAndBadBody(t *testing.T) {
 	}
 
 	cfg.SystemUpdateExposed = true
-	cfg.SystemUpdateAllowApply = false
 	cfg.SystemUpdateAllowRollback = false
 	r, token = newAuthedRouterWithDeps(t, cfg, nil, nil)
 
@@ -266,8 +264,8 @@ func TestUpdateHandlersGatesAndBadBody(t *testing.T) {
 	req = authReq(http.MethodPost, "/api/v2/control/system/update/apply", token)
 	rr = httptest.NewRecorder()
 	r.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("expected apply disabled 409, got %d body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected update unavailable 503, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	req = authReq(http.MethodPost, "/api/v2/control/system/update/rollback", token)

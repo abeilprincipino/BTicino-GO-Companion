@@ -78,10 +78,6 @@ func (r *Router) handleSystemUpdateApply(w http.ResponseWriter, req *http.Reques
 		writeError(w, http.StatusNotFound, "update_not_exposed", "system update control is not exposed")
 		return
 	}
-	if !r.cfg.SystemUpdateAllowApply {
-		writeError(w, http.StatusConflict, "update_apply_disabled", "update apply is disabled")
-		return
-	}
 	if r.update == nil {
 		writeError(w, http.StatusServiceUnavailable, "update_unavailable", "update service unavailable")
 		return

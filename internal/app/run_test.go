@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"bticino-go-companion/internal/config"
 )
@@ -224,5 +225,23 @@ func TestLoadOrCreateConfigCreateBranch(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Fatalf("expected created config file, got stat error: %v", statErr)
+	}
+}
+
+func TestUpdateRetryDelay(t *testing.T) {
+	if got := updateRetryDelay(0); got != updateRetryBaseDelay {
+		t.Fatalf("retry 0 expected %s, got %s", updateRetryBaseDelay, got)
+	}
+	if got := updateRetryDelay(1); got != updateRetryBaseDelay {
+		t.Fatalf("retry 1 expected %s, got %s", updateRetryBaseDelay, got)
+	}
+	if got := updateRetryDelay(2); got != 4*time.Minute {
+		t.Fatalf("retry 2 expected 4m, got %s", got)
+	}
+	if got := updateRetryDelay(3); got != 8*time.Minute {
+		t.Fatalf("retry 3 expected 8m, got %s", got)
+	}
+	if got := updateRetryDelay(10); got != updateRetryMaxDelay {
+		t.Fatalf("retry 10 expected cap %s, got %s", updateRetryMaxDelay, got)
 	}
 }

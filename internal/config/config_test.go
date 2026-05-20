@@ -137,7 +137,6 @@ func TestSaveLoadPersistsSystemUpdateControl(t *testing.T) {
 	cfg := Default()
 	cfg.SystemUpdateEnabled = true
 	cfg.SystemUpdateExposed = true
-	cfg.SystemUpdateAllowApply = true
 	cfg.SystemUpdateAllowRollback = true
 	cfg.UpdateReleaseRepo = "owner/repo"
 	cfg.UpdateReleaseAsset = "companion"
@@ -149,8 +148,8 @@ func TestSaveLoadPersistsSystemUpdateControl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
-	if !loaded.SystemUpdateEnabled || !loaded.SystemUpdateExposed || !loaded.SystemUpdateAllowApply || !loaded.SystemUpdateAllowRollback {
-		t.Fatalf("expected persisted update controls, got enabled=%v exposed=%v apply=%v rollback=%v", loaded.SystemUpdateEnabled, loaded.SystemUpdateExposed, loaded.SystemUpdateAllowApply, loaded.SystemUpdateAllowRollback)
+	if !loaded.SystemUpdateEnabled || !loaded.SystemUpdateExposed || !loaded.SystemUpdateAllowRollback {
+		t.Fatalf("expected persisted update controls, got enabled=%v exposed=%v rollback=%v", loaded.SystemUpdateEnabled, loaded.SystemUpdateExposed, loaded.SystemUpdateAllowRollback)
 	}
 	if loaded.UpdateReleaseRepo != "owner/repo" {
 		t.Fatalf("expected persisted release repo owner/repo, got %q", loaded.UpdateReleaseRepo)
