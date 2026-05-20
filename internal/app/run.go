@@ -23,6 +23,7 @@ import (
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/protocol/openwebnet"
 	"bticino-go-companion/internal/services/control"
+	"bticino-go-companion/internal/services/diagnostics"
 	"bticino-go-companion/internal/services/discovery"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/media"
@@ -257,6 +258,9 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.SystemRebootEnabled,
 		cfg.SystemServices,
 	)
+	diagnosticsService := diagnostics.New(15*time.Second, logger)
+	diagnosticsService.Refresh()
+	go diagnosticsService.Start(ctx)
 	updateManager := update.NewManager(cfg, logger, selfHealthCheck(cfg))
 
 	router := v2.NewRouter(
@@ -269,6 +273,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		traceBroker,
 		systemControl,
 		updateManager,
+		diagnosticsService,
 	)
 	srv.Handler = router.Handler()
 
@@ -364,10 +369,6 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 			}
 			cfg.DeviceMAC = mac
 		}
-		if cfg.DeviceWiFiRSSI == nil && meta.Network.WiFiRSSI != nil {
-			rssi := *meta.Network.WiFiRSSI
-			cfg.DeviceWiFiRSSI = &rssi
-		}
 		if changed {
 			if saveErr := config.Save(path, cfg); saveErr != nil {
 				return config.Config{}, false, saveErr
@@ -408,11 +409,6 @@ func loadOrCreateConfig(path string) (config.Config, bool, error) {
 		mac = "00:00:00:00:00:00"
 	}
 	cfg.DeviceMAC = mac
-
-	if meta.Network.WiFiRSSI != nil {
-		rssi := *meta.Network.WiFiRSSI
-		cfg.DeviceWiFiRSSI = &rssi
-	}
 
 	if err := config.Save(path, cfg); err != nil {
 		return config.Config{}, false, err

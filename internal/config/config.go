@@ -41,7 +41,6 @@ type Config struct {
 	DeviceIP                  string
 	DeviceNetmask             string
 	DeviceMAC                 string
-	DeviceWiFiRSSI            *int
 	MDNSEnabled               bool
 	MDNSServiceType           string
 	OpenWebNetEnabled         bool
@@ -181,7 +180,6 @@ func Default() Config {
 		DeviceIP:                  "",
 		DeviceNetmask:             "",
 		DeviceMAC:                 "",
-		DeviceWiFiRSSI:            nil,
 		MDNSEnabled:               true,
 		MDNSServiceType:           "_bticomp._tcp",
 		OpenWebNetEnabled:         true,

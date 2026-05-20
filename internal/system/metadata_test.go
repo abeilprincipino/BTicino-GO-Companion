@@ -86,6 +86,10 @@ func TestParseConnManServiceBlock(t *testing.T) {
                         string "Address"
                         variant                            string "192.0.2.172"
                      )
+                     dict entry(
+                        string "Netmask"
+                        variant                            string "255.255.255.0"
+                     )
                   ]
             )
          ]
@@ -103,6 +107,9 @@ func TestParseConnManServiceBlock(t *testing.T) {
 	}
 	if svc.IP != "192.0.2.172" {
 		t.Fatalf("unexpected ip: %s", svc.IP)
+	}
+	if svc.Netmask != "255.255.255.0" {
+		t.Fatalf("unexpected netmask: %s", svc.Netmask)
 	}
 	if svc.MAC != "00:11:22:33:44:55" {
 		t.Fatalf("unexpected mac: %s", svc.MAC)
@@ -150,6 +157,10 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                         string "Address"
                         variant                            string "192.0.2.173"
                      )
+                     dict entry(
+                        string "Netmask"
+                        variant                            string "255.255.255.0"
+                     )
                   ]
             )
          ]
@@ -189,6 +200,10 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
                         string "Address"
                         variant                            string "192.0.2.172"
                      )
+                     dict entry(
+                        string "Netmask"
+                        variant                            string "255.255.255.0"
+                     )
                   ]
             )
          ]
@@ -214,6 +229,9 @@ func TestDetectNetworkSnapshotViaConnManOutput(t *testing.T) {
 	}
 	if best.Strength == nil || *best.Strength != 61 {
 		t.Fatalf("unexpected best strength: %#v", best.Strength)
+	}
+	if best.Netmask != "255.255.255.0" {
+		t.Fatalf("unexpected best netmask: %q", best.Netmask)
 	}
 }
 

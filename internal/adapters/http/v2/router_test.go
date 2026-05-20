@@ -87,7 +87,7 @@ func newAuthedRouter(t *testing.T) (*Router, string) {
 	authStore, token := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil)
+	r := NewRouter(config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil, nil)
 	return r, token
 }
 
@@ -101,31 +101,41 @@ func TestRouterStateEndpoint(t *testing.T) {
 	}
 
 	var body struct {
-		CallState   string `json:"call_state"`
-		Entrypoints []struct {
-			entrypoint.Model
-			RTSPPath string `json:"rtsp_path"`
-			RTSPPort int    `json:"rtsp_port"`
-		} `json:"entrypoints"`
-		Device map[string]any `json:"device"`
+		CallState string         `json:"call_state"`
+		Device    map[string]any `json:"device"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw body: %v", err)
+	}
 	if body.CallState != "idle" {
 		t.Fatalf("unexpected call_state: %s", body.CallState)
-	}
-	if len(body.Entrypoints) != 1 || body.Entrypoints[0].ID != "main" {
-		t.Fatalf("unexpected entrypoints payload: %+v", body.Entrypoints)
-	}
-	if body.Entrypoints[0].RTSPPath != "doorbell-main" || body.Entrypoints[0].RTSPPort != 8554 {
-		t.Fatalf("unexpected rtsp entrypoint payload: %+v", body.Entrypoints[0])
 	}
 	if _, ok := body.Device["model"]; !ok {
 		t.Fatalf("expected device model in state payload: %+v", body.Device)
 	}
 	if _, ok := body.Device["hardware"]; !ok {
 		t.Fatalf("expected device hardware in state payload: %+v", body.Device)
+	}
+	if _, ok := raw["entrypoints"]; ok {
+		t.Fatalf("state payload should not include entrypoints, got %+v", raw["entrypoints"])
+	}
+	if _, ok := raw["system_control"]; ok {
+		t.Fatalf("state payload should not include system_control, got %+v", raw["system_control"])
+	}
+	diagnostics, ok := raw["diagnostics"].(map[string]any)
+	if !ok {
+		t.Fatalf("state payload missing diagnostics map: %+v", raw)
+	}
+	network, ok := diagnostics["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("state payload missing diagnostics.network map: %+v", diagnostics)
+	}
+	if _, ok := network["wifi_rssi"]; ok {
+		t.Fatalf("state payload should not include wifi_rssi, got %+v", network["wifi_rssi"])
 	}
 }
 
@@ -146,7 +156,7 @@ func TestRouterPairChallengeAndClaim(t *testing.T) {
 	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil)
+	r := NewRouter(config.Default(), authStore, p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
 	rr := httptest.NewRecorder()

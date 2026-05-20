@@ -34,12 +34,21 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	snap := r.state.Snapshot()
-	network := map[string]any{
-		"ip":            nullableString(r.cfg.DeviceIP),
-		"netmask":       nullableString(r.cfg.DeviceNetmask),
-		"mac":           nullableString(r.cfg.DeviceMAC),
-		"wifi_rssi":     r.cfg.DeviceWiFiRSSI,
-		"wifi_strength": r.cfg.DeviceWiFiRSSI,
+	network := map[string]any{}
+	if r.diag != nil {
+		diag := r.diag.NetworkSnapshot()
+		network["ip"] = nullableString(diag.IP)
+		network["netmask"] = nullableString(diag.Netmask)
+		network["mac"] = nullableString(diag.MAC)
+		network["wifi_strength"] = diag.WiFiStrength
+		network["updated_at"] = diag.UpdatedAt
+		network["stale"] = diag.Stale
+	} else {
+		network["ip"] = nullableString(r.cfg.DeviceIP)
+		network["netmask"] = nullableString(r.cfg.DeviceNetmask)
+		network["mac"] = nullableString(r.cfg.DeviceMAC)
+		network["wifi_strength"] = nil
+		network["stale"] = true
 	}
 	response := map[string]any{
 		"boot_time":         snap.BootTime,
@@ -53,11 +62,9 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 			"enabled":                 snap.VoicemailEnabled,
 			"welcome_message_enabled": snap.VoicemailWelcomeMessageEnabled,
 		},
-		"ringing":         snap.Ringing,
 		"floor_ringing":   snap.FloorRinging,
 		"last_event_type": snap.LastEventType,
 		"last_event_ts":   snap.LastEventTS,
-		"entrypoints":     r.entrypointResponses(snap.Entrypoints),
 		"device": map[string]any{
 			"id":       nullableString(r.auth.DeviceID()),
 			"name":     nullableString(r.cfg.DeviceModel),
@@ -71,11 +78,6 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 				"kernel":       nullableString(r.cfg.DeviceKernel),
 				"distribution": nullableString(r.cfg.DeviceDistribution),
 			},
-		},
-		"system_control": map[string]any{
-			"reboot_enabled": r.cfg.SystemRebootEnabled,
-			"services":       r.cfg.SystemServices,
-			"update":         r.systemUpdateSnapshot(),
 		},
 	}
 	if snap.LastEventType == "" {

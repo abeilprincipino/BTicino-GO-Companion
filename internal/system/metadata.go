@@ -13,6 +13,7 @@ import (
 type NetworkSnapshot struct {
 	Interface string
 	IP        string
+	Netmask   string
 	MAC       string
 	WiFiRSSI  *int
 }
@@ -76,6 +77,10 @@ func detectNetworkSnapshot() NetworkSnapshot {
 	return snap
 }
 
+func DetectNetworkSnapshot() (NetworkSnapshot, bool) {
+	return detectNetworkSnapshotViaConnMan()
+}
+
 func detectNetworkSnapshotViaConnMan() (NetworkSnapshot, bool) {
 	out, err := exec.Command(
 		"/usr/bin/dbus-send",
@@ -117,6 +122,7 @@ func detectNetworkSnapshotViaConnMan() (NetworkSnapshot, bool) {
 	snap := NetworkSnapshot{
 		Interface: strings.TrimSpace(best.Interface),
 		IP:        strings.TrimSpace(best.IP),
+		Netmask:   strings.TrimSpace(best.Netmask),
 		MAC:       normalizeMACString(best.MAC),
 	}
 	if best.Strength != nil {
@@ -137,6 +143,7 @@ type connManService struct {
 	State     string
 	Interface string
 	IP        string
+	Netmask   string
 	MAC       string
 	Strength  *int
 	score     int
@@ -235,8 +242,11 @@ func parseConnManServiceBlock(block string) connManService {
 				service.MAC = value
 			}
 		case "ipv4":
-			if currentKey == "Address" {
+			switch currentKey {
+			case "Address":
 				service.IP = value
+			case "Netmask":
+				service.Netmask = value
 			}
 		}
 	}

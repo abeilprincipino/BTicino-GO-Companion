@@ -6,6 +6,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/services/control"
+	"bticino-go-companion/internal/services/diagnostics"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/services/state"
@@ -24,6 +25,7 @@ type Router struct {
 	trace   *trace.Broker
 	system  *systemcontrol.Service
 	update  *update.Manager
+	diag    *diagnostics.Service
 }
 
 func NewRouter(
@@ -36,6 +38,7 @@ func NewRouter(
 	traceBroker *trace.Broker,
 	systemControl *systemcontrol.Service,
 	updateManager *update.Manager,
+	diagnosticsService *diagnostics.Service,
 ) *Router {
 	return &Router{
 		cfg:     cfg,
@@ -47,6 +50,7 @@ func NewRouter(
 		trace:   traceBroker,
 		system:  systemControl,
 		update:  updateManager,
+		diag:    diagnosticsService,
 	}
 }
 
