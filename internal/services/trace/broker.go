@@ -53,18 +53,16 @@ func (b *Broker) Publish(rec Record) {
 		copy(b.records, b.records[offset:])
 		b.records = b.records[:b.maxRetained]
 	}
-	snapshotSubs := make([]chan Record, 0, len(b.subs))
-	for ch := range b.subs {
-		snapshotSubs = append(snapshotSubs, ch)
-	}
 	b.mu.Unlock()
 
-	for _, ch := range snapshotSubs {
+	b.mu.RLock()
+	for ch := range b.subs {
 		select {
 		case ch <- rec:
 		default:
 		}
 	}
+	b.mu.RUnlock()
 }
 
 func (b *Broker) ReplaySince(lastID uint64) []Record {

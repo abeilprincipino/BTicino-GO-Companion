@@ -41,18 +41,16 @@ func (b *Broker) Publish(ev event.Envelope) event.Envelope {
 		copy(b.events, b.events[offset:])
 		b.events = b.events[:b.maxRetained]
 	}
-	snapshotSubs := make([]chan event.Envelope, 0, len(b.subs))
-	for ch := range b.subs {
-		snapshotSubs = append(snapshotSubs, ch)
-	}
 	b.mu.Unlock()
 
-	for _, ch := range snapshotSubs {
+	b.mu.RLock()
+	for ch := range b.subs {
 		select {
 		case ch <- ev:
 		default:
 		}
 	}
+	b.mu.RUnlock()
 	return ev
 }
 
