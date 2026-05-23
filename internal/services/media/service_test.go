@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 )
 
 type backendStub struct {
@@ -92,20 +91,5 @@ func TestServiceEntrySwitchBlockedWithActiveReaders(t *testing.T) {
 	err := svc.StartForEntrypoint(context.Background(), "gate2", "21")
 	if !errors.Is(err, ErrEntrypointSwitchBlocked) {
 		t.Fatalf("expected ErrEntrypointSwitchBlocked, got %v", err)
-	}
-}
-
-func TestServicePruneIdleReadersStopsStream(t *testing.T) {
-	backend := &backendStub{}
-	svc := NewService(backend)
-	if err := svc.ReaderJoin(context.Background(), "s1", "main", "20"); err != nil {
-		t.Fatalf("reader join failed: %v", err)
-	}
-	time.Sleep(10 * time.Millisecond)
-	if err := svc.PruneIdleReaders(context.Background(), time.Millisecond); err != nil {
-		t.Fatalf("prune failed: %v", err)
-	}
-	if backend.stopCalls != 1 {
-		t.Fatalf("expected stopCalls=1 got %d", backend.stopCalls)
 	}
 }

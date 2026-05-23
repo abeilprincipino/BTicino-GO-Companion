@@ -50,14 +50,6 @@ func BuildStreamStartAudio(port int) string {
 	return fmt.Sprintf("*7*300#127#0#0#1#%d#2*##", port)
 }
 
-func BuildReceiveVideo(where string) string {
-	return fmt.Sprintf("*7*0*%s##", strings.TrimSpace(where))
-}
-
-func IsACK(frame string) bool {
-	return strings.TrimSpace(frame) == FrameACK
-}
-
 func IsRingStart(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#1#4#")
 }

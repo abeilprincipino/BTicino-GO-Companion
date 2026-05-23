@@ -24,6 +24,16 @@ func TestParserParseInvalid(t *testing.T) {
 	}
 }
 
+func TestParserRejectsTruncatedDatagramWithoutPanic(t *testing.T) {
+	p := NewParser()
+	packet := append(make([]byte, 8), []byte("OPEN")...)
+	packet = append(packet, 0)
+
+	if _, err := p.Parse(packet); err == nil {
+		t.Fatal("expected parse error for truncated datagram")
+	}
+}
+
 func buildPacket(system, msg string) []byte {
 	payload := make([]byte, 0, 64)
 	payload = append(payload, make([]byte, 8)...)

@@ -15,9 +15,6 @@ func TestFrameBuilders(t *testing.T) {
 	if got := BuildStreamStartAudio(5000); got != "*7*300#127#0#0#1#5000#2*##" {
 		t.Fatalf("unexpected stream audio frame: %s", got)
 	}
-	if got := BuildReceiveVideo("4000"); got != "*7*0*4000##" {
-		t.Fatalf("unexpected receive video frame: %s", got)
-	}
 }
 
 func TestFramePredicates(t *testing.T) {

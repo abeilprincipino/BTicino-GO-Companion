@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/emiago/sipgo"
+
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/domain/event"
 )
 
 func TestManagerDisabledLifecycle(t *testing.T) {
@@ -60,11 +62,11 @@ func TestInviteAuthUserFallbacksToFromUser(t *testing.T) {
 
 func TestNormalizeTransport(t *testing.T) {
 	tests := map[string]string{
-		"udp":    "udp",
-		" TCP ":  "tcp",
-		"wss":    "wss",
+		"udp":     "udp",
+		" TCP ":   "tcp",
+		"wss":     "wss",
 		"invalid": "tcp",
-		"":       "tcp",
+		"":        "tcp",
 	}
 	for in, want := range tests {
 		if got := normalizeTransport(in); got != want {
@@ -130,8 +132,8 @@ func TestShouldRegister(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaSIPDomain = "example.local"
 	m := &Manager{
-		cfg:          cfg,
-		client:       &sipgo.Client{},
+		cfg:           cfg,
+		client:        &sipgo.Client{},
 		registerEvery: 2 * time.Second,
 	}
 
@@ -152,5 +154,68 @@ func TestShouldRegister(t *testing.T) {
 	m.incoming = &sipgo.DialogServerSession{}
 	if m.shouldRegister(true) {
 		t.Fatal("expected busy state to block register")
+	}
+}
+
+func TestIncomingInviteExpires(t *testing.T) {
+	events := make(chan event.Envelope, 1)
+	dlg := &sipgo.DialogServerSession{}
+	m := &Manager{
+		enabled:         true,
+		incoming:        dlg,
+		incomingTimeout: 5 * time.Millisecond,
+		sink: func(ev event.Envelope) {
+			events <- ev
+		},
+	}
+
+	m.mu.Lock()
+	m.startIncomingExpiryLocked(dlg)
+	m.mu.Unlock()
+
+	select {
+	case ev := <-events:
+		if ev.Type != event.TypeCallEnded {
+			t.Fatalf("unexpected event type: %s", ev.Type)
+		}
+		if got := ev.Payload["reason"]; got != "incoming_timeout" {
+			t.Fatalf("unexpected reason: %v", got)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected incoming timeout event")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.incoming != nil {
+		t.Fatal("expected incoming dialog to be cleared")
+	}
+	if m.incomingExpiry != nil {
+		t.Fatal("expected incoming expiry timer to be cleared")
+	}
+}
+
+func TestIncomingInviteExpiryCanBeStopped(t *testing.T) {
+	dlg := &sipgo.DialogServerSession{}
+	m := &Manager{
+		enabled:         true,
+		incoming:        dlg,
+		incomingTimeout: 5 * time.Millisecond,
+		sink: func(ev event.Envelope) {
+			t.Fatalf("unexpected event after stopped expiry: %+v", ev)
+		},
+	}
+
+	m.mu.Lock()
+	m.startIncomingExpiryLocked(dlg)
+	m.stopIncomingExpiryLocked()
+	m.mu.Unlock()
+
+	time.Sleep(25 * time.Millisecond)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.incoming != dlg {
+		t.Fatal("expected incoming dialog to remain after stopped expiry")
 	}
 }

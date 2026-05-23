@@ -51,8 +51,9 @@ type DiagnosticSnapshot struct {
 }
 
 type frameReader struct {
-	conn    net.Conn
-	pending string
+	conn     net.Conn
+	pending  string
+	deadline time.Time
 }
 
 func NewCommandClient(cfg config.Config) *CommandClient {
@@ -232,11 +233,12 @@ func (c *CommandClient) exec(ctx context.Context, fn func(reader *frameReader) e
 		return fmt.Errorf("dial openwebnet: %w", err)
 	}
 	defer conn.Close()
-	if err := applyDeadline(ctx, conn, c.timeout); err != nil {
+	deadline, err := applyDeadline(ctx, conn, c.timeout)
+	if err != nil {
 		return err
 	}
 
-	reader := &frameReader{conn: conn}
+	reader := &frameReader{conn: conn, deadline: deadline}
 	handshake := openwebnetproto.FrameSessionStartCmd
 	c.emitTrace("tx", map[string]any{"transport": "tcp_command", "phase": "handshake", "frame": handshake})
 	if _, err := conn.Write([]byte(handshake)); err != nil {
@@ -542,22 +544,22 @@ func readFrameWithTimeout(reader *frameReader, timeout time.Duration) (string, b
 		return "", false, err
 	}
 	frame, err := reader.readFrame()
-	clearErr := reader.conn.SetReadDeadline(time.Time{})
+	restoreErr := reader.restoreDeadline()
 	if err != nil {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			if clearErr != nil {
-				return "", false, clearErr
+			if restoreErr != nil {
+				return "", false, restoreErr
 			}
 			return "", true, nil
 		}
-		if clearErr != nil {
-			return "", false, clearErr
+		if restoreErr != nil {
+			return "", false, restoreErr
 		}
 		return "", false, err
 	}
-	if clearErr != nil {
-		return "", false, clearErr
+	if restoreErr != nil {
+		return "", false, restoreErr
 	}
 	return frame, false, nil
 }
@@ -630,15 +632,22 @@ func (r *frameReader) readFrame() (string, error) {
 	}
 }
 
-func applyDeadline(ctx context.Context, conn net.Conn, fallback time.Duration) error {
+func applyDeadline(ctx context.Context, conn net.Conn, fallback time.Duration) (time.Time, error) {
 	deadline := time.Now().Add(fallback)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return fmt.Errorf("set conn deadline: %w", err)
+		return time.Time{}, fmt.Errorf("set conn deadline: %w", err)
 	}
-	return nil
+	return deadline, nil
+}
+
+func (r *frameReader) restoreDeadline() error {
+	if r == nil || r.conn == nil {
+		return nil
+	}
+	return r.conn.SetReadDeadline(r.deadline)
 }
 
 func (c *CommandClient) emitTrace(direction string, payload map[string]any) {

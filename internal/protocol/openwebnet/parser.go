@@ -34,12 +34,16 @@ func (p *Parser) Parse(datagram []byte) (Message, error) {
 	if system == "REGISTRATION" {
 		systemOffset = 16
 	}
+	searchStart := systemEnd + systemOffset
+	if searchStart > len(datagram) {
+		return Message{}, ErrInvalidDatagram
+	}
 
-	msgEnd := bytes.IndexByte(datagram[systemEnd+systemOffset:], 0)
+	msgEnd := bytes.IndexByte(datagram[searchStart:], 0)
 	if msgEnd < 0 {
 		msgEnd = len(datagram)
 	} else {
-		msgEnd += systemEnd + systemOffset
+		msgEnd += searchStart
 	}
 
 	msgOffset := 13
@@ -48,7 +52,7 @@ func (p *Parser) Parse(datagram []byte) (Message, error) {
 	}
 
 	msgStart := systemEnd + msgOffset
-	if msgStart < 0 || msgStart > len(datagram) || msgStart > msgEnd {
+	if msgStart > len(datagram) || msgStart > msgEnd {
 		return Message{}, ErrInvalidDatagram
 	}
 

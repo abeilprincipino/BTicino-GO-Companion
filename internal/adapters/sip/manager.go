@@ -29,6 +29,7 @@ const (
 	registerTimeout       = 4 * time.Second
 	registerExpires       = 600
 	registerSkew          = 10
+	incomingInviteTimeout = 60 * time.Second
 	sipAnswerTimeout      = 8 * time.Second
 	sipSDPAudioPort       = 65000
 	sipSDPVideoPort       = 65002
@@ -46,12 +47,15 @@ type Manager struct {
 	dialogs *sipgo.DialogServerCache
 	out     *sipgo.DialogClientCache
 
-	mu        sync.Mutex
-	sink      func(event.Envelope)
-	incoming  *sipgo.DialogServerSession
-	activeIn  *sipgo.DialogServerSession
-	activeOut *sipgo.DialogClientSession
-	dialing   bool
+	mu               sync.Mutex
+	sink             func(event.Envelope)
+	incoming         *sipgo.DialogServerSession
+	incomingExpiry   *time.Timer
+	incomingExpiryID uint64
+	incomingTimeout  time.Duration
+	activeIn         *sipgo.DialogServerSession
+	activeOut        *sipgo.DialogClientSession
+	dialing          bool
 
 	registerCancel context.CancelFunc
 	registerWG     sync.WaitGroup
@@ -61,9 +65,10 @@ type Manager struct {
 
 func NewManager(cfg config.Config, logger *log.Logger) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		logger:  logger,
-		enabled: cfg.MediaSIPEnabled,
+		cfg:             cfg,
+		logger:          logger,
+		enabled:         cfg.MediaSIPEnabled,
+		incomingTimeout: incomingInviteTimeout,
 	}
 }
 
@@ -172,6 +177,7 @@ func (m *Manager) registerHandlers() {
 
 		m.mu.Lock()
 		m.incoming = dlg
+		m.startIncomingExpiryLocked(dlg)
 		m.mu.Unlock()
 		m.publish(event.TypeCallIncoming, map[string]any{"source": "sip", "raw": req.StartLine()})
 	})
@@ -183,6 +189,7 @@ func (m *Manager) registerHandlers() {
 		if m.incoming != nil {
 			_ = m.incoming.Close()
 			m.incoming = nil
+			m.stopIncomingExpiryLocked()
 		}
 		m.mu.Unlock()
 		if hadIncoming {
@@ -218,6 +225,7 @@ func (m *Manager) registerHandlers() {
 		}
 		m.activeIn = nil
 		m.incoming = nil
+		m.stopIncomingExpiryLocked()
 		m.mu.Unlock()
 		m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "remote_bye"})
 		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "remote_bye"})
@@ -233,10 +241,18 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	incoming := m.incoming
 	activeIn := m.activeIn
 	activeOut := m.activeOut
+	if incoming != nil {
+		m.stopIncomingExpiryLocked()
+	}
 	m.mu.Unlock()
 
 	if incoming != nil {
 		if err := incoming.Respond(487, "Request Terminated", nil); err != nil {
+			m.mu.Lock()
+			if m.incoming == incoming {
+				m.startIncomingExpiryLocked(incoming)
+			}
+			m.mu.Unlock()
 			return fmt.Errorf("reject incoming failed: %w", err)
 		}
 		_ = incoming.Close()
@@ -290,20 +306,34 @@ func (m *Manager) Answer(ctx context.Context) error {
 
 	m.mu.Lock()
 	incoming := m.incoming
+	if incoming != nil {
+		m.stopIncomingExpiryLocked()
+	}
 	m.mu.Unlock()
 	if incoming == nil {
 		return ErrNoIncomingCall
 	}
 
 	if err := incoming.RespondSDP([]byte(m.answerSDP())); err != nil {
+		m.mu.Lock()
+		if m.incoming == incoming {
+			m.startIncomingExpiryLocked(incoming)
+		}
+		m.mu.Unlock()
 		return fmt.Errorf("answer incoming failed: %w", err)
 	}
 	m.mu.Lock()
+	answered := false
 	if m.incoming == incoming {
 		m.incoming = nil
+		m.activeIn = incoming
+		answered = true
 	}
-	m.activeIn = incoming
 	m.mu.Unlock()
+	if !answered {
+		_ = incoming.Close()
+		return ErrNoIncomingCall
+	}
 	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "incoming"})
 	return nil
 }
@@ -387,6 +417,10 @@ func (m *Manager) StreamStop(ctx context.Context) error {
 }
 
 func (m *Manager) Close() error {
+	m.mu.Lock()
+	m.stopIncomingExpiryLocked()
+	m.mu.Unlock()
+
 	if m.registerCancel != nil {
 		m.registerCancel()
 	}
@@ -399,6 +433,44 @@ func (m *Manager) Close() error {
 		return m.ua.Close()
 	}
 	return nil
+}
+
+func (m *Manager) startIncomingExpiryLocked(dlg *sipgo.DialogServerSession) {
+	m.stopIncomingExpiryLocked()
+
+	timeout := m.incomingTimeout
+	if timeout <= 0 {
+		timeout = incomingInviteTimeout
+	}
+
+	m.incomingExpiryID++
+	expiryID := m.incomingExpiryID
+	m.incomingExpiry = time.AfterFunc(timeout, func() {
+		expired := false
+
+		m.mu.Lock()
+		if m.incomingExpiryID == expiryID && m.incoming == dlg {
+			if m.incoming != nil {
+				_ = m.incoming.Close()
+			}
+			m.incoming = nil
+			m.incomingExpiry = nil
+			expired = true
+		}
+		m.mu.Unlock()
+
+		if expired {
+			m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "incoming_timeout"})
+		}
+	})
+}
+
+func (m *Manager) stopIncomingExpiryLocked() {
+	if m.incomingExpiry != nil {
+		m.incomingExpiry.Stop()
+		m.incomingExpiry = nil
+	}
+	m.incomingExpiryID++
 }
 
 func (m *Manager) publish(kind string, payload map[string]any) {

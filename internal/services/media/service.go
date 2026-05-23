@@ -200,27 +200,6 @@ func (s *Service) ReaderLeave(ctx context.Context, sessionID string) error {
 	return s.stopStream(ctx, "rtsp", "reader_leave")
 }
 
-func (s *Service) PruneIdleReaders(ctx context.Context, maxIdle time.Duration) error {
-	if maxIdle <= 0 {
-		maxIdle = 40 * time.Second
-	}
-	cutoff := time.Now().Add(-maxIdle)
-
-	s.mu.Lock()
-	for id, reader := range s.readers {
-		if reader.LastSeen.Before(cutoff) {
-			delete(s.readers, id)
-		}
-	}
-	shouldStop := s.streamActive && len(s.readers) == 0 && !s.manualHold
-	s.mu.Unlock()
-
-	if !shouldStop {
-		return nil
-	}
-	return s.stopStream(ctx, "rtsp", "reader_prune")
-}
-
 func (s *Service) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
