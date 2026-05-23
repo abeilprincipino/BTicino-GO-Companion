@@ -105,6 +105,9 @@ func (r *Router) handleCapabilities(w http.ResponseWriter, req *http.Request) {
 	if r.cfg.ExposeMuteControl {
 		capabilities = append(capabilities, "control_audio_v2")
 	}
+	if r.snap != nil {
+		capabilities = append(capabilities, "entrypoint_snapshots_v2")
+	}
 	if r.cfg.ExposeVoicemailToggle && !strings.EqualFold(strings.TrimSpace(r.cfg.DeviceModel), "C100X") {
 		capabilities = append(capabilities, "control_voicemail_v2", "voicemail_messages_v2")
 	}

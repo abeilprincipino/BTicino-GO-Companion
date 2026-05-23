@@ -15,12 +15,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -59,11 +59,10 @@ jobs:
           tar -C dist/companion-bundle -czf dist/companion.tar.gz companion
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bticino-go-companion-${{ github.ref_name }}
           path: |
-            dist/companion
             dist/companion.sha256
             dist/companion.tar.gz
 
@@ -77,22 +76,21 @@ jobs:
           ### 1) Download installer
 
           \`\`\`sh
-          wget -qO /tmp/companion-install.sh "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh"
+          wget -qO /tmp/install.sh "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh"
           \`\`\`
 
           ### 2) Run installer
 
           \`\`\`sh
-          sh /tmp/companion-install.sh
+          sh /tmp/install.sh
           \`\`\`
           EOF
 
       - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |
-            dist/companion
             dist/companion.sha256
             dist/companion.tar.gz
           body_path: /tmp/release-notes.md

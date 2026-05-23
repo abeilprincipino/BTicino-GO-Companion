@@ -61,7 +61,7 @@ func newAuthedRouterWithControl(t *testing.T, cfg config.Config, controlSvc *con
 	t.Helper()
 	authStore, token := newClaimedAuth(t)
 	projector := state.NewProjector(cfg.Entrypoints)
-	r := NewRouter(cfg, authStore, projector, controlSvc, events.New(32), newTestRuntimeStatus(), trace.New(32), nil, nil, nil)
+	r := NewRouter(cfg, authStore, projector, controlSvc, events.New(32), newTestRuntimeStatus(), trace.New(32), nil, nil, nil, nil)
 	return r, token
 }
 
@@ -168,7 +168,7 @@ func TestAuthStatusRotateRevokeRepairReset(t *testing.T) {
 	cfg := config.Default()
 	p := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, authStore, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil)
+	r := NewRouter(cfg, authStore, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/auth/status", nil)
 	rr := httptest.NewRecorder()
@@ -242,7 +242,7 @@ func TestAuthStatusWhenNeedsClaim(t *testing.T) {
 	cfg := config.Default()
 	p := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, store, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil)
+	r := NewRouter(cfg, store, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/auth/status", nil)
 	rr := httptest.NewRecorder()

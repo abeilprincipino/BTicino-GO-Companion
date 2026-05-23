@@ -86,6 +86,62 @@ func TestServerPathAndLifecycleHooks(t *testing.T) {
 	}
 }
 
+func TestServerOnPlayFirstViewerHook(t *testing.T) {
+	cfg := config.Default()
+	cfg.Entrypoints = []entrypoint.Model{
+		{ID: "gate1", DevAddr: "20", HasStream: true},
+		{ID: "gate2", DevAddr: "21", HasStream: true},
+	}
+
+	rec := &lifecycleRecorder{}
+	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
+
+	var firstViewerEntrypoints []string
+	s.SetOnEntrypointFirstViewer(func(entrypointID string) {
+		firstViewerEntrypoints = append(firstViewerEntrypoints, entrypointID)
+	})
+
+	sessionA := &gortsplib.ServerSession{}
+	sessionB := &gortsplib.ServerSession{}
+	sessionC := &gortsplib.ServerSession{}
+	sessionD := &gortsplib.ServerSession{}
+
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionA}); err != nil {
+		t.Fatalf("on play gate1 sessionA failed: %v", err)
+	}
+	if len(firstViewerEntrypoints) != 1 || firstViewerEntrypoints[0] != "gate1" {
+		t.Fatalf("expected first-viewer callback for gate1 once, got %+v", firstViewerEntrypoints)
+	}
+
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionB}); err != nil {
+		t.Fatalf("on play gate1 sessionB failed: %v", err)
+	}
+	if len(firstViewerEntrypoints) != 1 {
+		t.Fatalf("expected no additional callback while gate1 already has readers, got %+v", firstViewerEntrypoints)
+	}
+
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate2", Session: sessionC}); err != nil {
+		t.Fatalf("on play gate2 sessionC failed: %v", err)
+	}
+	if len(firstViewerEntrypoints) != 2 || firstViewerEntrypoints[1] != "gate2" {
+		t.Fatalf("expected first-viewer callback for gate2, got %+v", firstViewerEntrypoints)
+	}
+
+	if _, err := s.OnPause(&gortsplib.ServerHandlerOnPauseCtx{Session: sessionA}); err != nil {
+		t.Fatalf("on pause gate1 sessionA failed: %v", err)
+	}
+	if _, err := s.OnPause(&gortsplib.ServerHandlerOnPauseCtx{Session: sessionB}); err != nil {
+		t.Fatalf("on pause gate1 sessionB failed: %v", err)
+	}
+
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionD}); err != nil {
+		t.Fatalf("on play gate1 sessionD failed: %v", err)
+	}
+	if len(firstViewerEntrypoints) != 3 || firstViewerEntrypoints[2] != "gate1" {
+		t.Fatalf("expected gate1 callback again after all gate1 readers left, got %+v", firstViewerEntrypoints)
+	}
+}
+
 func TestServerDescribeUnknownPath(t *testing.T) {
 	cfg := config.Default()
 	rec := &lifecycleRecorder{}
@@ -255,5 +311,135 @@ func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
 	}
 	if n, _, err := conn.ReadFromUDP(make([]byte, 1500)); err != nil || n == 0 {
 		t.Fatalf("expected forwarded packet, n=%d err=%v", n, err)
+	}
+}
+
+func TestInspectH264NALTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		sps     bool
+		pps     bool
+		idr     bool
+	}{
+		{
+			name:    "single_nal_sps",
+			payload: []byte{0x67},
+			sps:     true,
+		},
+		{
+			name:    "single_nal_pps",
+			payload: []byte{0x68},
+			pps:     true,
+		},
+		{
+			name:    "single_nal_idr",
+			payload: []byte{0x65},
+			idr:     true,
+		},
+		{
+			name:    "stap_a_sps_pps_idr",
+			payload: []byte{0x78, 0x00, 0x01, 0x67, 0x00, 0x01, 0x68, 0x00, 0x01, 0x65},
+			sps:     true,
+			pps:     true,
+			idr:     true,
+		},
+		{
+			name:    "fu_a_start_idr",
+			payload: []byte{0x7c, 0x85, 0x01},
+			idr:     true,
+		},
+		{
+			name:    "fu_a_non_start_idr",
+			payload: []byte{0x7c, 0x05, 0x01},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sps, pps, idr := inspectH264NALTypes(tc.payload)
+			if sps != tc.sps || pps != tc.pps || idr != tc.idr {
+				t.Fatalf("unexpected parse flags got sps=%v pps=%v idr=%v", sps, pps, idr)
+			}
+		})
+	}
+}
+
+func TestSnapshotMirrorWaitsForWarmupAndIDR(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer listener.Close()
+
+	dst := listener.LocalAddr().(*net.UDPAddr)
+	conn, err := net.DialUDP("udp4", nil, dst)
+	if err != nil {
+		t.Fatalf("dial udp: %v", err)
+	}
+	defer conn.Close()
+
+	s.snapshotMirrorConn = conn
+	s.snapshotMirrorReady = false
+	s.snapshotMirrorSPS = false
+	s.snapshotMirrorPPS = false
+	s.snapshotMirrorWarmupDoneFrames = 0
+	s.snapshotMirrorWaitForIDR = false
+
+	write := func(payload []byte, marker bool) {
+		s.writeSnapshotMirror(&rtp.Packet{
+			Header: rtp.Header{
+				Version:     2,
+				PayloadType: rtpPayloadTypeH264,
+				Marker:      marker,
+			},
+			Payload: payload,
+		})
+	}
+
+	write([]byte{0x61, 0x01}, true)
+	if err := listener.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if n, _, err := listener.ReadFromUDP(make([]byte, 1500)); err == nil || n != 0 {
+		t.Fatal("unexpected packet before readiness")
+	}
+
+	write([]byte{0x67}, false)
+	write([]byte{0x68}, false)
+	for i := 0; i < snapshotWarmupFrames; i++ {
+		write([]byte{0x61, 0x01}, true)
+	}
+
+	if err := listener.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if n, _, err := listener.ReadFromUDP(make([]byte, 1500)); err == nil || n != 0 {
+		t.Fatal("unexpected packet before post-warmup IDR")
+	}
+
+	write([]byte{0x7c, 0x85, 0x01}, false)
+	write([]byte{0x7c, 0x45, 0x02}, true)
+
+	buf := make([]byte, 1500)
+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	n, _, err := listener.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("expected mirrored packet after readiness: %v", err)
+	}
+	var pkt rtp.Packet
+	if err := pkt.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("unmarshal mirrored rtp: %v", err)
+	}
+	if pkt.PayloadType != rtpPayloadTypeH264 {
+		t.Fatalf("unexpected payload type: %d", pkt.PayloadType)
+	}
+	if len(pkt.Payload) < 2 || pkt.Payload[0] != 0x7c || pkt.Payload[1] != 0x85 {
+		t.Fatalf("unexpected mirrored payload: %v", pkt.Payload)
 	}
 }

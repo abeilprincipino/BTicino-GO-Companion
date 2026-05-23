@@ -9,6 +9,7 @@ import (
 	"bticino-go-companion/internal/services/diagnostics"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
+	"bticino-go-companion/internal/services/snapshot"
 	"bticino-go-companion/internal/services/state"
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
@@ -26,6 +27,7 @@ type Router struct {
 	system  *systemcontrol.Service
 	update  *update.Manager
 	diag    *diagnostics.Service
+	snap    *snapshot.Service
 }
 
 func NewRouter(
@@ -39,6 +41,7 @@ func NewRouter(
 	systemControl *systemcontrol.Service,
 	updateManager *update.Manager,
 	diagnosticsService *diagnostics.Service,
+	snapshotService *snapshot.Service,
 ) *Router {
 	return &Router{
 		cfg:     cfg,
@@ -51,6 +54,7 @@ func NewRouter(
 		system:  systemControl,
 		update:  updateManager,
 		diag:    diagnosticsService,
+		snap:    snapshotService,
 	}
 }
 
@@ -72,6 +76,7 @@ func (r *Router) Handler() http.Handler {
 	// Protected read endpoints.
 	mux.HandleFunc("GET /api/v2/capabilities", r.withBearer(r.handleCapabilities))
 	mux.HandleFunc("GET /api/v2/entrypoints", r.withBearer(r.handleEntrypoints))
+	mux.HandleFunc("GET /api/v2/entrypoints/{id}/snapshot/latest.jpg", r.withBearer(r.handleEntrypointSnapshotLatest))
 	mux.HandleFunc("GET /api/v2/state", r.withBearer(r.handleState))
 	mux.HandleFunc("GET /api/v2/events", r.withBearer(r.handleEventsSSE))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet", r.withBearer(r.handleOpenWebNetTrace))
@@ -89,6 +94,7 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/unlock", r.withBearer(r.handleEntrypointUnlock))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/start", r.withBearer(r.handleEntrypointStreamStart))
 	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/stream/stop", r.withBearer(r.handleEntrypointStreamStop))
+	mux.HandleFunc("POST /api/v2/control/entrypoints/{id}/snapshot", r.withBearer(r.handleEntrypointSnapshotCapture))
 	mux.HandleFunc("POST /api/v2/control/system/reboot", r.withBearer(r.handleSystemReboot))
 	mux.HandleFunc("GET /api/v2/control/system/services", r.withBearer(r.handleSystemServices))
 	mux.HandleFunc("GET /api/v2/control/system/services/{name}/status", r.withBearer(r.handleSystemServiceStatus))

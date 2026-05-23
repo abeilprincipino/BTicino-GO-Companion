@@ -28,6 +28,7 @@ import (
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/media"
 	"bticino-go-companion/internal/services/runtime"
+	"bticino-go-companion/internal/services/snapshot"
 	"bticino-go-companion/internal/services/state"
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
@@ -40,6 +41,8 @@ const (
 	updateCheckStartDelay = 20 * time.Second
 	updateRetryBaseDelay  = 2 * time.Minute
 	updateRetryMaxDelay   = 1 * time.Hour
+
+	rtspViewerSnapshotTimeout = 15 * time.Second
 )
 
 func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
@@ -220,6 +223,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.MediaRTPVideoPort,
 	)
 	mediaService := media.NewService(mediaBackend)
+	var snapshotService *snapshot.Service
 	mediaService.SetTransitionSink(func(tr media.Transition) {
 		if strings.TrimSpace(tr.Kind) == "" {
 			return
@@ -240,8 +244,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		})
 	})
 
+	var rtspServer *rtspadapter.Server
 	if cfg.MediaRTSPEnabled {
-		rtspServer := rtspadapter.NewServer(cfg, logger, mediaService)
+		rtspServer = rtspadapter.NewServer(cfg, logger, mediaService)
+		snapshotService = snapshot.New(cfg, mediaService, rtspServer, logger)
+		rtspServer.SetOnEntrypointFirstViewer(func(entrypointID string) {
+			go captureSnapshotForRTSPViewer(snapshotService, logger, entrypointID)
+		})
 		if err := rtspServer.Start(ctx); err != nil {
 			return fmt.Errorf("start rtsp server: %w", err)
 		}
@@ -282,6 +291,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		systemControl,
 		updateManager,
 		diagnosticsService,
+		snapshotService,
 	)
 	srv.Handler = router.Handler()
 
@@ -507,6 +517,33 @@ func setIfNonEmpty(dst *string, value string) bool {
 	}
 	*dst = next
 	return true
+}
+
+func captureSnapshotForRTSPViewer(snapshotService *snapshot.Service, logger *log.Logger, entrypointID string) {
+	if snapshotService == nil {
+		return
+	}
+	normalizedEntrypointID := strings.TrimSpace(entrypointID)
+	if normalizedEntrypointID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rtspViewerSnapshotTimeout)
+	defer cancel()
+	if _, err := snapshotService.Capture(ctx, normalizedEntrypointID); err != nil {
+		switch {
+		case errors.Is(err, snapshot.ErrSnapshotBusy),
+			errors.Is(err, rtspadapter.ErrSnapshotMirrorBusy),
+			errors.Is(err, media.ErrEntrypointSwitchBlocked),
+			errors.Is(err, snapshot.ErrActiveEntrypointBlocked):
+			if logger != nil {
+				logger.Printf("rtsp first-viewer snapshot skipped entrypoint=%s err=%v", normalizedEntrypointID, err)
+			}
+		default:
+			if logger != nil {
+				logger.Printf("rtsp first-viewer snapshot failed entrypoint=%s err=%v", normalizedEntrypointID, err)
+			}
+		}
+	}
 }
 
 func startUpdateCheckLoop(ctx context.Context, cfg config.Config, manager *update.Manager, logger *log.Logger) {
