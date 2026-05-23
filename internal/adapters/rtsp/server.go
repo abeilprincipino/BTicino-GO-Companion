@@ -25,6 +25,12 @@ const (
 	streamAutostopTimeout  = 6 * time.Second
 	readerWatchdogInterval = 10 * time.Second
 	readerIdleTimeout      = 40 * time.Second
+	btReturnAudioAddr      = "127.0.0.1:4000"
+
+	rtpPayloadTypeH264             = 96
+	rtpPayloadTypeSpeex            = 110
+	rtpPayloadTypeSpeexBackchannel = 97
+	rtpSpeexSampleRate             = 8000
 )
 
 type readerInfo struct {
@@ -46,21 +52,25 @@ type Server struct {
 	stream   *gortsplib.ServerStream
 	videoMed *description.Media
 	audioMed *description.Media
+	backMed  *description.Media
 	readers  map[*gortsplib.ServerSession]readerInfo
 	paths    map[string]entrypoint.StreamRoute
 	pathList []string
+
+	returnAudio *returnAudioForwarder
 }
 
 func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Server {
 	paths := entrypoint.RTSPRoutes(cfg.Entrypoints)
 
 	s := &Server{
-		cfg:       cfg,
-		logger:    logger,
-		transport: NewTransport(lifecycle),
-		readers:   map[*gortsplib.ServerSession]readerInfo{},
-		paths:     paths,
-		pathList:  sortedRoutePaths(paths),
+		cfg:         cfg,
+		logger:      logger,
+		transport:   NewTransport(lifecycle),
+		readers:     map[*gortsplib.ServerSession]readerInfo{},
+		paths:       paths,
+		pathList:    sortedRoutePaths(paths),
+		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
 	}
 	s.srv = &gortsplib.Server{
 		Handler:        s,
@@ -84,6 +94,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+		s.closeReturnAudio()
 		s.srv.Close()
 	}()
 
@@ -152,6 +163,13 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 	s.mu.Unlock()
 
+	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
+		if medi != s.backMed {
+			return
+		}
+		s.forwardReturnAudio(ctx.Session, pkt)
+	})
+
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
@@ -181,26 +199,7 @@ func (s *Server) ensureStaticStream() error {
 		return nil
 	}
 
-	videoForma := &format.H264{
-		PayloadTyp:        96,
-		PacketizationMode: 1,
-	}
-	audioForma := &format.Speex{
-		PayloadTyp: 110,
-		SampleRate: 8000,
-	}
-	videoMedia := &description.Media{
-		Type:    description.MediaTypeVideo,
-		Formats: []format.Format{videoForma},
-	}
-	audioMedia := &description.Media{
-		Type:    description.MediaTypeAudio,
-		Formats: []format.Format{audioForma},
-	}
-	desc := &description.Session{
-		Medias: []*description.Media{videoMedia, audioMedia},
-	}
-
+	desc, videoMedia, audioMedia, backMedia := buildStaticStreamDescription()
 	stream := &gortsplib.ServerStream{
 		Server: s.srv,
 		Desc:   desc,
@@ -211,7 +210,41 @@ func (s *Server) ensureStaticStream() error {
 	s.stream = stream
 	s.videoMed = videoMedia
 	s.audioMed = audioMedia
+	s.backMed = backMedia
 	return nil
+}
+
+func buildStaticStreamDescription() (*description.Session, *description.Media, *description.Media, *description.Media) {
+	videoForma := &format.H264{
+		PayloadTyp:        rtpPayloadTypeH264,
+		PacketizationMode: 1,
+	}
+	audioForma := &format.Speex{
+		PayloadTyp: rtpPayloadTypeSpeex,
+		SampleRate: rtpSpeexSampleRate,
+	}
+	backForma := &format.Speex{
+		PayloadTyp: rtpPayloadTypeSpeexBackchannel,
+		SampleRate: rtpSpeexSampleRate,
+	}
+	videoMedia := &description.Media{
+		Type:    description.MediaTypeVideo,
+		Formats: []format.Format{videoForma},
+	}
+	audioMedia := &description.Media{
+		Type:    description.MediaTypeAudio,
+		Formats: []format.Format{audioForma},
+	}
+	backMedia := &description.Media{
+		Type:          description.MediaTypeAudio,
+		IsBackChannel: true,
+		Formats:       []format.Format{backForma},
+	}
+	desc := &description.Session{
+		Medias: []*description.Media{videoMedia, audioMedia, backMedia},
+	}
+
+	return desc, videoMedia, audioMedia, backMedia
 }
 
 func (s *Server) runIngestListener(ctx context.Context, port int, mediaType description.MediaType) {
@@ -293,11 +326,34 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 func isExpectedPayloadType(mediaType description.MediaType, payloadType uint8) bool {
 	switch mediaType {
 	case description.MediaTypeVideo:
-		return payloadType == 96
+		return payloadType == rtpPayloadTypeH264
 	case description.MediaTypeAudio:
-		return payloadType == 110
+		return payloadType == rtpPayloadTypeSpeex
 	default:
 		return false
+	}
+}
+
+func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Packet) {
+	if pkt == nil || pkt.PayloadType != rtpPayloadTypeSpeexBackchannel {
+		return
+	}
+
+	s.mu.RLock()
+	_, hasReader := s.readers[sess]
+	s.mu.RUnlock()
+	if !hasReader {
+		return
+	}
+
+	if err := s.returnAudio.WriteRTP(pkt); err != nil {
+		s.logf("rtsp backchannel forward failed: %v", err)
+	}
+}
+
+func (s *Server) closeReturnAudio() {
+	if s.returnAudio != nil {
+		s.returnAudio.Close()
 	}
 }
 

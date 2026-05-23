@@ -4,11 +4,16 @@ import (
 	"context"
 	"io"
 	"log"
+	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/pion/rtp"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
@@ -118,6 +123,9 @@ func TestServerHelperFunctions(t *testing.T) {
 	if !isExpectedPayloadType(description.MediaTypeAudio, 110) {
 		t.Fatal("expected audio payload type 110 to match")
 	}
+	if isExpectedPayloadType(description.MediaTypeAudio, 97) {
+		t.Fatal("did not expect return audio payload type 97 on ingest")
+	}
 	if isExpectedPayloadType(description.MediaTypeAudio, 96) {
 		t.Fatal("did not expect audio payload type 96 to match")
 	}
@@ -136,5 +144,116 @@ func TestServerHelperFunctions(t *testing.T) {
 
 	if id := sessionID(&gortsplib.ServerSession{}); id == "" {
 		t.Fatal("expected non-empty session id")
+	}
+}
+
+func TestServerStaticStreamIncludesSpeexBackchannel(t *testing.T) {
+	desc, _, _, backMed := buildStaticStreamDescription()
+
+	if backMed == nil || len(desc.Medias) != 3 {
+		t.Fatalf("expected direct video/audio plus backchannel, got %+v", desc.Medias)
+	}
+	if !backMed.IsBackChannel || backMed.Type != description.MediaTypeAudio {
+		t.Fatalf("unexpected backchannel media: %+v", backMed)
+	}
+	speex, ok := backMed.Formats[0].(*format.Speex)
+	if !ok {
+		t.Fatalf("expected Speex backchannel format, got %T", backMed.Formats[0])
+	}
+	if speex.PayloadTyp != rtpPayloadTypeSpeexBackchannel || speex.SampleRate != rtpSpeexSampleRate {
+		t.Fatalf("unexpected backchannel speex format: %+v", speex)
+	}
+
+	marshaled, err := desc.Marshal()
+	if err != nil {
+		t.Fatalf("marshal description failed: %v", err)
+	}
+	sdp := string(marshaled)
+	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 97") || !strings.Contains(sdp, "a=sendonly") {
+		t.Fatalf("expected Speex backchannel in SDP: %s", sdp)
+	}
+}
+
+func TestReturnAudioForwarderWritesRTP(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	forwarder := newReturnAudioForwarder(conn.LocalAddr().String())
+	defer forwarder.Close()
+
+	want := &rtp.Packet{
+		Header: rtp.Header{
+			Version:        2,
+			PayloadType:    rtpPayloadTypeSpeexBackchannel,
+			SequenceNumber: 123,
+			Timestamp:      456,
+			SSRC:           789,
+		},
+		Payload: []byte{1, 2, 3, 4},
+	}
+	if err := forwarder.WriteRTP(want); err != nil {
+		t.Fatalf("WriteRTP failed: %v", err)
+	}
+
+	buf := make([]byte, 1500)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read udp: %v", err)
+	}
+
+	var got rtp.Packet
+	if err := got.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("unmarshal rtp: %v", err)
+	}
+	if got.PayloadType != want.PayloadType || got.SequenceNumber != want.SequenceNumber || got.Timestamp != want.Timestamp || got.SSRC != want.SSRC {
+		t.Fatalf("unexpected forwarded RTP header: %+v", got.Header)
+	}
+	if string(got.Payload) != string(want.Payload) {
+		t.Fatalf("unexpected forwarded RTP payload: %+v", got.Payload)
+	}
+}
+
+func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s.returnAudio = newReturnAudioForwarder(conn.LocalAddr().String())
+	defer s.closeReturnAudio()
+
+	session := &gortsplib.ServerSession{}
+	pkt := &rtp.Packet{
+		Header: rtp.Header{
+			Version:     2,
+			PayloadType: rtpPayloadTypeSpeexBackchannel,
+		},
+		Payload: []byte{1},
+	}
+
+	s.forwardReturnAudio(session, pkt)
+	if err := conn.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if n, _, err := conn.ReadFromUDP(make([]byte, 1500)); err == nil || n != 0 {
+		t.Fatal("unexpected packet for inactive reader")
+	}
+
+	s.readers[session] = readerInfo{SessionID: "s1", EntrypointID: "main", DevAddr: "20"}
+	s.forwardReturnAudio(session, pkt)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if n, _, err := conn.ReadFromUDP(make([]byte, 1500)); err != nil || n == 0 {
+		t.Fatalf("expected forwarded packet, n=%d err=%v", n, err)
 	}
 }
