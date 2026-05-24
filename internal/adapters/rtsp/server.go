@@ -182,6 +182,19 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 	sessionID := sessionID(ctx.Session)
 
+	s.mu.Lock()
+	if existing, exists := s.readers[ctx.Session]; exists {
+		if existing.EntrypointID == entrypointID {
+			existing.LastSeen = time.Now()
+			s.readers[ctx.Session] = existing
+			s.mu.Unlock()
+			return &base.Response{StatusCode: base.StatusOK}, nil
+		}
+		s.mu.Unlock()
+		return &base.Response{StatusCode: base.StatusBadRequest}, nil
+	}
+	s.mu.Unlock()
+
 	startCtx, cancel := context.WithTimeout(context.Background(), streamAutostartTimeout)
 	err := s.transport.OnPlay(startCtx, sessionID, entrypointID, devAddr)
 	cancel()
@@ -199,11 +212,12 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 		LastSeen:     time.Now(),
 	}
 	onFirstViewer := s.onEntrypointFirstViewer
+	shouldStartBridge := s.audioBridge.Enabled() && s.bridgeCtx != nil && len(s.readers) == 1
 	s.mu.Unlock()
 	if !hadEntrypointReader && onFirstViewer != nil {
 		onFirstViewer(entrypointID)
 	}
-	if s.audioBridge.Enabled() && s.bridgeCtx != nil {
+	if shouldStartBridge {
 		if err := s.audioBridge.Start(s.bridgeCtx); err != nil {
 			s.logf("audio bridge start failed: %v", err)
 		}
@@ -748,12 +762,13 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 	if ok {
 		delete(s.readers, sess)
 	}
+	shouldStopBridge := ok && s.audioBridge.Enabled() && len(s.readers) == 0
 	s.mu.Unlock()
 	if ok {
 		stopCtx, cancel := context.WithTimeout(context.Background(), streamAutostopTimeout)
 		_ = s.transport.OnPause(stopCtx, info.SessionID)
 		cancel()
-		if s.audioBridge.Enabled() {
+		if shouldStopBridge {
 			_ = s.audioBridge.Stop(context.Background())
 		}
 	}

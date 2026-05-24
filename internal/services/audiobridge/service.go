@@ -94,7 +94,8 @@ type Service struct {
 	logger *log.Logger
 
 	mu       sync.Mutex
-	refCount int
+	starting bool
+	startDone chan struct{}
 	running  bool
 	cancel   context.CancelFunc
 	procs    []*managedProcess
@@ -145,26 +146,41 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
+	for s.starting {
+		done := s.startDone
+		s.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+		s.mu.Lock()
+	}
 	if s.running {
-		s.refCount++
 		s.mu.Unlock()
 		return nil
 	}
+	s.starting = true
+	s.startDone = make(chan struct{})
+	done := s.startDone
 	s.mu.Unlock()
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	procs, err := s.startPipelines(runCtx)
+	s.mu.Lock()
+	s.starting = false
+	if done != nil {
+		close(done)
+	}
+	s.startDone = nil
+	if err == nil {
+		s.cancel = cancel
+		s.procs = procs
+		s.running = true
+	}
+	s.mu.Unlock()
 	if err != nil {
 		cancel()
 		return err
 	}
-
-	s.mu.Lock()
-	s.cancel = cancel
-	s.procs = procs
-	s.refCount = 1
-	s.running = true
-	s.mu.Unlock()
 
 	go func() {
 		<-ctx.Done()
@@ -181,12 +197,15 @@ func (s *Service) Stop(_ context.Context) error {
 	}
 
 	s.mu.Lock()
-	if !s.running {
+	for s.starting {
+		done := s.startDone
 		s.mu.Unlock()
-		return nil
+		if done != nil {
+			<-done
+		}
+		s.mu.Lock()
 	}
-	if s.refCount > 1 {
-		s.refCount--
+	if !s.running {
 		s.mu.Unlock()
 		return nil
 	}
@@ -195,7 +214,6 @@ func (s *Service) Stop(_ context.Context) error {
 	procs := append([]*managedProcess(nil), s.procs...)
 	s.cancel = nil
 	s.procs = nil
-	s.refCount = 0
 	s.running = false
 	s.closeInputsLocked()
 	s.mu.Unlock()

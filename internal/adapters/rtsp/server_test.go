@@ -143,6 +143,34 @@ func TestServerOnPlayFirstViewerHook(t *testing.T) {
 	}
 }
 
+func TestServerOnPlayIsIdempotentPerSession(t *testing.T) {
+	cfg := config.Default()
+	cfg.Entrypoints = []entrypoint.Model{
+		{ID: "gate1", DevAddr: "20", HasStream: true},
+	}
+
+	rec := &lifecycleRecorder{}
+	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
+	session := &gortsplib.ServerSession{}
+
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: session}); err != nil {
+		t.Fatalf("on play gate1 first call failed: %v", err)
+	}
+	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: session}); err != nil {
+		t.Fatalf("on play gate1 second call failed: %v", err)
+	}
+	if rec.joinCalls != 1 {
+		t.Fatalf("expected one lifecycle join for idempotent session play, got %d", rec.joinCalls)
+	}
+
+	if _, err := s.OnPause(&gortsplib.ServerHandlerOnPauseCtx{Session: session}); err != nil {
+		t.Fatalf("on pause gate1 failed: %v", err)
+	}
+	if rec.leaveCalls != 1 {
+		t.Fatalf("expected one lifecycle leave, got %d", rec.leaveCalls)
+	}
+}
+
 func TestServerDescribeUnknownPath(t *testing.T) {
 	cfg := config.Default()
 	rec := &lifecycleRecorder{}
