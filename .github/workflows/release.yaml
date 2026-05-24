@@ -55,6 +55,7 @@ jobs:
           cp scripts/install.sh dist/companion-bundle/companion/install.sh
           cp scripts/init.d/companion dist/companion-bundle/companion/init.d/companion
           cp dist/companion dist/companion-bundle/companion/companion
+          cp -a gst dist/companion-bundle/companion/gst
           chmod 755 dist/companion-bundle/companion/install.sh dist/companion-bundle/companion/init.d/companion dist/companion-bundle/companion/companion
           tar -C dist/companion-bundle -czf dist/companion.tar.gz companion
 

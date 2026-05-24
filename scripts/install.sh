@@ -32,6 +32,7 @@ FAILURES=0
 POST_CHECK_FAILURES=0
 SELECTED_BINARY_PATH=""
 SELECTED_INIT_TEMPLATE=""
+SELECTED_GST_DIR=""
 
 log() {
 	printf 'INFO: %s\n' "$*"
@@ -279,6 +280,29 @@ install_binary() {
 	log "Installed binary to ${BIN_PATH}"
 }
 
+install_gst_runtime() {
+	src_dir="$1"
+	if [ -z "${src_dir}" ] || [ ! -d "${src_dir}" ]; then
+		log "No bundled gst runtime provided; keeping existing runtime."
+		return 0
+	fi
+
+	mkdir -p "${BASE_DIR}"
+	candidate="${BASE_DIR}/gst.candidate.$$"
+	previous="${BASE_DIR}/gst.previous"
+
+	rm -rf "${candidate}"
+	mkdir -p "${candidate}"
+	cp -a "${src_dir}/." "${candidate}/"
+
+	rm -rf "${previous}"
+	if [ -d "${BASE_DIR}/gst" ]; then
+		mv -f "${BASE_DIR}/gst" "${previous}"
+	fi
+	mv -f "${candidate}" "${BASE_DIR}/gst"
+	log "Installed gst runtime to ${BASE_DIR}/gst"
+}
+
 install_init_script() {
 	init_template="$1"
 	if [ ! -f "${init_template}" ]; then
@@ -388,6 +412,12 @@ post_install_checks() {
 		fail "Service not running"
 	fi
 
+	if [ -x "${BASE_DIR}/gst/bin/gst-launch-1.0" ] || [ -x "${BASE_DIR}/gst/opt/gst14/bin/gst-launch-1.0" ]; then
+		ok "GStreamer launcher is present"
+	else
+		fail "GStreamer launcher missing in ${BASE_DIR}/gst"
+	fi
+
 	url="$(health_url)"
 	if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
 		log "Waiting for health endpoint (up to ${HEALTHCHECK_TIMEOUT_SEC}s): ${url}"
@@ -417,6 +447,7 @@ post_install_checks() {
 resolve_local_install_inputs() {
 	binary_path="$1"
 	init_template="$2"
+	local_gst_dir="${SCRIPT_DIR}/../gst"
 	if [ -z "${binary_path}" ] || [ ! -f "${binary_path}" ]; then
 		log "Missing companion binary for install."
 		exit 1
@@ -427,6 +458,9 @@ resolve_local_install_inputs() {
 	fi
 	SELECTED_BINARY_PATH="${binary_path}"
 	SELECTED_INIT_TEMPLATE="${init_template}"
+	if [ -d "${local_gst_dir}" ]; then
+		SELECTED_GST_DIR="${local_gst_dir}"
+	fi
 }
 
 download_latest_artifacts() {
@@ -442,13 +476,16 @@ download_latest_artifacts() {
 	bundle_dir="${ROOT}/companion"
 	binary_path=""
 	init_template_path=""
+	gst_dir=""
 
 	if fetch "${BASE_URL}/${BUNDLE_ASSET}" "${ROOT}/${BUNDLE_ASSET}" 2>/dev/null && fetch "${BASE_URL}/${CHECKSUM_ASSET}" "${ROOT}/${CHECKSUM_ASSET}" && tar -xzf "${ROOT}/${BUNDLE_ASSET}" -C "${ROOT}" >/dev/null 2>&1; then
 		candidate_binary="${bundle_dir}/${BINARY_NAME}"
 		candidate_init="${bundle_dir}/init.d/companion"
-		if [ -f "${candidate_binary}" ] && [ -f "${candidate_init}" ]; then
+		candidate_gst="${bundle_dir}/gst"
+		if [ -f "${candidate_binary}" ] && [ -f "${candidate_init}" ] && [ -d "${candidate_gst}" ]; then
 			binary_path="${candidate_binary}"
 			init_template_path="${candidate_init}"
+			gst_dir="${candidate_gst}"
 		else
 			log "Bundle is incomplete, falling back to binary+template download."
 		fi
@@ -466,6 +503,13 @@ download_latest_artifacts() {
 		fetch "${INIT_TEMPLATE_URL}" "${bundle_dir}/init.d/companion"
 		binary_path="${bundle_dir}/${BINARY_NAME}"
 		init_template_path="${bundle_dir}/init.d/companion"
+		if [ -d "${SCRIPT_DIR}/../gst" ]; then
+			gst_dir="${SCRIPT_DIR}/../gst"
+			log "Using local gst runtime fallback from ${gst_dir}"
+		else
+			log "Fallback path requires bundled gst runtime in companion.tar.gz."
+			exit 1
+		fi
 	fi
 
 	expected_sha="$(parse_expected_sha "${ROOT}/${CHECKSUM_ASSET}")"
@@ -484,6 +528,7 @@ download_latest_artifacts() {
 	chmod 755 "${binary_path}" "${init_template_path}"
 	SELECTED_BINARY_PATH="${binary_path}"
 	SELECTED_INIT_TEMPLATE="${init_template_path}"
+	SELECTED_GST_DIR="${gst_dir}"
 }
 
 main() {
@@ -499,6 +544,7 @@ main() {
 	fi
 
 	install_binary "${SELECTED_BINARY_PATH}"
+	install_gst_runtime "${SELECTED_GST_DIR}"
 	register_service "${SELECTED_INIT_TEMPLATE}"
 	start_service
 	restore_root_ro

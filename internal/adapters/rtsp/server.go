@@ -19,6 +19,7 @@ import (
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/services/audiobridge"
 )
 
 const (
@@ -68,6 +69,8 @@ type Server struct {
 	pathList []string
 
 	returnAudio *returnAudioForwarder
+	audioBridge *audiobridge.Service
+	bridgeCtx   context.Context
 
 	snapshotMirrorConn             *net.UDPConn
 	snapshotMirrorPort             int
@@ -91,6 +94,7 @@ func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Serv
 		paths:       paths,
 		pathList:    sortedRoutePaths(paths),
 		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
+		audioBridge: audiobridge.New(audiobridge.DefaultConfig(cfg.DataDir), logger),
 	}
 	s.srv = &gortsplib.Server{
 		Handler:        s,
@@ -111,9 +115,13 @@ func (s *Server) Start(ctx context.Context) error {
 		s.srv.Close()
 		return fmt.Errorf("initialize static stream: %w", err)
 	}
+	s.bridgeCtx = ctx
 
 	go func() {
 		<-ctx.Done()
+		if s.audioBridge.Enabled() {
+			_ = s.audioBridge.Stop(context.Background())
+		}
 		s.closeReturnAudio()
 		s.closeSnapshotMirror()
 		s.srv.Close()
@@ -126,7 +134,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	go s.runIngestListener(ctx, s.cfg.MediaRTPVideoPort, description.MediaTypeVideo)
-	go s.runIngestListener(ctx, s.cfg.MediaRTPAudioPort, description.MediaTypeAudio)
+	if s.audioBridge.Enabled() {
+		ports := s.audioBridge.Ports()
+		go s.runIngestListener(ctx, s.cfg.MediaRTPAudioPort, description.MediaTypeAudio)
+		go s.runBridgeOpusOutListener(ctx, ports.OpusOut, s.audioBridge.OpusPayloadType())
+		go s.runBridgeSpeexOutListener(ctx, ports.SpeexOut)
+	} else {
+		go s.runIngestListener(ctx, s.cfg.MediaRTPAudioPort, description.MediaTypeAudio)
+	}
 	go s.watchReaderSessions(ctx)
 
 	return nil
@@ -188,6 +203,11 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	if !hadEntrypointReader && onFirstViewer != nil {
 		onFirstViewer(entrypointID)
 	}
+	if s.audioBridge.Enabled() && s.bridgeCtx != nil {
+		if err := s.audioBridge.Start(s.bridgeCtx); err != nil {
+			s.logf("audio bridge start failed: %v", err)
+		}
+	}
 
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		if medi != s.backMed {
@@ -231,7 +251,11 @@ func (s *Server) ensureStaticStream() error {
 		return nil
 	}
 
-	desc, videoMedia, audioMedia, backMedia := buildStaticStreamDescription()
+	desc, videoMedia, audioMedia, backMedia := buildStaticStreamDescription(
+		s.audioBridge.Enabled(),
+		s.audioBridge.OpusPayloadType(),
+		s.audioBridge.BackchannelOpusPayloadType(),
+	)
 	stream := &gortsplib.ServerStream{
 		Server: s.srv,
 		Desc:   desc,
@@ -246,18 +270,29 @@ func (s *Server) ensureStaticStream() error {
 	return nil
 }
 
-func buildStaticStreamDescription() (*description.Session, *description.Media, *description.Media, *description.Media) {
+func buildStaticStreamDescription(audioBridgeEnabled bool, opusPayloadType uint8, backchannelOpusPayloadType uint8) (*description.Session, *description.Media, *description.Media, *description.Media) {
 	videoForma := &format.H264{
 		PayloadTyp:        rtpPayloadTypeH264,
 		PacketizationMode: 1,
 	}
-	audioForma := &format.Speex{
-		PayloadTyp: rtpPayloadTypeSpeex,
-		SampleRate: rtpSpeexSampleRate,
-	}
-	backForma := &format.Speex{
-		PayloadTyp: rtpPayloadTypeSpeexBackchannel,
-		SampleRate: rtpSpeexSampleRate,
+	var audioForma format.Format
+	var backForma format.Format
+	if audioBridgeEnabled {
+		audioForma = &format.Opus{
+			PayloadTyp: opusPayloadType,
+		}
+		backForma = &format.Opus{
+			PayloadTyp: backchannelOpusPayloadType,
+		}
+	} else {
+		audioForma = &format.Speex{
+			PayloadTyp: rtpPayloadTypeSpeex,
+			SampleRate: rtpSpeexSampleRate,
+		}
+		backForma = &format.Speex{
+			PayloadTyp: rtpPayloadTypeSpeexBackchannel,
+			SampleRate: rtpSpeexSampleRate,
+		}
 	}
 	videoMedia := &description.Media{
 		Type:    description.MediaTypeVideo,
@@ -330,6 +365,12 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 	if !isExpectedPayloadType(mediaType, pkt.PayloadType) {
 		return
 	}
+	if mediaType == description.MediaTypeAudio && s.audioBridge.Enabled() {
+		if err := s.audioBridge.WriteIntercomSpeex(pkt); err != nil {
+			s.logf("audio bridge ingest failed: %v", err)
+		}
+		return
+	}
 	if mediaType == description.MediaTypeVideo {
 		s.writeSnapshotMirror(pkt)
 	}
@@ -370,7 +411,7 @@ func isExpectedPayloadType(mediaType description.MediaType, payloadType uint8) b
 }
 
 func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Packet) {
-	if pkt == nil || pkt.PayloadType != rtpPayloadTypeSpeexBackchannel {
+	if pkt == nil {
 		return
 	}
 
@@ -381,8 +422,120 @@ func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Pack
 		return
 	}
 
+	if s.audioBridge.Enabled() {
+		if pkt.PayloadType != s.audioBridge.BackchannelOpusPayloadType() {
+			return
+		}
+		if err := s.audioBridge.WriteBackchannelOpus(pkt); err != nil {
+			s.logf("rtsp backchannel bridge write failed: %v", err)
+		}
+		return
+	}
+	if pkt.PayloadType != rtpPayloadTypeSpeexBackchannel {
+		return
+	}
 	if err := s.returnAudio.WriteRTP(pkt); err != nil {
 		s.logf("rtsp backchannel forward failed: %v", err)
+	}
+}
+
+func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expectedPayloadType uint8) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		s.logf("audio bridge opus output listener failed port=%d err=%v", port, err)
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetReadBuffer(1 << 20)
+
+	buf := make([]byte, 2048)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			s.logf("audio bridge opus output deadline failed err=%v", err)
+		}
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					continue
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			s.logf("audio bridge opus output read failed err=%v", err)
+			continue
+		}
+
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf[:n]); err != nil {
+			continue
+		}
+		if pkt.PayloadType != expectedPayloadType {
+			continue
+		}
+
+		s.mu.RLock()
+		stream := s.stream
+		audioMed := s.audioMed
+		s.mu.RUnlock()
+		if stream == nil || audioMed == nil {
+			continue
+		}
+		if err := stream.WritePacketRTP(audioMed, &pkt); err != nil {
+			s.logf("audio bridge opus stream write failed: %v", err)
+		}
+	}
+}
+
+func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		s.logf("audio bridge speex output listener failed port=%d err=%v", port, err)
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetReadBuffer(1 << 20)
+
+	buf := make([]byte, 2048)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			s.logf("audio bridge speex output deadline failed err=%v", err)
+		}
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					continue
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			s.logf("audio bridge speex output read failed err=%v", err)
+			continue
+		}
+
+		var pkt rtp.Packet
+		if err := pkt.Unmarshal(buf[:n]); err != nil {
+			continue
+		}
+		if pkt.PayloadType != rtpPayloadTypeSpeexBackchannel {
+			continue
+		}
+		if err := s.returnAudio.WriteRTP(&pkt); err != nil {
+			s.logf("audio bridge speex forward failed: %v", err)
+		}
 	}
 }
 
@@ -600,6 +753,9 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 		stopCtx, cancel := context.WithTimeout(context.Background(), streamAutostopTimeout)
 		_ = s.transport.OnPause(stopCtx, info.SessionID)
 		cancel()
+		if s.audioBridge.Enabled() {
+			_ = s.audioBridge.Stop(context.Background())
+		}
 	}
 }
 

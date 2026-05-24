@@ -17,6 +17,7 @@ import (
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/services/audiobridge"
 )
 
 type lifecycleRecorder struct {
@@ -203,8 +204,8 @@ func TestServerHelperFunctions(t *testing.T) {
 	}
 }
 
-func TestServerStaticStreamIncludesSpeexBackchannel(t *testing.T) {
-	desc, _, _, backMed := buildStaticStreamDescription()
+func TestServerStaticStreamIncludesOpusBackchannel(t *testing.T) {
+	desc, _, _, backMed := buildStaticStreamDescription(true, 111, 112)
 
 	if backMed == nil || len(desc.Medias) != 3 {
 		t.Fatalf("expected direct video/audio plus backchannel, got %+v", desc.Medias)
@@ -212,12 +213,12 @@ func TestServerStaticStreamIncludesSpeexBackchannel(t *testing.T) {
 	if !backMed.IsBackChannel || backMed.Type != description.MediaTypeAudio {
 		t.Fatalf("unexpected backchannel media: %+v", backMed)
 	}
-	speex, ok := backMed.Formats[0].(*format.Speex)
+	opus, ok := backMed.Formats[0].(*format.Opus)
 	if !ok {
-		t.Fatalf("expected Speex backchannel format, got %T", backMed.Formats[0])
+		t.Fatalf("expected Opus backchannel format, got %T", backMed.Formats[0])
 	}
-	if speex.PayloadTyp != rtpPayloadTypeSpeexBackchannel || speex.SampleRate != rtpSpeexSampleRate {
-		t.Fatalf("unexpected backchannel speex format: %+v", speex)
+	if opus.PayloadTyp != 112 {
+		t.Fatalf("unexpected backchannel opus format: %+v", opus)
 	}
 
 	marshaled, err := desc.Marshal()
@@ -225,8 +226,23 @@ func TestServerStaticStreamIncludesSpeexBackchannel(t *testing.T) {
 		t.Fatalf("marshal description failed: %v", err)
 	}
 	sdp := string(marshaled)
-	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 97") || !strings.Contains(sdp, "a=sendonly") {
-		t.Fatalf("expected Speex backchannel in SDP: %s", sdp)
+	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 112") || !strings.Contains(sdp, "a=sendonly") {
+		t.Fatalf("expected Opus backchannel in SDP: %s", sdp)
+	}
+}
+
+func TestServerStaticStreamIncludesLegacySpeexBackchannel(t *testing.T) {
+	desc, _, _, backMed := buildStaticStreamDescription(false, 111, 112)
+
+	if backMed == nil || len(desc.Medias) != 3 {
+		t.Fatalf("expected direct video/audio plus backchannel, got %+v", desc.Medias)
+	}
+	speex, ok := backMed.Formats[0].(*format.Speex)
+	if !ok {
+		t.Fatalf("expected Speex backchannel format, got %T", backMed.Formats[0])
+	}
+	if speex.PayloadTyp != rtpPayloadTypeSpeexBackchannel || speex.SampleRate != rtpSpeexSampleRate {
+		t.Fatalf("unexpected backchannel speex format: %+v", speex)
 	}
 }
 
@@ -285,6 +301,7 @@ func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
 	cfg := config.Default()
 	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
 	s.returnAudio = newReturnAudioForwarder(conn.LocalAddr().String())
+	s.audioBridge = nil
 	defer s.closeReturnAudio()
 
 	session := &gortsplib.ServerSession{}
@@ -311,6 +328,49 @@ func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
 	}
 	if n, _, err := conn.ReadFromUDP(make([]byte, 1500)); err != nil || n == 0 {
 		t.Fatalf("expected forwarded packet, n=%d err=%v", n, err)
+	}
+}
+
+func TestServerWritesBackchannelToBridgeWhenEnabled(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	bridgeCfg := audiobridge.DefaultConfig(cfg.DataDir)
+	bridgeCfg.Enabled = true
+	ports := bridgeCfg.Ports
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: ports.OpusIn})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	s.audioBridge = audiobridge.New(bridgeCfg, log.New(io.Discard, "", 0))
+	session := &gortsplib.ServerSession{}
+	s.readers[session] = readerInfo{SessionID: "s1", EntrypointID: "main", DevAddr: "20"}
+
+	want := &rtp.Packet{
+		Header: rtp.Header{
+			Version:     2,
+			PayloadType: s.audioBridge.BackchannelOpusPayloadType(),
+		},
+		Payload: []byte{9, 8, 7},
+	}
+	s.forwardReturnAudio(session, want)
+
+	buf := make([]byte, 1500)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("expected bridged packet: %v", err)
+	}
+	var got rtp.Packet
+	if err := got.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("unmarshal packet: %v", err)
+	}
+	if got.PayloadType != want.PayloadType {
+		t.Fatalf("unexpected payload type got=%d want=%d", got.PayloadType, want.PayloadType)
 	}
 }
 
