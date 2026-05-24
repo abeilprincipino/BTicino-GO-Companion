@@ -1,7 +1,9 @@
 package update
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,9 +36,9 @@ func TestApplyAndRollbackLifecycle(t *testing.T) {
 		t.Fatalf("write current: %v", err)
 	}
 
-	candidatePath := filepath.Join(tempDir, "candidate.bin")
-	if err := os.WriteFile(candidatePath, []byte("new-binary"), 0o755); err != nil {
-		t.Fatalf("write candidate: %v", err)
+	candidatePath := filepath.Join(tempDir, "candidate.tar.gz")
+	if err := writeCompanionBundleTar(candidatePath, []byte("new-binary")); err != nil {
+		t.Fatalf("write candidate tar: %v", err)
 	}
 
 	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
@@ -87,12 +89,7 @@ func TestCheckFromGitHubRelease(t *testing.T) {
 	cfg.DataDir = filepath.Join(tempDir, "companion")
 	cfg.UpdateManifestPath = ""
 	cfg.UpdateReleaseRepo = "owner/repo"
-	cfg.UpdateReleaseAsset = "companion"
-
-	shaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("a", 64) + "  companion\n"))
-	}))
-	defer shaServer.Close()
+	cfg.UpdateReleaseAsset = "companion.tar.gz"
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/owner/repo/releases/latest" {
@@ -102,8 +99,11 @@ func TestCheckFromGitHubRelease(t *testing.T) {
 		resp := map[string]any{
 			"tag_name": "v0.0.2",
 			"assets": []map[string]any{
-				{"name": "companion", "browser_download_url": "https://example.invalid/companion"},
-				{"name": "companion.sha256", "browser_download_url": shaServer.URL + "/companion.sha256"},
+				{
+					"name":                 "companion.tar.gz",
+					"browser_download_url": "https://example.invalid/companion.tar.gz",
+					"digest":               "sha256:" + strings.Repeat("a", 64),
+				},
 			},
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -139,7 +139,14 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 		t.Fatalf("write current: %v", err)
 	}
 
-	newPayload := []byte("new-binary-from-url")
+	bundlePath := filepath.Join(tempDir, "remote.tar.gz")
+	if err := writeCompanionBundleTar(bundlePath, []byte("new-binary-from-url")); err != nil {
+		t.Fatalf("write remote candidate bundle: %v", err)
+	}
+	newPayload, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatalf("read remote candidate bundle: %v", err)
+	}
 	sum := sha256.Sum256(newPayload)
 	sumHex := hex.EncodeToString(sum[:])
 	artifactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +158,7 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 	m.SetRestartForTest(func() error { return nil })
 	applyStatus, err := m.Apply(&Artifact{
 		Version: "v0.0.2",
-		Path:    artifactServer.URL + "/companion",
+		Path:    artifactServer.URL + "/companion.tar.gz",
 		SHA256:  sumHex,
 	})
 	if err != nil {
@@ -218,12 +225,15 @@ func TestHealthWindowCheck(t *testing.T) {
 }
 
 func TestUtilityHelpers(t *testing.T) {
-	if got := parseChecksum("abc"); got != "" {
-		t.Fatalf("expected empty checksum, got %q", got)
-	}
 	sum := strings.Repeat("a", 64)
-	if got := parseChecksum(sum + "  companion\n"); got != sum {
-		t.Fatalf("unexpected parsed checksum: %q", got)
+	if got, err := parseAssetDigest("sha256:" + sum); err != nil || got != sum {
+		t.Fatalf("unexpected parsed digest got=%q err=%v", got, err)
+	}
+	if _, err := parseAssetDigest("sha1:" + sum); err == nil {
+		t.Fatal("expected unsupported digest format error")
+	}
+	if _, err := parseAssetDigest(""); err == nil {
+		t.Fatal("expected empty digest error")
 	}
 
 	if !isLowerHex("0123abcdef") {
@@ -380,7 +390,7 @@ func TestReadManifestVariants(t *testing.T) {
 func TestReadGitHubReleaseMissingAsset(t *testing.T) {
 	cfg := config.Default()
 	cfg.UpdateReleaseRepo = "owner/repo"
-	cfg.UpdateReleaseAsset = "companion"
+	cfg.UpdateReleaseAsset = "companion.tar.gz"
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -397,4 +407,68 @@ func TestReadGitHubReleaseMissingAsset(t *testing.T) {
 	if _, _, err := m.readGitHubRelease(); err == nil {
 		t.Fatal("expected missing release asset error")
 	}
+}
+
+func TestReadGitHubReleaseMissingDigest(t *testing.T) {
+	cfg := config.Default()
+	cfg.UpdateReleaseRepo = "owner/repo"
+	cfg.UpdateReleaseAsset = "companion.tar.gz"
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v0.2.0",
+			"assets": []map[string]any{
+				{"name": "companion.tar.gz", "browser_download_url": "https://example.invalid/companion.tar.gz"},
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	cfg.UpdateReleaseAPI = apiServer.URL
+	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	if _, _, err := m.readGitHubRelease(); err == nil {
+		t.Fatal("expected missing digest error")
+	}
+}
+
+func writeCompanionBundleTar(path string, binary []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "companion/",
+		Typeflag: tar.TypeDir,
+		Mode:     0o755,
+	}); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "companion/companion",
+		Typeflag: tar.TypeReg,
+		Mode:     0o755,
+		Size:     int64(len(binary)),
+	}); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+	if _, err := tw.Write(binary); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		_ = gz.Close()
+		return err
+	}
+	return gz.Close()
 }

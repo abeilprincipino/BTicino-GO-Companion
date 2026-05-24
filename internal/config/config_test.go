@@ -139,7 +139,7 @@ func TestSaveLoadPersistsSystemUpdateControl(t *testing.T) {
 	cfg.SystemUpdateExposed = true
 	cfg.SystemUpdateAllowRollback = true
 	cfg.UpdateReleaseRepo = "owner/repo"
-	cfg.UpdateReleaseAsset = "companion"
+	cfg.UpdateReleaseAsset = "companion.tar.gz"
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("save failed: %v", err)
 	}

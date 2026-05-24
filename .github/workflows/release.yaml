@@ -45,8 +45,6 @@ jobs:
             -o dist/companion \
             ./cmd/companion
 
-          sha256sum dist/companion > dist/companion.sha256
-
       - name: Build install bundle
         run: |
           set -eu
@@ -64,7 +62,6 @@ jobs:
         with:
           name: bticino-go-companion-${{ github.ref_name }}
           path: |
-            dist/companion.sha256
             dist/companion.tar.gz
 
       - name: Prepare release body
@@ -92,7 +89,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |
-            dist/companion.sha256
             dist/companion.tar.gz
           body_path: /tmp/release-notes.md
           append_body: true

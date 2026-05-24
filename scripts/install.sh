@@ -12,13 +12,15 @@ LOCAL_INIT_TEMPLATE="${SCRIPT_DIR}/init.d/companion"
 DEFAULT_RELEASE_REPO="r0bb10/BTicino-GO-Companion"
 REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"
-CHECKSUM_ASSET="${COMPANION_RELEASE_CHECKSUM_ASSET:-companion.sha256}"
-BINARY_NAME="${COMPANION_RELEASE_BINARY_ASSET:-companion}"
 HEALTHCHECK_TIMEOUT_SEC="${COMPANION_HEALTHCHECK_TIMEOUT_SEC:-45}"
 
 BASE_URL="${COMPANION_RELEASE_BASE_URL:-}"
 if [ -z "${BASE_URL}" ] && [ -n "${REPO}" ]; then
 	BASE_URL="https://github.com/${REPO}/releases/latest/download"
+fi
+RELEASE_API="${COMPANION_RELEASE_API:-}"
+if [ -z "${RELEASE_API}" ] && [ -n "${REPO}" ]; then
+	RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
 fi
 
 INIT_TEMPLATE_URL="${COMPANION_INIT_TEMPLATE_URL:-}"
@@ -120,22 +122,42 @@ sha256_file() {
 	exit 1
 }
 
-parse_expected_sha() {
-	checksum_file="$1"
-	awk '{
-		for (i = 1; i <= NF; i++) {
-			v = tolower($i)
-			if (length(v) != 64) {
-				continue
+parse_release_asset_digest() {
+	release_json="$1"
+	asset_name="$2"
+	awk -v asset="${asset_name}" '
+		BEGIN { want = 0 }
+		{
+			if ($0 ~ /"name"[[:space:]]*:/ && index($0, "\"" asset "\"") > 0) {
+				want = 1
 			}
-			x = v
-			gsub(/[0-9a-f]/, "", x)
-			if (x == "") {
-				print v
-				exit
+			if (want && $0 ~ /"digest"[[:space:]]*:/) {
+				line = $0
+				sub(/.*"digest"[[:space:]]*:[[:space:]]*"sha256:/, "", line)
+				sub(/".*/, "", line)
+				if (line != "") {
+					print tolower(line)
+					exit
+				}
 			}
 		}
-	}' "${checksum_file}"
+	' "${release_json}"
+}
+
+resolve_bundle_sha() {
+	override_sha="${COMPANION_RELEASE_BUNDLE_SHA256:-}"
+	if [ -n "${override_sha}" ]; then
+		printf '%s' "${override_sha}" | tr 'A-F' 'a-f'
+		return 0
+	fi
+	if [ -z "${RELEASE_API}" ]; then
+		return 1
+	fi
+	release_json="${ROOT}/release.json"
+	if ! fetch "${RELEASE_API}" "${release_json}" 2>/dev/null; then
+		return 1
+	fi
+	parse_release_asset_digest "${release_json}" "${BUNDLE_ASSET}"
 }
 
 companion_firewall_ports() {
@@ -478,48 +500,30 @@ download_latest_artifacts() {
 	init_template_path=""
 	gst_dir=""
 
-	if fetch "${BASE_URL}/${BUNDLE_ASSET}" "${ROOT}/${BUNDLE_ASSET}" 2>/dev/null && fetch "${BASE_URL}/${CHECKSUM_ASSET}" "${ROOT}/${CHECKSUM_ASSET}" && tar -xzf "${ROOT}/${BUNDLE_ASSET}" -C "${ROOT}" >/dev/null 2>&1; then
-		candidate_binary="${bundle_dir}/${BINARY_NAME}"
+	if fetch "${BASE_URL}/${BUNDLE_ASSET}" "${ROOT}/${BUNDLE_ASSET}" 2>/dev/null && tar -xzf "${ROOT}/${BUNDLE_ASSET}" -C "${ROOT}" >/dev/null 2>&1; then
+		candidate_binary="${bundle_dir}/companion"
 		candidate_init="${bundle_dir}/init.d/companion"
 		candidate_gst="${bundle_dir}/gst"
 		if [ -f "${candidate_binary}" ] && [ -f "${candidate_init}" ] && [ -d "${candidate_gst}" ]; then
 			binary_path="${candidate_binary}"
 			init_template_path="${candidate_init}"
 			gst_dir="${candidate_gst}"
-		else
-			log "Bundle is incomplete, falling back to binary+template download."
 		fi
 	fi
 
 	if [ -z "${binary_path}" ] || [ -z "${init_template_path}" ]; then
-		log "Bundle asset not found on latest release yet, falling back to binary+template download."
-		if [ -z "${INIT_TEMPLATE_URL}" ]; then
-			log "Fallback requires COMPANION_INIT_TEMPLATE_URL (or override COMPANION_RELEASE_REPO)."
-			exit 1
-		fi
-		mkdir -p "${bundle_dir}/init.d"
-		fetch "${BASE_URL}/${BINARY_NAME}" "${bundle_dir}/${BINARY_NAME}"
-		fetch "${BASE_URL}/${CHECKSUM_ASSET}" "${ROOT}/${CHECKSUM_ASSET}"
-		fetch "${INIT_TEMPLATE_URL}" "${bundle_dir}/init.d/companion"
-		binary_path="${bundle_dir}/${BINARY_NAME}"
-		init_template_path="${bundle_dir}/init.d/companion"
-		if [ -d "${SCRIPT_DIR}/../gst" ]; then
-			gst_dir="${SCRIPT_DIR}/../gst"
-			log "Using local gst runtime fallback from ${gst_dir}"
-		else
-			log "Fallback path requires bundled gst runtime in companion.tar.gz."
-			exit 1
-		fi
-	fi
-
-	expected_sha="$(parse_expected_sha "${ROOT}/${CHECKSUM_ASSET}")"
-	if [ -z "${expected_sha}" ]; then
-		log "Could not parse expected SHA256 from ${CHECKSUM_ASSET}."
+		log "Bundle asset ${BUNDLE_ASSET} not found or incomplete in latest release."
 		exit 1
 	fi
-	actual_sha="$(sha256_file "${binary_path}")"
+
+	expected_sha="$(resolve_bundle_sha)"
+	if [ -z "${expected_sha}" ]; then
+		log "Could not resolve expected SHA256 digest for ${BUNDLE_ASSET}."
+		exit 1
+	fi
+	actual_sha="$(sha256_file "${ROOT}/${BUNDLE_ASSET}")"
 	if [ "${actual_sha}" != "${expected_sha}" ]; then
-		log "SHA256 mismatch for ${BINARY_NAME}."
+		log "SHA256 mismatch for ${BUNDLE_ASSET}."
 		log "Expected: ${expected_sha}"
 		log "Actual:   ${actual_sha}"
 		exit 1

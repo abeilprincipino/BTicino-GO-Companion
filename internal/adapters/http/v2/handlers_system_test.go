@@ -1,6 +1,8 @@
 package v2
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -186,8 +188,8 @@ func TestUpdateHandlersLifecycle(t *testing.T) {
 	if err := os.WriteFile(currentPath, []byte("old-binary"), 0o755); err != nil {
 		t.Fatalf("write current binary: %v", err)
 	}
-	candidatePath := filepath.Join(t.TempDir(), "candidate.bin")
-	if err := os.WriteFile(candidatePath, []byte("new-binary"), 0o755); err != nil {
+	candidatePath := filepath.Join(t.TempDir(), "candidate.tar.gz")
+	if err := writeCompanionBundleTarForHTTPTest(candidatePath, []byte("new-binary")); err != nil {
 		t.Fatalf("write candidate: %v", err)
 	}
 
@@ -226,6 +228,48 @@ func TestUpdateHandlersLifecycle(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("update status expected 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
+}
+
+func writeCompanionBundleTarForHTTPTest(path string, binary []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "companion/",
+		Typeflag: tar.TypeDir,
+		Mode:     0o755,
+	}); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "companion/companion",
+		Typeflag: tar.TypeReg,
+		Mode:     0o755,
+		Size:     int64(len(binary)),
+	}); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+	if _, err := tw.Write(binary); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		_ = gz.Close()
+		return err
+	}
+	return gz.Close()
 }
 
 func TestUpdateHandlersGatesAndBadBody(t *testing.T) {

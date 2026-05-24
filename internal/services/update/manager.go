@@ -1,6 +1,8 @@
 package update
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -68,6 +70,7 @@ type githubRelease struct {
 	TagName string `json:"tag_name"`
 	Assets  []struct {
 		Name               string `json:"name"`
+		Digest             string `json:"digest"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
 }
@@ -293,18 +296,23 @@ func (m *Manager) applyBinary(candidate Artifact) error {
 	if strings.TrimSpace(candidate.Path) == "" {
 		return ErrMissingArtifact
 	}
-	candidatePath, cleanup, err := m.resolveArtifact(candidate.Path)
+	archivePath, cleanup, err := m.resolveArtifact(candidate.Path)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	if _, err := os.Stat(candidatePath); err != nil {
+	if _, err := os.Stat(archivePath); err != nil {
 		return fmt.Errorf("candidate artifact not found: %w", err)
 	}
-	if err := verifySHA256(candidatePath, candidate.SHA256); err != nil {
+	if err := verifySHA256(archivePath, candidate.SHA256); err != nil {
 		return err
 	}
+	candidatePath, cleanupCandidate, err := extractCompanionBinary(archivePath)
+	if err != nil {
+		return err
+	}
+	defer cleanupCandidate()
 
 	current := m.cfg.UpdateBinCurrentPath()
 	prev := m.cfg.UpdateBinPreviousPath()
@@ -338,7 +346,7 @@ func (m *Manager) resolveArtifact(path string) (string, func(), error) {
 	trimmed := strings.TrimSpace(path)
 	switch {
 	case strings.HasPrefix(trimmed, "https://"), strings.HasPrefix(trimmed, "http://"):
-		tmp := filepath.Join(os.TempDir(), fmt.Sprintf("bticino-go-companion-artifact-%d.bin", m.now().UnixNano()))
+		tmp := filepath.Join(os.TempDir(), fmt.Sprintf("bticino-go-companion-artifact-%d.tar.gz", m.now().UnixNano()))
 		if err := m.downloadFile(trimmed, tmp); err != nil {
 			return "", func() {}, fmt.Errorf("download artifact: %w", err)
 		}
@@ -406,28 +414,21 @@ func (m *Manager) readGitHubRelease() (Artifact, bool, error) {
 	}
 
 	artifactURL := ""
-	shaURL := ""
-	shaAssetName := assetName + ".sha256"
+	artifactDigest := ""
 	for _, asset := range rel.Assets {
 		name := strings.TrimSpace(asset.Name)
-		switch name {
-		case assetName:
+		if name == assetName {
 			artifactURL = strings.TrimSpace(asset.BrowserDownloadURL)
-		case shaAssetName:
-			shaURL = strings.TrimSpace(asset.BrowserDownloadURL)
+			artifactDigest = strings.TrimSpace(asset.Digest)
+			break
 		}
 	}
 	if artifactURL == "" {
 		return Artifact{}, false, fmt.Errorf("github release missing asset %q", assetName)
 	}
-
-	checksum := ""
-	if shaURL != "" {
-		sumText, err := m.downloadText(shaURL)
-		if err != nil {
-			return Artifact{}, false, fmt.Errorf("download checksum asset: %w", err)
-		}
-		checksum = parseChecksum(sumText)
+	checksum, err := parseAssetDigest(artifactDigest)
+	if err != nil {
+		return Artifact{}, false, fmt.Errorf("github release invalid digest for asset %q: %w", assetName, err)
 	}
 
 	return Artifact{
@@ -435,22 +436,6 @@ func (m *Manager) readGitHubRelease() (Artifact, bool, error) {
 		Path:    artifactURL,
 		SHA256:  checksum,
 	}, true, nil
-}
-
-func (m *Manager) downloadText(url string) (string, error) {
-	resp, err := m.doGET(url, "")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", httpStatusError("download text", resp)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
 }
 
 func (m *Manager) downloadFile(url string, dst string) error {
@@ -490,18 +475,20 @@ func (m *Manager) downloadFile(url string, dst string) error {
 	return nil
 }
 
-func parseChecksum(raw string) string {
-	fields := strings.Fields(strings.TrimSpace(raw))
-	for _, field := range fields {
-		token := strings.TrimSpace(strings.ToLower(field))
-		if len(token) != 64 {
-			continue
-		}
-		if isLowerHex(token) {
-			return token
-		}
+func parseAssetDigest(raw string) (string, error) {
+	digest := strings.ToLower(strings.TrimSpace(raw))
+	if digest == "" {
+		return "", errors.New("empty digest")
 	}
-	return ""
+	const prefix = "sha256:"
+	if !strings.HasPrefix(digest, prefix) {
+		return "", errors.New("unsupported digest format")
+	}
+	sum := strings.TrimSpace(strings.TrimPrefix(digest, prefix))
+	if len(sum) != 64 || !isLowerHex(sum) {
+		return "", errors.New("invalid sha256 digest")
+	}
+	return sum, nil
 }
 
 func isLowerHex(s string) bool {
@@ -582,6 +569,69 @@ func verifySHA256(path string, expected string) error {
 		return fmt.Errorf("artifact checksum mismatch expected=%s actual=%s", expected, actual)
 	}
 	return nil
+}
+
+func extractCompanionBinary(archivePath string) (string, func(), error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("open artifact archive: %w", err)
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("open gzip archive: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	tmpDir, err := os.MkdirTemp("", "bticino-go-companion-candidate-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
+	dst := filepath.Join(tmpDir, "companion")
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("read tar archive: %w", err)
+		}
+		if hdr == nil || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := filepath.ToSlash(strings.TrimSpace(hdr.Name))
+		if name != "companion/companion" {
+			continue
+		}
+
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+		if err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("create extracted candidate: %w", err)
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			_ = out.Close()
+			cleanup()
+			return "", func() {}, fmt.Errorf("extract companion binary: %w", err)
+		}
+		if err := out.Close(); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		if err := os.Chmod(dst, 0o755); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		return dst, cleanup, nil
+	}
+
+	cleanup()
+	return "", func() {}, errors.New("companion binary not found in artifact archive")
 }
 
 func copyFile(src string, dst string, perm os.FileMode) error {

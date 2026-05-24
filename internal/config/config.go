@@ -213,7 +213,7 @@ func Default() Config {
 		UpdateManifestPath:     "",
 		UpdateReleaseAPI:       "https://api.github.com",
 		UpdateReleaseRepo:      strings.TrimSpace(BuildReleaseRepo),
-		UpdateReleaseAsset:     "companion",
+		UpdateReleaseAsset:     "companion.tar.gz",
 		UpdateServiceScript:    "/etc/init.d/companion",
 		UpdateHealthTimeoutSec: 8,
 		MuteEnabled:            true,
@@ -517,8 +517,8 @@ func (c *Config) normalize() {
 	if c.UpdateReleaseAPI == "" {
 		c.UpdateReleaseAPI = "https://api.github.com"
 	}
-	if c.UpdateReleaseAsset == "" {
-		c.UpdateReleaseAsset = "companion"
+	if c.UpdateReleaseAsset == "" || c.UpdateReleaseAsset == "companion" {
+		c.UpdateReleaseAsset = "companion.tar.gz"
 	}
 	if c.UpdateServiceScript == "" {
 		c.UpdateServiceScript = "/etc/init.d/companion"
