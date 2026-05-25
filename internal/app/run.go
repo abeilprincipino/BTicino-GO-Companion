@@ -33,7 +33,10 @@ import (
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
 	"bticino-go-companion/internal/services/update"
+	"bticino-go-companion/internal/services/webrtc"
 	"bticino-go-companion/internal/system"
+
+	"github.com/pion/rtp"
 )
 
 const (
@@ -42,7 +45,7 @@ const (
 	updateRetryBaseDelay  = 2 * time.Minute
 	updateRetryMaxDelay   = 1 * time.Hour
 
-	rtspViewerSnapshotTimeout = 15 * time.Second
+	streamStartSnapshotTimeout = 15 * time.Second
 )
 
 func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
@@ -223,6 +226,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.MediaRTPVideoPort,
 	)
 	mediaService := media.NewService(mediaBackend)
+	var rtspServer *rtspadapter.Server
 	var snapshotService *snapshot.Service
 	mediaService.SetTransitionSink(func(tr media.Transition) {
 		if strings.TrimSpace(tr.Kind) == "" {
@@ -242,14 +246,22 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			EntrypointID: strings.TrimSpace(tr.EntrypointID),
 			Payload:      payload,
 		})
+		handleStreamTransitionSideEffects(rtspServer, snapshotService, logger, tr)
 	})
 
-	var rtspServer *rtspadapter.Server
+	var webrtcSvc *webrtc.Service
 	if cfg.MediaRTSPEnabled {
 		rtspServer = rtspadapter.NewServer(cfg, logger, mediaService)
 		snapshotService = snapshot.New(cfg, mediaService, rtspServer, logger)
-		rtspServer.SetOnEntrypointFirstViewer(func(entrypointID string) {
-			go captureSnapshotForRTSPViewer(snapshotService, logger, entrypointID)
+		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg.Entrypoints)
+		if err != nil {
+			return fmt.Errorf("init webrtc service: %w", err)
+		}
+		rtspServer.SetOnVideoPacketRTP(func(pkt *rtp.Packet) {
+			webrtcSvc.WriteVideoRTP(pkt)
+		})
+		rtspServer.SetOnAudioPacketRTP(func(pkt *rtp.Packet) {
+			webrtcSvc.WriteAudioRTP(pkt)
 		})
 		if err := rtspServer.Start(ctx); err != nil {
 			return fmt.Errorf("start rtsp server: %w", err)
@@ -292,6 +304,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		updateManager,
 		diagnosticsService,
 		snapshotService,
+		webrtcSvc,
 	)
 	srv.Handler = router.Handler()
 
@@ -519,7 +532,21 @@ func setIfNonEmpty(dst *string, value string) bool {
 	return true
 }
 
-func captureSnapshotForRTSPViewer(snapshotService *snapshot.Service, logger *log.Logger, entrypointID string) {
+func handleStreamTransitionSideEffects(rtspServer *rtspadapter.Server, snapshotService *snapshot.Service, logger *log.Logger, tr media.Transition) {
+	switch strings.TrimSpace(tr.Kind) {
+	case "stream.started":
+		if rtspServer != nil {
+			rtspServer.OnStreamStarted()
+		}
+		go captureSnapshotForStreamStart(snapshotService, logger, tr.EntrypointID)
+	case "stream.stopped":
+		if rtspServer != nil {
+			rtspServer.OnStreamStopped()
+		}
+	}
+}
+
+func captureSnapshotForStreamStart(snapshotService *snapshot.Service, logger *log.Logger, entrypointID string) {
 	if snapshotService == nil {
 		return
 	}
@@ -527,7 +554,7 @@ func captureSnapshotForRTSPViewer(snapshotService *snapshot.Service, logger *log
 	if normalizedEntrypointID == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), rtspViewerSnapshotTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), streamStartSnapshotTimeout)
 	defer cancel()
 	if _, err := snapshotService.Capture(ctx, normalizedEntrypointID); err != nil {
 		switch {
@@ -536,11 +563,11 @@ func captureSnapshotForRTSPViewer(snapshotService *snapshot.Service, logger *log
 			errors.Is(err, media.ErrEntrypointSwitchBlocked),
 			errors.Is(err, snapshot.ErrActiveEntrypointBlocked):
 			if logger != nil {
-				logger.Printf("rtsp first-viewer snapshot skipped entrypoint=%s err=%v", normalizedEntrypointID, err)
+				logger.Printf("stream-start snapshot skipped entrypoint=%s err=%v", normalizedEntrypointID, err)
 			}
 		default:
 			if logger != nil {
-				logger.Printf("rtsp first-viewer snapshot failed entrypoint=%s err=%v", normalizedEntrypointID, err)
+				logger.Printf("stream-start snapshot failed entrypoint=%s err=%v", normalizedEntrypointID, err)
 			}
 		}
 	}

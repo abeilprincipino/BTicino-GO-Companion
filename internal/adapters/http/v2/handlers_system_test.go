@@ -61,7 +61,7 @@ func newAuthedRouterWithDeps(t *testing.T, cfg config.Config, systemSvc *systemc
 	authStore, token := newClaimedAuth(t)
 	projector := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	ctrl := control.New(projector.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, authStore, projector, ctrl, events.New(32), newTestRuntimeStatus(), trace.New(32), systemSvc, updateMgr, nil, nil)
+	r := NewRouter(cfg, authStore, projector, ctrl, events.New(32), newTestRuntimeStatus(), trace.New(32), systemSvc, updateMgr, nil, nil, nil)
 	return r, token
 }
 

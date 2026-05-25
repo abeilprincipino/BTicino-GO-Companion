@@ -164,6 +164,10 @@ companion_firewall_ports() {
 	printf '%s\n' "8080 8554"
 }
 
+companion_firewall_udp_ports() {
+	printf '%s\n' "5353 8555"
+}
+
 ensure_persistent_firewall_port_value() {
 	hook="/etc/network/if-pre-up.d/iptables"
 	port="$1"
@@ -254,7 +258,7 @@ ensure_persistent_firewall_udp_port_value() {
 	if awk -v port="${port}" '
 		BEGIN { patched=0 }
 		/^#disable all other stuff/ && !patched {
-			print "# companion mdns discovery"
+			print "# companion udp service"
 			print "iptables -A INPUT -p udp -m udp --dport " port " -j ACCEPT"
 			print ""
 			patched=1
@@ -264,17 +268,17 @@ ensure_persistent_firewall_udp_port_value() {
 	' "${hook}" > "${tmp}"; then
 		cp "${tmp}" "${hook}"
 		rm -f "${tmp}"
-		log "Persisted companion mDNS firewall port ${port} in ${hook}."
+		log "Persisted companion UDP firewall port ${port} in ${hook}."
 		return 0
 	fi
 
 	rc=$?
 	rm -f "${tmp}"
 	if [ "${rc}" -eq 42 ]; then
-		warn "could not find firewall policy marker in ${hook}; no mDNS persistent patch applied."
+		warn "could not find firewall policy marker in ${hook}; no UDP persistent patch applied."
 		return 0
 	fi
-	warn "failed to patch ${hook} for companion mDNS port ${port}."
+	warn "failed to patch ${hook} for companion UDP port ${port}."
 	return 0
 }
 
@@ -282,7 +286,9 @@ ensure_persistent_firewall_ports() {
 	for port in $(companion_firewall_ports); do
 		ensure_persistent_firewall_port_value "${port}"
 	done
-	ensure_persistent_firewall_udp_port_value 5353
+	for port in $(companion_firewall_udp_ports); do
+		ensure_persistent_firewall_udp_port_value "${port}"
+	done
 }
 
 install_binary() {

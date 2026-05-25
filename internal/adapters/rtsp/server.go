@@ -80,7 +80,8 @@ type Server struct {
 	snapshotMirrorWarmupDoneFrames int
 	snapshotMirrorWaitForIDR       bool
 
-	onEntrypointFirstViewer func(entrypointID string)
+	onVideoPacketRTP func(*rtp.Packet)
+	onAudioPacketRTP func(*rtp.Packet)
 }
 
 func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Server {
@@ -204,24 +205,13 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 
 	s.mu.Lock()
-	hadEntrypointReader := s.hasEntrypointReaderLocked(entrypointID)
 	s.readers[ctx.Session] = readerInfo{
 		SessionID:    sessionID,
 		EntrypointID: entrypointID,
 		DevAddr:      devAddr,
 		LastSeen:     time.Now(),
 	}
-	onFirstViewer := s.onEntrypointFirstViewer
-	shouldStartBridge := s.audioBridge.Enabled() && s.bridgeCtx != nil && len(s.readers) == 1
 	s.mu.Unlock()
-	if !hadEntrypointReader && onFirstViewer != nil {
-		onFirstViewer(entrypointID)
-	}
-	if shouldStartBridge {
-		if err := s.audioBridge.Start(s.bridgeCtx); err != nil {
-			s.logf("audio bridge start failed: %v", err)
-		}
-	}
 
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		if medi != s.backMed {
@@ -252,9 +242,15 @@ func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 	s.removeReader(ctx.Session)
 }
 
-func (s *Server) SetOnEntrypointFirstViewer(fn func(entrypointID string)) {
+func (s *Server) SetOnVideoPacketRTP(fn func(*rtp.Packet)) {
 	s.mu.Lock()
-	s.onEntrypointFirstViewer = fn
+	s.onVideoPacketRTP = fn
+	s.mu.Unlock()
+}
+
+func (s *Server) SetOnAudioPacketRTP(fn func(*rtp.Packet)) {
+	s.mu.Lock()
+	s.onAudioPacketRTP = fn
 	s.mu.Unlock()
 }
 
@@ -387,6 +383,13 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 	}
 	if mediaType == description.MediaTypeVideo {
 		s.writeSnapshotMirror(pkt)
+		if cb := s.videoPacketCallback(); cb != nil {
+			cb(pkt)
+		}
+	} else if mediaType == description.MediaTypeAudio {
+		if cb := s.audioPacketCallback(); cb != nil {
+			cb(pkt)
+		}
 	}
 
 	s.mu.RLock()
@@ -493,6 +496,9 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 		if pkt.PayloadType != expectedPayloadType {
 			continue
 		}
+		if cb := s.audioPacketCallback(); cb != nil {
+			cb(&pkt)
+		}
 
 		s.mu.RLock()
 		stream := s.stream
@@ -505,6 +511,34 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 			s.logf("audio bridge opus stream write failed: %v", err)
 		}
 	}
+}
+
+func (s *Server) WriteBackchannelOpus(pkt *rtp.Packet) error {
+	if pkt == nil {
+		return nil
+	}
+
+	if s.audioBridge.Enabled() {
+		pkt.PayloadType = s.audioBridge.BackchannelOpusPayloadType()
+		return s.audioBridge.WriteBackchannelOpus(pkt)
+	}
+
+	pkt.PayloadType = rtpPayloadTypeSpeexBackchannel
+	return s.returnAudio.WriteRTP(pkt)
+}
+
+func (s *Server) BackchannelOpusPayloadType() uint8 {
+	if s.audioBridge == nil {
+		return rtpPayloadTypeSpeexBackchannel
+	}
+	return s.audioBridge.BackchannelOpusPayloadType()
+}
+
+func (s *Server) OpusPayloadType() uint8 {
+	if s.audioBridge == nil {
+		return rtpPayloadTypeSpeex
+	}
+	return s.audioBridge.OpusPayloadType()
 }
 
 func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
@@ -762,25 +796,36 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 	if ok {
 		delete(s.readers, sess)
 	}
-	shouldStopBridge := ok && s.audioBridge.Enabled() && len(s.readers) == 0
 	s.mu.Unlock()
 	if ok {
 		stopCtx, cancel := context.WithTimeout(context.Background(), streamAutostopTimeout)
 		_ = s.transport.OnPause(stopCtx, info.SessionID)
 		cancel()
-		if shouldStopBridge {
-			_ = s.audioBridge.Stop(context.Background())
-		}
 	}
 }
 
-func (s *Server) hasEntrypointReaderLocked(entrypointID string) bool {
-	for _, info := range s.readers {
-		if info.EntrypointID == entrypointID {
-			return true
-		}
+func (s *Server) OnStreamStarted() {
+	if s == nil || !s.audioBridge.Enabled() {
+		return
 	}
-	return false
+	s.mu.RLock()
+	bridgeCtx := s.bridgeCtx
+	s.mu.RUnlock()
+	if bridgeCtx == nil {
+		return
+	}
+	if err := s.audioBridge.Start(bridgeCtx); err != nil {
+		s.logf("audio bridge start failed: %v", err)
+	}
+}
+
+func (s *Server) OnStreamStopped() {
+	if s == nil || !s.audioBridge.Enabled() {
+		return
+	}
+	if err := s.audioBridge.Stop(context.Background()); err != nil {
+		s.logf("audio bridge stop failed: %v", err)
+	}
 }
 
 func (s *Server) touchReader(sess *gortsplib.ServerSession) {
@@ -822,6 +867,18 @@ func (s *Server) logf(format string, args ...any) {
 	if s.logger != nil {
 		s.logger.Printf(format, args...)
 	}
+}
+
+func (s *Server) videoPacketCallback() func(*rtp.Packet) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.onVideoPacketRTP
+}
+
+func (s *Server) audioPacketCallback() func(*rtp.Packet) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.onAudioPacketRTP
 }
 
 func sortedRoutePaths(routes map[string]entrypoint.StreamRoute) []string {

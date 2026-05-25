@@ -87,62 +87,6 @@ func TestServerPathAndLifecycleHooks(t *testing.T) {
 	}
 }
 
-func TestServerOnPlayFirstViewerHook(t *testing.T) {
-	cfg := config.Default()
-	cfg.Entrypoints = []entrypoint.Model{
-		{ID: "gate1", DevAddr: "20", HasStream: true},
-		{ID: "gate2", DevAddr: "21", HasStream: true},
-	}
-
-	rec := &lifecycleRecorder{}
-	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
-
-	var firstViewerEntrypoints []string
-	s.SetOnEntrypointFirstViewer(func(entrypointID string) {
-		firstViewerEntrypoints = append(firstViewerEntrypoints, entrypointID)
-	})
-
-	sessionA := &gortsplib.ServerSession{}
-	sessionB := &gortsplib.ServerSession{}
-	sessionC := &gortsplib.ServerSession{}
-	sessionD := &gortsplib.ServerSession{}
-
-	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionA}); err != nil {
-		t.Fatalf("on play gate1 sessionA failed: %v", err)
-	}
-	if len(firstViewerEntrypoints) != 1 || firstViewerEntrypoints[0] != "gate1" {
-		t.Fatalf("expected first-viewer callback for gate1 once, got %+v", firstViewerEntrypoints)
-	}
-
-	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionB}); err != nil {
-		t.Fatalf("on play gate1 sessionB failed: %v", err)
-	}
-	if len(firstViewerEntrypoints) != 1 {
-		t.Fatalf("expected no additional callback while gate1 already has readers, got %+v", firstViewerEntrypoints)
-	}
-
-	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate2", Session: sessionC}); err != nil {
-		t.Fatalf("on play gate2 sessionC failed: %v", err)
-	}
-	if len(firstViewerEntrypoints) != 2 || firstViewerEntrypoints[1] != "gate2" {
-		t.Fatalf("expected first-viewer callback for gate2, got %+v", firstViewerEntrypoints)
-	}
-
-	if _, err := s.OnPause(&gortsplib.ServerHandlerOnPauseCtx{Session: sessionA}); err != nil {
-		t.Fatalf("on pause gate1 sessionA failed: %v", err)
-	}
-	if _, err := s.OnPause(&gortsplib.ServerHandlerOnPauseCtx{Session: sessionB}); err != nil {
-		t.Fatalf("on pause gate1 sessionB failed: %v", err)
-	}
-
-	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: sessionD}); err != nil {
-		t.Fatalf("on play gate1 sessionD failed: %v", err)
-	}
-	if len(firstViewerEntrypoints) != 3 || firstViewerEntrypoints[2] != "gate1" {
-		t.Fatalf("expected gate1 callback again after all gate1 readers left, got %+v", firstViewerEntrypoints)
-	}
-}
-
 func TestServerOnPlayIsIdempotentPerSession(t *testing.T) {
 	cfg := config.Default()
 	cfg.Entrypoints = []entrypoint.Model{

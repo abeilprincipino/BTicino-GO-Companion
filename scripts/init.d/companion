@@ -26,7 +26,7 @@ tcp_listen_ports() {
 }
 
 udp_listen_ports() {
-	echo "5353"
+	echo "5353 8555"
 }
 
 ensure_firewall_rule() {

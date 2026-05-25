@@ -14,6 +14,7 @@ import (
 	"bticino-go-companion/internal/services/systemcontrol"
 	"bticino-go-companion/internal/services/trace"
 	"bticino-go-companion/internal/services/update"
+	"bticino-go-companion/internal/services/webrtc"
 )
 
 type Router struct {
@@ -28,6 +29,7 @@ type Router struct {
 	update  *update.Manager
 	diag    *diagnostics.Service
 	snap    *snapshot.Service
+	webrtc  *webrtc.Service
 }
 
 func NewRouter(
@@ -42,6 +44,7 @@ func NewRouter(
 	updateManager *update.Manager,
 	diagnosticsService *diagnostics.Service,
 	snapshotService *snapshot.Service,
+	webrtcService *webrtc.Service,
 ) *Router {
 	return &Router{
 		cfg:     cfg,
@@ -55,6 +58,7 @@ func NewRouter(
 		update:  updateManager,
 		diag:    diagnosticsService,
 		snap:    snapshotService,
+		webrtc:  webrtcService,
 	}
 }
 
@@ -103,5 +107,8 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v2/control/system/update/check", r.withBearer(r.handleSystemUpdateCheck))
 	mux.HandleFunc("POST /api/v2/control/system/update/apply", r.withBearer(r.handleSystemUpdateApply))
 	mux.HandleFunc("POST /api/v2/control/system/update/rollback", r.withBearer(r.handleSystemUpdateRollback))
+	mux.HandleFunc("POST /api/v2/webrtc/offer", r.withBearer(r.handleWebRTCOffer))
+	mux.HandleFunc("POST /api/v2/webrtc/candidate", r.withBearer(r.handleWebRTCCandidate))
+	mux.HandleFunc("POST /api/v2/webrtc/close", r.withBearer(r.handleWebRTCClose))
 	return mux
 }

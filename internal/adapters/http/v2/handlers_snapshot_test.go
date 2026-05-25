@@ -28,7 +28,7 @@ func TestEntrypointSnapshotLatestAndUnavailableCapture(t *testing.T) {
 	projector := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(projector.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
 	snapSvc := snapshot.New(cfg, nil, nil, nil)
-	r := NewRouter(cfg, authStore, projector, ctrl, events.New(16), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, snapSvc)
+	r := NewRouter(cfg, authStore, projector, ctrl, events.New(16), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, snapSvc, nil)
 
 	snapshotDir := filepath.Join(cfg.DataDir, "media", "snapshots")
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
@@ -67,4 +67,3 @@ func TestEntrypointSnapshotLatestAndUnavailableCapture(t *testing.T) {
 		t.Fatalf("unexpected error code: %v", errPayload)
 	}
 }
-
