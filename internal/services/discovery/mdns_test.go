@@ -2,7 +2,6 @@ package discovery
 
 import (
 	"context"
-	"net"
 	"testing"
 
 	"bticino-go-companion/internal/config"
@@ -91,19 +90,6 @@ func TestTXTRecordsIncludeHomeAssistantDiscoveryHints(t *testing.T) {
 	}
 }
 
-func TestAddrContainsIP(t *testing.T) {
-	_, network, err := net.ParseCIDR("10.0.0.172/24")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !addrContainsIP(network, net.ParseIP("10.0.0.172")) {
-		t.Fatal("expected network to contain IP")
-	}
-	if addrContainsIP(network, net.ParseIP("192.168.129.1")) {
-		t.Fatal("did not expect network to contain USB-side IP")
-	}
-}
-
 func testConfig() config.Config {
 	cfg := config.Default()
 	cfg.DeviceModel = "C300X"
@@ -139,17 +125,6 @@ func TestNormalizeNameAndTXT(t *testing.T) {
 	if got := normalizeName(" "); got != "" {
 		t.Fatalf("expected empty normalizeName for blank input, got %q", got)
 	}
-}
-
-func TestInterfaceHelpersDefensivePaths(t *testing.T) {
-	iface, ok := interfaceForIP(nil)
-	if ok || iface.Name != "" {
-		t.Fatalf("expected no interface for nil ip, got iface=%+v ok=%v", iface, ok)
-	}
-
-	// Ensure helper paths are safe to call in tests across environments.
-	_ = outboundIPv4()
-	_ = advertisementInterfaces()
 }
 
 func TestStartDisabledReturnsImmediately(t *testing.T) {

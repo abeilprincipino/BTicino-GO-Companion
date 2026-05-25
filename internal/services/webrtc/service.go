@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/system"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/rtp"
@@ -27,6 +28,7 @@ const (
 )
 
 var webrtcICEPort = 8555
+var preferredOutboundInterface = system.PreferredOutboundInterface
 
 var (
 	ErrSessionIDRequired  = errors.New("session_id is required")
@@ -135,9 +137,16 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 		return nil, fmt.Errorf("listen webrtc ice udp %d: %w", webrtcICEPort, err)
 	}
 	udpMux := ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: iceConn})
+	iface, _, err := preferredOutboundInterface()
+	if err != nil {
+		return nil, fmt.Errorf("select webrtc interface: %w", err)
+	}
 
 	se := webrtc.SettingEngine{}
 	se.SetICEUDPMux(udpMux)
+	se.SetInterfaceFilter(func(name string) bool {
+		return name == iface.Name
+	})
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(me),
 		webrtc.WithSettingEngine(se),

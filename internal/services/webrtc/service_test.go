@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +12,14 @@ import (
 func newServiceForTest(t *testing.T) *Service {
 	t.Helper()
 	origPort := webrtcICEPort
+	origPreferred := preferredOutboundInterface
 	webrtcICEPort = 0
+	preferredOutboundInterface = func() (net.Interface, net.IP, error) {
+		return net.Interface{Name: "lo"}, net.ParseIP("127.0.0.1"), nil
+	}
 	t.Cleanup(func() {
 		webrtcICEPort = origPort
+		preferredOutboundInterface = origPreferred
 	})
 	svc, err := New(nil, nil, nil, nil)
 	if err != nil {

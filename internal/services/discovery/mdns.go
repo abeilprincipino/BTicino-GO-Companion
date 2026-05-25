@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/system"
 	"github.com/grandcat/zeroconf"
 )
 
@@ -107,7 +109,11 @@ func Start(
 }
 
 func register(service string, port int, cfg config.Config, state advertisementState) (*zeroconf.Server, error) {
-	return zeroconf.Register(state.instanceName, service, "local.", port, txtRecords(cfg, state), advertisementInterfaces())
+	iface, _, err := system.PreferredOutboundInterface()
+	if err != nil {
+		return nil, fmt.Errorf("select mdns interface: %w", err)
+	}
+	return zeroconf.Register(state.instanceName, service, "local.", port, txtRecords(cfg, state), []net.Interface{iface})
 }
 
 func txtRecords(cfg config.Config, state advertisementState) []string {
@@ -187,68 +193,6 @@ func parseValidPort(raw string) (int, bool) {
 		return 0, false
 	}
 	return port, true
-}
-
-func advertisementInterfaces() []net.Interface {
-	ip := outboundIPv4()
-	if ip == nil {
-		return nil
-	}
-	iface, ok := interfaceForIP(ip)
-	if !ok {
-		return nil
-	}
-	return []net.Interface{iface}
-}
-
-func outboundIPv4() net.IP {
-	conn, err := net.Dial("udp4", "8.8.8.8:80")
-	if err != nil {
-		return nil
-	}
-	defer conn.Close()
-
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return nil
-	}
-	return addr.IP.To4()
-}
-
-func interfaceForIP(ip net.IP) (net.Interface, bool) {
-	if ip == nil {
-		return net.Interface{}, false
-	}
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return net.Interface{}, false
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			if addrContainsIP(addr, ip) {
-				return iface, true
-			}
-		}
-	}
-	return net.Interface{}, false
-}
-
-func addrContainsIP(addr net.Addr, ip net.IP) bool {
-	switch typed := addr.(type) {
-	case *net.IPNet:
-		return typed.Contains(ip)
-	case *net.IPAddr:
-		return typed.IP.Equal(ip)
-	default:
-		return false
-	}
 }
 
 func normalizeName(raw string) string {
