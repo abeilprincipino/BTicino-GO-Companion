@@ -71,6 +71,43 @@ func TestSaveLoadPersistsDeviceModel(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultStreamDevAddr(t *testing.T) {
+	if got := ResolveDefaultStreamDevAddr("C300X", "20"); got != "20" {
+		t.Fatalf("expected C300X stream devaddr fallback 20, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("C100X", "20"); got != "20" {
+		t.Fatalf("expected C100X stream devaddr fallback 20 when modules file is absent, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("", ""); got != "20" {
+		t.Fatalf("expected empty stream devaddr fallback 20, got %q", got)
+	}
+}
+
+func TestDetectC100XStreamDevAddr(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "mymodules")
+	originalPath := c100xModulesPath
+	c100xModulesPath = path
+	t.Cleanup(func() { c100xModulesPath = originalPath })
+
+	body := `{
+  "modules": [
+    {"id": "12", "system": "videodoorentry", "deviceType": "EU", "privateAddress": {"addressValues": [{"value": "20"}] }},
+    {"id": "34", "system": "lighting", "deviceType": "EU", "privateAddress": {"addressValues": [{"value": "20"}] }}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write modules file: %v", err)
+	}
+
+	if got := detectC100XStreamDevAddr(); got != "12" {
+		t.Fatalf("expected detected C100X stream devaddr 12, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("C100X", "20"); got != "12" {
+		t.Fatalf("expected C100X stream devaddr 12, got %q", got)
+	}
+}
+
 func TestSaveLoadDoesNotPersistRuntimeDiagnosticMetadata(t *testing.T) {
 	tDir := t.TempDir()
 	path := filepath.Join(tDir, "config.json")

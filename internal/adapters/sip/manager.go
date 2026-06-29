@@ -350,7 +350,8 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	if err != nil {
 		return err
 	}
-	if target.AddDevAddr && strings.TrimSpace(devAddr) == "" {
+	streamDevAddr := config.ResolveDefaultStreamDevAddr(m.cfg.DeviceModel, devAddr)
+	if target.AddDevAddr && strings.TrimSpace(streamDevAddr) == "" {
 		return errors.New("empty stream devaddr")
 	}
 
@@ -378,7 +379,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 		inviteReq.SetDestination(target.Destination)
 	}
 	inviteReq.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	inviteReq.SetBody([]byte(m.offerSDP(target.AddDevAddr, devAddr)))
+	inviteReq.SetBody([]byte(m.offerSDP(target.AddDevAddr, streamDevAddr)))
 
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()
