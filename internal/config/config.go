@@ -499,9 +499,6 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.MediaSIPFrom) == "" {
 		c.MediaSIPFrom = "webrtc@127.0.0.1"
 	}
-	if strings.TrimSpace(c.MediaSIPTo) == "" {
-		c.MediaSIPTo = "c300x@127.0.0.1"
-	}
 	if strings.TrimSpace(c.MediaRTSPAddress) == "" {
 		c.MediaRTSPAddress = ":8554"
 	}

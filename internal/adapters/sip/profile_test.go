@@ -52,3 +52,42 @@ func TestResolveSIPConfigFromFlexisipProfile(t *testing.T) {
 		t.Fatalf("unexpected auth user: %s", resolved.MediaSIPAuthUser)
 	}
 }
+
+func TestResolveSIPConfigUsesModelTarget(t *testing.T) {
+	originalDomainPaths := flexisipDomainRegistrationPaths
+	originalConfigPaths := flexisipConfigPaths
+	originalUsersPaths := flexisipUsersDBPaths
+	flexisipDomainRegistrationPaths = []string{}
+	flexisipConfigPaths = []string{}
+	flexisipUsersDBPaths = []string{}
+	t.Cleanup(func() {
+		flexisipDomainRegistrationPaths = originalDomainPaths
+		flexisipConfigPaths = originalConfigPaths
+		flexisipUsersDBPaths = originalUsersPaths
+	})
+
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "c300x", model: "C300X", want: "c300x@127.0.0.1"},
+		{name: "c100x", model: "C100X", want: "c100x@127.0.0.1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.DeviceModel = tc.model
+			cfg.MediaSIPTo = ""
+
+			resolved, err := resolveSIPConfig(cfg)
+			if err != nil {
+				t.Fatalf("resolveSIPConfig failed: %v", err)
+			}
+			if resolved.MediaSIPTo != tc.want {
+				t.Fatalf("expected target %q, got %q", tc.want, resolved.MediaSIPTo)
+			}
+		})
+	}
+}
