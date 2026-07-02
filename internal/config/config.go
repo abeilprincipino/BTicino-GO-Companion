@@ -63,6 +63,12 @@ type Config struct {
 	MediaRTSPAddress          string
 	MediaRTPAudioPort         int
 	MediaRTPVideoPort         int
+	MediaAVEndpointEnabled    *bool
+	MediaAVEndpointHost       string
+	MediaAVEndpointPort       int
+	MediaAVHighResVideo       bool
+	DebugLogEnabled           bool
+	DebugLogPath              string
 	VoicemailMessagesDir      string
 
 	SystemRebootEnabled       bool
@@ -146,11 +152,25 @@ type PersistedCompanionConfig struct {
 	Entrypoints []entrypoint.Model        `json:"entrypoints"`
 	Audio       PersistedCompanionAudio   `json:"audio"`
 	Voicemail   PersistedCompanionMailbox `json:"voicemail"`
+	Media       PersistedCompanionMedia   `json:"media"`
+	Debug       PersistedCompanionDebug   `json:"debug"`
 }
 
 type PersistedCompanionAudio struct {
 	Enabled *bool `json:"enabled,omitempty"`
 	Exposed *bool `json:"exposed,omitempty"`
+}
+
+type PersistedCompanionMedia struct {
+	AVEndpointEnabled *bool  `json:"av_endpoint_enabled,omitempty"`
+	AVEndpointHost    string `json:"av_endpoint_host,omitempty"`
+	AVEndpointPort    *int   `json:"av_endpoint_port,omitempty"`
+	AVHighResVideo    *bool  `json:"av_high_res_video,omitempty"`
+}
+
+type PersistedCompanionDebug struct {
+	LogEnabled *bool  `json:"log_enabled,omitempty"`
+	LogPath    string `json:"log_path,omitempty"`
 }
 
 type PersistedCompanionMailbox struct {
@@ -199,6 +219,12 @@ func Default() Config {
 		MediaRTSPAddress:          ":8554",
 		MediaRTPAudioPort:         5000,
 		MediaRTPVideoPort:         5007,
+		MediaAVEndpointEnabled:    nil,
+		MediaAVEndpointHost:       "127.0.0.1",
+		MediaAVEndpointPort:       30007,
+		MediaAVHighResVideo:       false,
+		DebugLogEnabled:           false,
+		DebugLogPath:              "/tmp/companion-debug.log",
 		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
 		SystemRebootEnabled:       true,
 		SystemUpdateEnabled:       true,
@@ -311,6 +337,19 @@ func Load(path string) (Config, error) {
 	cfg.VoicemailEnabled = boolFromPtr(persisted.Companion.Config.Voicemail.Enabled, cfg.VoicemailEnabled)
 	cfg.ExposeVoicemailToggle = boolFromPtr(persisted.Companion.Config.Voicemail.Exposed, cfg.ExposeVoicemailToggle)
 
+	cfg.MediaAVEndpointEnabled = persisted.Companion.Config.Media.AVEndpointEnabled
+	if strings.TrimSpace(persisted.Companion.Config.Media.AVEndpointHost) != "" {
+		cfg.MediaAVEndpointHost = strings.TrimSpace(persisted.Companion.Config.Media.AVEndpointHost)
+	}
+	if persisted.Companion.Config.Media.AVEndpointPort != nil && *persisted.Companion.Config.Media.AVEndpointPort > 0 {
+		cfg.MediaAVEndpointPort = *persisted.Companion.Config.Media.AVEndpointPort
+	}
+	cfg.MediaAVHighResVideo = boolFromPtr(persisted.Companion.Config.Media.AVHighResVideo, cfg.MediaAVHighResVideo)
+	cfg.DebugLogEnabled = boolFromPtr(persisted.Companion.Config.Debug.LogEnabled, cfg.DebugLogEnabled)
+	if strings.TrimSpace(persisted.Companion.Config.Debug.LogPath) != "" {
+		cfg.DebugLogPath = strings.TrimSpace(persisted.Companion.Config.Debug.LogPath)
+	}
+
 	cfg.normalize()
 	return cfg, nil
 }
@@ -365,6 +404,16 @@ func Save(path string, cfg Config) error {
 					MessagesDir: strings.TrimSpace(cfg.VoicemailMessagesDir),
 					Enabled:     boolPtr(cfg.VoicemailEnabled),
 					Exposed:     boolPtr(cfg.ExposeVoicemailToggle),
+				},
+				Media: PersistedCompanionMedia{
+					AVEndpointEnabled: cfg.MediaAVEndpointEnabled,
+					AVEndpointHost:    strings.TrimSpace(cfg.MediaAVEndpointHost),
+					AVEndpointPort:    intPtrPositive(cfg.MediaAVEndpointPort),
+					AVHighResVideo:    boolPtr(cfg.MediaAVHighResVideo),
+				},
+				Debug: PersistedCompanionDebug{
+					LogEnabled: boolPtr(cfg.DebugLogEnabled),
+					LogPath:    strings.TrimSpace(cfg.DebugLogPath),
 				},
 			},
 		},
@@ -496,6 +545,15 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.MediaSIPListen) == "" {
 		c.MediaSIPListen = "0.0.0.0:5070"
 	}
+	if strings.TrimSpace(c.MediaAVEndpointHost) == "" {
+		c.MediaAVEndpointHost = "127.0.0.1"
+	}
+	if c.MediaAVEndpointPort <= 0 || c.MediaAVEndpointPort > 65535 {
+		c.MediaAVEndpointPort = 30007
+	}
+	if strings.TrimSpace(c.DebugLogPath) == "" {
+		c.DebugLogPath = "/tmp/companion-debug.log"
+	}
 	if strings.TrimSpace(c.MediaSIPFrom) == "" {
 		c.MediaSIPFrom = "webrtc@127.0.0.1"
 	}
@@ -566,6 +624,16 @@ func (c *Config) normalize() {
 		c.VoicemailEnabled = false
 		c.ExposeVoicemailToggle = false
 	}
+}
+
+// AVEndpointEnabled reports whether the bt_ipcamera AV endpoint backend is
+// active. An explicit config value always wins; otherwise it is enabled only
+// on the C100X, whose firmware does not honour SDP ingest ports.
+func (c Config) AVEndpointEnabled() bool {
+	if c.MediaAVEndpointEnabled != nil {
+		return *c.MediaAVEndpointEnabled
+	}
+	return strings.EqualFold(strings.TrimSpace(c.DeviceModel), "C100X")
 }
 
 // ResolveDefaultStreamDevAddr returns the SIP SDP DEVADDR for stream setup.

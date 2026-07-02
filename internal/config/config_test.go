@@ -192,3 +192,80 @@ func TestSaveLoadPersistsSystemUpdateControl(t *testing.T) {
 		t.Fatalf("expected persisted release repo owner/repo, got %q", loaded.UpdateReleaseRepo)
 	}
 }
+
+func TestAVEndpointDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.MediaAVEndpointEnabled != nil {
+		t.Fatal("expected av endpoint tri-state default nil (auto)")
+	}
+	if cfg.MediaAVEndpointHost != "127.0.0.1" || cfg.MediaAVEndpointPort != 30007 {
+		t.Fatalf("unexpected av endpoint defaults: %s:%d", cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort)
+	}
+	if cfg.MediaAVHighResVideo {
+		t.Fatal("expected low-res video default")
+	}
+	if cfg.DebugLogEnabled || cfg.DebugLogPath != "/tmp/companion-debug.log" {
+		t.Fatalf("unexpected debug log defaults: enabled=%v path=%s", cfg.DebugLogEnabled, cfg.DebugLogPath)
+	}
+}
+
+func TestAVEndpointEnabledAutoResolution(t *testing.T) {
+	cfg := Default()
+	cfg.DeviceModel = "C100X"
+	if !cfg.AVEndpointEnabled() {
+		t.Fatal("expected auto-enabled on C100X")
+	}
+	cfg.DeviceModel = "c100x"
+	if !cfg.AVEndpointEnabled() {
+		t.Fatal("expected case-insensitive model match")
+	}
+	cfg.DeviceModel = "C300X"
+	if cfg.AVEndpointEnabled() {
+		t.Fatal("expected auto-disabled on C300X")
+	}
+	off := false
+	cfg.DeviceModel = "C100X"
+	cfg.MediaAVEndpointEnabled = &off
+	if cfg.AVEndpointEnabled() {
+		t.Fatal("expected explicit false to win over C100X auto")
+	}
+	on := true
+	cfg.DeviceModel = "C300X"
+	cfg.MediaAVEndpointEnabled = &on
+	if !cfg.AVEndpointEnabled() {
+		t.Fatal("expected explicit true to win over C300X auto")
+	}
+}
+
+func TestAVEndpointAndDebugPersistenceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := Default()
+	on := true
+	port := 31000
+	cfg.MediaAVEndpointEnabled = &on
+	cfg.MediaAVEndpointHost = "127.0.0.2"
+	cfg.MediaAVEndpointPort = port
+	cfg.MediaAVHighResVideo = true
+	cfg.DebugLogEnabled = true
+	cfg.DebugLogPath = "/tmp/custom.log"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.MediaAVEndpointEnabled == nil || !*loaded.MediaAVEndpointEnabled {
+		t.Fatal("av endpoint enabled flag lost in round trip")
+	}
+	if loaded.MediaAVEndpointHost != "127.0.0.2" || loaded.MediaAVEndpointPort != 31000 {
+		t.Fatalf("av endpoint host/port lost: %s:%d", loaded.MediaAVEndpointHost, loaded.MediaAVEndpointPort)
+	}
+	if !loaded.MediaAVHighResVideo {
+		t.Fatal("high-res flag lost in round trip")
+	}
+	if !loaded.DebugLogEnabled || loaded.DebugLogPath != "/tmp/custom.log" {
+		t.Fatalf("debug log settings lost: enabled=%v path=%s", loaded.DebugLogEnabled, loaded.DebugLogPath)
+	}
+}
