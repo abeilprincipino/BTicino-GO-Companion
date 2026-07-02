@@ -68,6 +68,14 @@ type Server struct {
 	paths    map[string]entrypoint.StreamRoute
 	pathList []string
 
+	ingestMu         sync.Mutex
+	ingestFirstSeen  map[description.MediaType]bool
+	ingestBadPT      map[uint8]bool
+	ingestPackets    map[description.MediaType]uint64
+	ingestBytes      map[description.MediaType]uint64
+	ingestLast       time.Time
+	ingestWatchDelay time.Duration
+
 	returnAudio *returnAudioForwarder
 	audioBridge *audiobridge.Service
 	bridgeCtx   context.Context
@@ -94,6 +102,13 @@ func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Serv
 		readers:     map[*gortsplib.ServerSession]readerInfo{},
 		paths:       paths,
 		pathList:    sortedRoutePaths(paths),
+
+		ingestFirstSeen:  map[description.MediaType]bool{},
+		ingestBadPT:      map[uint8]bool{},
+		ingestPackets:    map[description.MediaType]uint64{},
+		ingestBytes:      map[description.MediaType]uint64{},
+		ingestWatchDelay: 3 * time.Second,
+
 		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
 		audioBridge: audiobridge.New(audiobridge.DefaultConfig(cfg.DataDir), logger),
 	}
@@ -142,6 +157,9 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.runBridgeSpeexOutListener(ctx, ports.SpeexOut)
 	} else {
 		go s.runIngestListener(ctx, s.cfg.MediaRTPAudioPort, description.MediaTypeAudio)
+	}
+	if s.cfg.DebugLogEnabled {
+		go s.runIngestStatsLogger(ctx)
 	}
 	go s.watchReaderSessions(ctx)
 
@@ -213,6 +231,8 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 	s.mu.Unlock()
 
+	s.logf("rtsp play session=%s path=%q entrypoint=%s devaddr=%s", sessionID, ctx.Path, entrypointID, devAddr)
+
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		if medi != s.backMed {
 			return
@@ -239,6 +259,7 @@ func (s *Server) OnSetParameter(ctx *gortsplib.ServerHandlerOnSetParameterCtx) (
 }
 
 func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
+	s.logf("rtsp session closed session=%s", sessionID(ctx.Session))
 	s.removeReader(ctx.Session)
 }
 
@@ -342,7 +363,7 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 			s.logf("rtsp ingest set deadline failed media=%v err=%v", mediaType, err)
 		}
-		n, _, err := conn.ReadFromUDP(buf)
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				select {
@@ -364,6 +385,7 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
+		s.noteIngestPacket(mediaType, n, &pkt, src)
 		s.writeIngestPacket(mediaType, &pkt)
 	}
 }
@@ -373,6 +395,7 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 		return
 	}
 	if !isExpectedPayloadType(mediaType, pkt.PayloadType) {
+		s.noteUnexpectedPayloadType(mediaType, pkt.PayloadType)
 		return
 	}
 	if mediaType == description.MediaTypeAudio && s.audioBridge.Enabled() {
@@ -424,6 +447,72 @@ func isExpectedPayloadType(mediaType description.MediaType, payloadType uint8) b
 		return payloadType == rtpPayloadTypeSpeex
 	default:
 		return false
+	}
+}
+
+func (s *Server) noteIngestPacket(mediaType description.MediaType, n int, pkt *rtp.Packet, src *net.UDPAddr) {
+	s.ingestMu.Lock()
+	first := !s.ingestFirstSeen[mediaType]
+	if first {
+		s.ingestFirstSeen[mediaType] = true
+	}
+	s.ingestPackets[mediaType]++
+	s.ingestBytes[mediaType] += uint64(n)
+	s.ingestLast = time.Now()
+	s.ingestMu.Unlock()
+	if first {
+		s.logf("rtsp ingest first packet media=%v src=%s pt=%d ssrc=%d", mediaType, src, pkt.PayloadType, pkt.SSRC)
+	}
+}
+
+func (s *Server) noteUnexpectedPayloadType(mediaType description.MediaType, pt uint8) {
+	s.ingestMu.Lock()
+	logged := s.ingestBadPT[pt]
+	if !logged {
+		s.ingestBadPT[pt] = true
+	}
+	s.ingestMu.Unlock()
+	if !logged {
+		s.logf("rtsp ingest dropping unexpected payload type media=%v pt=%d (logged once)", mediaType, pt)
+	}
+}
+
+// armIngestWatch schedules a one-shot check: if no RTP packet has been
+// ingested within ingestWatchDelay of a stream start, log a loud warning —
+// this is the "PLAY ok but zero frames" signature.
+func (s *Server) armIngestWatch() {
+	armed := time.Now()
+	delay := s.ingestWatchDelay
+	if delay <= 0 {
+		delay = 3 * time.Second
+	}
+	time.AfterFunc(delay, func() {
+		s.ingestMu.Lock()
+		last := s.ingestLast
+		s.ingestMu.Unlock()
+		if last.Before(armed) {
+			s.logf("WARNING: no RTP ingress within %s of stream start (audio port %d / video port %d) — the device is not sending media",
+				delay, s.cfg.MediaRTPAudioPort, s.cfg.MediaRTPVideoPort)
+		}
+	})
+}
+
+func (s *Server) runIngestStatsLogger(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.ingestMu.Lock()
+			vp := s.ingestPackets[description.MediaTypeVideo]
+			ap := s.ingestPackets[description.MediaTypeAudio]
+			vb := s.ingestBytes[description.MediaTypeVideo]
+			ab := s.ingestBytes[description.MediaTypeAudio]
+			s.ingestMu.Unlock()
+			s.logf("rtsp ingest stats video_pkts=%d video_bytes=%d audio_pkts=%d audio_bytes=%d", vp, vb, ap, ab)
+		}
 	}
 }
 
@@ -805,7 +894,11 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 }
 
 func (s *Server) OnStreamStarted() {
-	if s == nil || !s.audioBridge.Enabled() {
+	if s == nil {
+		return
+	}
+	s.armIngestWatch()
+	if !s.audioBridge.Enabled() {
 		return
 	}
 	s.mu.RLock()

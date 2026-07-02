@@ -1,6 +1,7 @@
 package rtspadapter
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -473,5 +474,68 @@ func TestSnapshotMirrorWaitsForWarmupAndIDR(t *testing.T) {
 	}
 	if len(pkt.Payload) < 2 || pkt.Payload[0] != 0x7c || pkt.Payload[1] != 0x85 {
 		t.Fatalf("unexpected mirrored payload: %v", pkt.Payload)
+	}
+}
+
+func TestIngestFirstPacketIsLoggedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(&buf, "", 0), &lifecycleRecorder{})
+
+	pkt := &rtp.Packet{Header: rtp.Header{PayloadType: rtpPayloadTypeH264, SSRC: 42}}
+	s.noteIngestPacket(description.MediaTypeVideo, 100, pkt, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999})
+	s.noteIngestPacket(description.MediaTypeVideo, 100, pkt, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999})
+
+	out := buf.String()
+	if got := strings.Count(out, "first packet"); got != 1 {
+		t.Fatalf("expected exactly one first-packet log, got %d in: %s", got, out)
+	}
+	if !strings.Contains(out, "ssrc=42") {
+		t.Fatalf("first-packet log must include SSRC: %s", out)
+	}
+}
+
+func TestUnexpectedPayloadTypeLoggedOncePerPT(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(&buf, "", 0), &lifecycleRecorder{})
+
+	bad := &rtp.Packet{Header: rtp.Header{PayloadType: 33}}
+	s.writeIngestPacket(description.MediaTypeVideo, bad)
+	s.writeIngestPacket(description.MediaTypeVideo, bad)
+
+	out := buf.String()
+	if got := strings.Count(out, "unexpected payload type"); got != 1 {
+		t.Fatalf("expected exactly one bad-PT log, got %d in: %s", got, out)
+	}
+}
+
+func TestIngestWatchWarnsWhenNoRTPArrives(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(&buf, "", 0), &lifecycleRecorder{})
+	s.ingestWatchDelay = 20 * time.Millisecond
+
+	s.armIngestWatch()
+	time.Sleep(100 * time.Millisecond)
+
+	if !strings.Contains(buf.String(), "no RTP ingress") {
+		t.Fatalf("expected no-RTP warning, got: %s", buf.String())
+	}
+}
+
+func TestIngestWatchSilentWhenRTPArrives(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(&buf, "", 0), &lifecycleRecorder{})
+	s.ingestWatchDelay = 50 * time.Millisecond
+
+	s.armIngestWatch()
+	pkt := &rtp.Packet{Header: rtp.Header{PayloadType: rtpPayloadTypeH264}}
+	s.noteIngestPacket(description.MediaTypeVideo, 100, pkt, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999})
+	time.Sleep(120 * time.Millisecond)
+
+	if strings.Contains(buf.String(), "no RTP ingress") {
+		t.Fatalf("did not expect no-RTP warning, got: %s", buf.String())
 	}
 }
