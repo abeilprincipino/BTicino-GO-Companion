@@ -571,16 +571,26 @@ func (c *Config) normalize() {
 // ResolveDefaultStreamDevAddr returns the SIP SDP DEVADDR for stream setup.
 // C100X stores the video-door-entry module id separately from the lock address.
 func ResolveDefaultStreamDevAddr(deviceModel string, fallback string) string {
+	return ResolveDefaultStreamDevAddrWithSource(deviceModel, fallback).DevAddr
+}
+
+type StreamDevAddrResolution struct {
+	DevAddr string
+	Source  string
+	Path    string
+}
+
+func ResolveDefaultStreamDevAddrWithSource(deviceModel string, fallback string) StreamDevAddrResolution {
 	fallback = strings.TrimSpace(fallback)
 	if strings.EqualFold(strings.TrimSpace(deviceModel), "C100X") {
 		if devAddr := detectC100XStreamDevAddr(); devAddr != "" {
-			return devAddr
+			return StreamDevAddrResolution{DevAddr: devAddr, Source: "bt_eliot", Path: c100xModulesPath}
 		}
 	}
 	if fallback != "" {
-		return fallback
+		return StreamDevAddrResolution{DevAddr: fallback, Source: "fallback"}
 	}
-	return "20"
+	return StreamDevAddrResolution{DevAddr: "20", Source: "default"}
 }
 
 func configAuthState(cfg Config) AuthState {

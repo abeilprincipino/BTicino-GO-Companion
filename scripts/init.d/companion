@@ -15,6 +15,7 @@ SERVICE="companion"
 BASE_DIR="/home/bticino/cfg/extra/companion"
 BIN_PATH="${BASE_DIR}/companion"
 PIDFILE="/var/run/${SERVICE}.pid"
+LOGFILE="/tmp/${SERVICE}.log"
 
 if [ -f /etc/init.d/functions ]; then
 	# shellcheck source=/dev/null
@@ -102,10 +103,11 @@ do_start() {
 		exit 1
 	fi
 	mkdir -p "$(dirname "${PIDFILE}")"
+	: > "${LOGFILE}"
 	cleanup_stale_pidfile
 	ensure_firewall
 	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
-		--pidfile "${PIDFILE}" --exec "${BIN_PATH}" -- >/dev/null 2>&1
+		--pidfile "${PIDFILE}" --exec "${BIN_PATH}" -- >>"${LOGFILE}" 2>&1
 }
 
 do_stop() {

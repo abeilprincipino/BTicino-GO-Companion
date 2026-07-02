@@ -150,6 +150,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.registerWG.Add(1)
 	go m.registrationLoop(registerCtx)
 
+	m.logf("sip profile resolved model=%s transport=%s listen=%s from=%s auth_user=%s auth_pass_set=%v to=%s domain=%s contact=%s", strings.TrimSpace(m.cfg.DeviceModel), transport, listenAddr, strings.TrimSpace(m.cfg.MediaSIPFrom), strings.TrimSpace(m.cfg.MediaSIPAuthUser), strings.TrimSpace(m.cfg.MediaSIPAuthPass) != "", strings.TrimSpace(m.cfg.MediaSIPTo), strings.TrimSpace(m.cfg.MediaSIPDomain), formatContactValue(contact))
 	m.logf("sip manager started transport=%s listen=%s from=%s", transport, listenAddr, m.cfg.MediaSIPFrom)
 	return nil
 }
@@ -339,25 +340,33 @@ func (m *Manager) Answer(ctx context.Context) error {
 }
 
 func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
+	m.logf("sip stream start request model=%s entrypoint_devaddr=%s", strings.TrimSpace(m.cfg.DeviceModel), strings.TrimSpace(devAddr))
 	if !m.enabled {
+		m.logf("sip stream start rejected reason=disabled")
 		return ErrNoActiveCall
 	}
 	if m.out == nil {
+		m.logf("sip stream start rejected reason=dialog_cache_unavailable")
 		return ErrNoActiveCall
 	}
 
 	target, err := sipprotocol.ResolveInviteTarget(m.cfg.MediaSIPTo, m.cfg.MediaSIPDomain, true)
 	if err != nil {
+		m.logf("sip stream target resolve failed to=%s domain=%s err=%v", strings.TrimSpace(m.cfg.MediaSIPTo), strings.TrimSpace(m.cfg.MediaSIPDomain), err)
 		return err
 	}
-	streamDevAddr := config.ResolveDefaultStreamDevAddr(m.cfg.DeviceModel, devAddr)
+	streamDevAddrResolution := config.ResolveDefaultStreamDevAddrWithSource(m.cfg.DeviceModel, devAddr)
+	streamDevAddr := streamDevAddrResolution.DevAddr
+	m.logf("sip stream devaddr model=%s entrypoint_devaddr=%s sdp_devaddr=%s source=%s path=%s", strings.TrimSpace(m.cfg.DeviceModel), strings.TrimSpace(devAddr), strings.TrimSpace(streamDevAddr), streamDevAddrResolution.Source, streamDevAddrResolution.Path)
 	if target.AddDevAddr && strings.TrimSpace(streamDevAddr) == "" {
+		m.logf("sip stream start rejected reason=empty_stream_devaddr")
 		return errors.New("empty stream devaddr")
 	}
 
 	m.mu.Lock()
 	incoming := m.incoming
 	if m.activeIn != nil || m.activeOut != nil || m.dialing {
+		m.logf("sip stream start noop reason=busy incoming=%v active_in=%v active_out=%v dialing=%v", incoming != nil, m.activeIn != nil, m.activeOut != nil, m.dialing)
 		m.mu.Unlock()
 		return nil
 	}
@@ -370,6 +379,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	}()
 
 	if incoming != nil {
+		m.logf("sip stream start answering existing incoming call")
 		return m.Answer(ctx)
 	}
 
@@ -379,15 +389,20 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 		inviteReq.SetDestination(target.Destination)
 	}
 	inviteReq.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	inviteReq.SetBody([]byte(m.offerSDP(target.AddDevAddr, streamDevAddr)))
+	offerSDP := m.offerSDP(target.AddDevAddr, streamDevAddr)
+	inviteReq.SetBody([]byte(offerSDP))
+	m.logf("sip invite prepared uri=%s destination=%s transport=%s add_devaddr=%v sdp_devaddr=%s from=%s auth_user=%s", target.URI.String(), target.Destination, strings.ToUpper(normalizeTransport(m.cfg.MediaSIPTransport)), target.AddDevAddr, strings.TrimSpace(streamDevAddr), strings.TrimSpace(m.cfg.MediaSIPFrom), inviteAuthUser(m.cfg))
+	m.logf("sip offer sdp\n%s", strings.TrimSpace(offerSDP))
 
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()
 
 	dlg, err := m.out.WriteInvite(callCtx, inviteReq)
 	if err != nil {
+		m.logf("sip invite write failed uri=%s destination=%s err=%v", target.URI.String(), target.Destination, err)
 		return fmt.Errorf("outgoing invite failed: %w", err)
 	}
+	m.logf("sip invite sent uri=%s destination=%s waiting_answer_timeout=%s", target.URI.String(), target.Destination, sipAnswerTimeout)
 
 	opts := sipgo.AnswerOptions{
 		Username: inviteAuthUser(m.cfg),
@@ -395,12 +410,16 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	}
 	if err := dlg.WaitAnswer(callCtx, opts); err != nil {
 		_ = dlg.Close()
+		m.logf("sip invite wait_answer failed uri=%s destination=%s auth_user=%s auth_pass_set=%v err=%v", target.URI.String(), target.Destination, opts.Username, opts.Password != "", err)
 		return fmt.Errorf("wait answer failed: %w", err)
 	}
+	m.logf("sip invite answered uri=%s destination=%s", target.URI.String(), target.Destination)
 	if err := dlg.Ack(callCtx); err != nil {
 		_ = dlg.Close()
+		m.logf("sip invite ack failed uri=%s destination=%s err=%v", target.URI.String(), target.Destination, err)
 		return fmt.Errorf("ack failed: %w", err)
 	}
+	m.logf("sip invite ack sent uri=%s destination=%s", target.URI.String(), target.Destination)
 
 	m.mu.Lock()
 	m.activeOut = dlg
@@ -632,11 +651,13 @@ func (m *Manager) shouldRegister(force bool) bool {
 func (m *Manager) registerOnce(ctx context.Context) error {
 	domain := registerDomain(m.cfg)
 	if domain == "" {
+		m.logf("sip register skipped reason=empty_domain")
 		return nil
 	}
 
 	fromUser, _, _ := sipprotocol.ParseFromAddress(m.cfg.MediaSIPFrom)
 	if fromUser == "" {
+		m.logf("sip register failed reason=missing_from_user from=%s", strings.TrimSpace(m.cfg.MediaSIPFrom))
 		return fmt.Errorf("register from user missing")
 	}
 
@@ -649,29 +670,40 @@ func (m *Manager) registerOnce(ctx context.Context) error {
 	req.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", fromUser, domain, sip.GenerateTagN(16))))
 	req.AppendHeader(sip.NewHeader("Contact", formatContactValue(buildContactHeader(m.cfg))))
 	req.AppendHeader(sip.NewHeader("Expires", strconv.Itoa(registerExpires)))
+	m.logf("sip register sending domain=%s from_user=%s contact=%s expires=%d auth_user=%s auth_pass_set=%v", domain, fromUser, formatContactValue(buildContactHeader(m.cfg)), registerExpires, inviteAuthUser(m.cfg), strings.TrimSpace(m.cfg.MediaSIPAuthPass) != "")
 
 	res, err := m.client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
 	if err != nil {
+		m.logf("sip register request failed domain=%s err=%v", domain, err)
 		return err
 	}
 	if res == nil {
+		m.logf("sip register failed domain=%s reason=empty_response", domain)
 		return fmt.Errorf("empty register response")
 	}
+	m.logf("sip register response domain=%s status=%d", domain, res.StatusCode)
 
 	if (res.StatusCode == sip.StatusUnauthorized || res.StatusCode == sip.StatusProxyAuthRequired) && strings.TrimSpace(m.cfg.MediaSIPAuthPass) != "" {
+		m.logf("sip register digest retry domain=%s status=%d auth_user=%s", domain, res.StatusCode, inviteAuthUser(m.cfg))
 		authRes, authErr := m.client.DoDigestAuth(ctx, req, res, sipgo.DigestAuth{
 			Username: inviteAuthUser(m.cfg),
 			Password: strings.TrimSpace(m.cfg.MediaSIPAuthPass),
 		})
 		if authErr != nil {
+			m.logf("sip register digest auth failed domain=%s err=%v", domain, authErr)
 			return fmt.Errorf("register digest auth failed: %w", authErr)
 		}
 		res = authRes
+		if res != nil {
+			m.logf("sip register digest response domain=%s status=%d", domain, res.StatusCode)
+		}
 	}
 
 	if !res.IsSuccess() {
+		m.logf("sip register failed domain=%s status=%d", domain, res.StatusCode)
 		return fmt.Errorf("register failed status=%d", res.StatusCode)
 	}
+	m.logf("sip register succeeded domain=%s status=%d", domain, res.StatusCode)
 	return nil
 }
 

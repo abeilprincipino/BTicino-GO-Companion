@@ -226,12 +226,14 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.MediaRTPVideoPort,
 	)
 	mediaService := media.NewService(mediaBackend)
+	mediaService.SetLogger(logger)
 	var rtspServer *rtspadapter.Server
 	var snapshotService *snapshot.Service
 	mediaService.SetTransitionSink(func(tr media.Transition) {
 		if strings.TrimSpace(tr.Kind) == "" {
 			return
 		}
+		logger.Printf("stream transition kind=%s entrypoint=%s devaddr=%s source=%s reason=%s", strings.TrimSpace(tr.Kind), strings.TrimSpace(tr.EntrypointID), strings.TrimSpace(tr.DevAddr), strings.TrimSpace(tr.Source), strings.TrimSpace(tr.Reason))
 		payload := map[string]any{
 			"source": strings.TrimSpace(tr.Source),
 			"reason": strings.TrimSpace(tr.Reason),

@@ -179,9 +179,11 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
 	entrypointID, devAddr, ok := s.resolveEntrypoint(ctx.Path)
 	if !ok {
+		s.logf("rtsp play rejected path=%s reason=unknown_path", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
 	sessionID := sessionID(ctx.Session)
+	s.logf("rtsp play request session=%s path=%s entrypoint=%s devaddr=%s", sessionID, ctx.Path, entrypointID, devAddr)
 
 	s.mu.Lock()
 	if existing, exists := s.readers[ctx.Session]; exists {
@@ -189,9 +191,11 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 			existing.LastSeen = time.Now()
 			s.readers[ctx.Session] = existing
 			s.mu.Unlock()
+			s.logf("rtsp play noop session=%s entrypoint=%s reason=already_reader", sessionID, entrypointID)
 			return &base.Response{StatusCode: base.StatusOK}, nil
 		}
 		s.mu.Unlock()
+		s.logf("rtsp play rejected session=%s entrypoint=%s existing_entrypoint=%s reason=session_entrypoint_mismatch", sessionID, entrypointID, existing.EntrypointID)
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
 	s.mu.Unlock()
@@ -200,7 +204,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	err := s.transport.OnPlay(startCtx, sessionID, entrypointID, devAddr)
 	cancel()
 	if err != nil {
-		s.logf("rtsp stream autostart failed: %v", err)
+		s.logf("rtsp stream autostart failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
 
@@ -212,6 +216,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 		LastSeen:     time.Now(),
 	}
 	s.mu.Unlock()
+	s.logf("rtsp play accepted session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		if medi != s.backMed {
@@ -224,6 +229,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 }
 
 func (s *Server) OnPause(ctx *gortsplib.ServerHandlerOnPauseCtx) (*base.Response, error) {
+	s.logf("rtsp pause request session=%s", sessionID(ctx.Session))
 	s.removeReader(ctx.Session)
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
@@ -239,6 +245,7 @@ func (s *Server) OnSetParameter(ctx *gortsplib.ServerHandlerOnSetParameterCtx) (
 }
 
 func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
+	s.logf("rtsp session close session=%s", sessionID(ctx.Session))
 	s.removeReader(ctx.Session)
 }
 
@@ -338,6 +345,8 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 	s.logf("rtsp ingest listener started media=%v addr=%s", mediaType, conn.LocalAddr().String())
 
 	buf := make([]byte, 2048)
+	validPackets := 0
+	lastCountLog := time.Now()
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 			s.logf("rtsp ingest set deadline failed media=%v err=%v", mediaType, err)
@@ -363,6 +372,15 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 		var pkt rtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
+		}
+		if isExpectedPayloadType(mediaType, pkt.PayloadType) {
+			validPackets++
+			if validPackets == 1 {
+				s.logf("rtsp ingest first_packet media=%v port=%d pt=%d seq=%d ts=%d ssrc=%d", mediaType, port, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
+			} else if time.Since(lastCountLog) >= 5*time.Second {
+				s.logf("rtsp ingest packets media=%v port=%d count=%d last_seq=%d last_ts=%d", mediaType, port, validPackets, pkt.SequenceNumber, pkt.Timestamp)
+				lastCountLog = time.Now()
+			}
 		}
 		s.writeIngestPacket(mediaType, &pkt)
 	}
@@ -798,8 +816,11 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 	}
 	s.mu.Unlock()
 	if ok {
+		s.logf("rtsp reader remove session=%s entrypoint=%s devaddr=%s", info.SessionID, info.EntrypointID, info.DevAddr)
 		stopCtx, cancel := context.WithTimeout(context.Background(), streamAutostopTimeout)
-		_ = s.transport.OnPause(stopCtx, info.SessionID)
+		if err := s.transport.OnPause(stopCtx, info.SessionID); err != nil {
+			s.logf("rtsp reader pause lifecycle failed session=%s err=%v", info.SessionID, err)
+		}
 		cancel()
 	}
 }

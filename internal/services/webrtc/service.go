@@ -80,6 +80,10 @@ type Service struct {
 	pendingCandidates map[string]pendingCandidateBatch
 	devAddrMap        map[string]string
 	api               *webrtc.API
+	videoPacketCount  int
+	audioPacketCount  int
+	lastVideoCountLog time.Time
+	lastAudioCountLog time.Time
 }
 
 type session struct {
@@ -176,19 +180,24 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
+	s.logf("webrtc offer request session=%s entrypoint=%s offer_len=%d", sessionID, entrypointID, len(offerSDP))
 
 	if sessionID == "" {
+		s.logf("webrtc offer rejected reason=missing_session")
 		return OfferResult{}, ErrSessionIDRequired
 	}
 	if entrypointID == "" {
+		s.logf("webrtc offer rejected session=%s reason=missing_entrypoint", sessionID)
 		return OfferResult{}, ErrEntrypointRequired
 	}
 	if offerSDP == "" {
+		s.logf("webrtc offer rejected session=%s entrypoint=%s reason=missing_offer", sessionID, entrypointID)
 		return OfferResult{}, ErrOfferRequired
 	}
 
 	devAddr, ok := s.devAddrMap[entrypointID]
 	if !ok {
+		s.logf("webrtc offer rejected session=%s entrypoint=%s reason=entrypoint_not_found", sessionID, entrypointID)
 		return OfferResult{}, ErrEntrypointNotFound
 	}
 
@@ -196,6 +205,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	s.prunePendingCandidatesLocked(time.Now())
 	if _, exists := s.sessions[sessionID]; exists {
 		s.mu.Unlock()
+		s.logf("webrtc offer rejected session=%s reason=session_exists", sessionID)
 		return OfferResult{}, ErrSessionExists
 	}
 	s.mu.Unlock()
@@ -204,8 +214,10 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	defer cancel()
 
 	if err := s.stream.ReaderJoin(offerCtx, sessionID, entrypointID, devAddr); err != nil {
+		s.logf("webrtc reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 		return OfferResult{}, err
 	}
+	s.logf("webrtc reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 	joined := true
 	defer func() {
 		if joined {
@@ -262,6 +274,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.logf("webrtc connection state session=%s state=%s", sess.id, state.String())
 		switch state {
 		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
 			s.closeSession(sess.id)
@@ -315,21 +328,26 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		s.closeSession(sessionID)
+		s.logf("webrtc set remote description failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("set remote description: %w", err)
 	}
+	s.logf("webrtc remote description set session=%s", sessionID)
 	if err := s.flushPendingRemoteCandidates(sess); err != nil {
 		s.closeSession(sessionID)
+		s.logf("webrtc apply queued candidates failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("apply queued candidates: %w", err)
 	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		s.closeSession(sessionID)
+		s.logf("webrtc create answer failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("create answer: %w", err)
 	}
 	gatherDone := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		s.closeSession(sessionID)
+		s.logf("webrtc set local description failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("set local description: %w", err)
 	}
 
@@ -344,6 +362,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	local := pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {
 		s.closeSession(sessionID)
+		s.logf("webrtc local answer missing session=%s", sessionID)
 		return OfferResult{}, errors.New("local answer not available")
 	}
 
@@ -351,6 +370,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	candidates := append([]Candidate(nil), sess.candidates...)
 	sess.mu.Unlock()
 	joined = false
+	s.logf("webrtc offer answered session=%s entrypoint=%s candidates=%d answer_len=%d", sessionID, entrypointID, len(candidates), len(local.SDP))
 
 	return OfferResult{
 		SessionID:    sessionID,
@@ -363,11 +383,14 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
+		s.logf("webrtc candidate rejected reason=missing_session")
 		return ErrSessionIDRequired
 	}
 	if strings.TrimSpace(candidate.Candidate) == "" {
+		s.logf("webrtc candidate rejected session=%s reason=missing_candidate", sessionID)
 		return ErrCandidateRequired
 	}
+	s.logf("webrtc candidate received session=%s mid_set=%v mline_set=%v", sessionID, candidate.SDPMid != nil, candidate.SDPMLineIndex != nil)
 
 	init := webrtc.ICECandidateInit{
 		Candidate:        candidate.Candidate,
@@ -387,6 +410,7 @@ func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
 		batch.updatedAt = time.Now()
 		s.pendingCandidates[sessionID] = batch
 		s.mu.Unlock()
+		s.logf("webrtc candidate queued session=%s queued=%d", sessionID, len(batch.candidates))
 		return nil
 	}
 	s.mu.Unlock()
@@ -400,13 +424,20 @@ func (s *Service) addCandidateToSession(sess *session, candidate webrtc.ICECandi
 		if len(sess.pendingRemoteICE) < maxPendingSessionCandidates {
 			sess.pendingRemoteICE = append(sess.pendingRemoteICE, candidate)
 		}
+		queued := len(sess.pendingRemoteICE)
 		sess.mu.Unlock()
+		s.logf("webrtc candidate pending_remote_description session=%s queued=%d", sess.id, queued)
 		return nil
 	}
 	pc := sess.pc
 	sess.mu.Unlock()
 
-	return pc.AddICECandidate(candidate)
+	if err := pc.AddICECandidate(candidate); err != nil {
+		s.logf("webrtc candidate apply failed session=%s err=%v", sess.id, err)
+		return err
+	}
+	s.logf("webrtc candidate applied session=%s", sess.id)
+	return nil
 }
 
 func (s *Service) flushPendingRemoteCandidates(sess *session) error {
@@ -445,8 +476,10 @@ func (s *Service) closeSession(sessionID string) error {
 		s.mu.Lock()
 		delete(s.pendingCandidates, sessionID)
 		s.mu.Unlock()
+		s.logf("webrtc close noop session=%s reason=not_found", sessionID)
 		return nil
 	}
+	s.logf("webrtc close session=%s entrypoint=%s devaddr=%s", sessionID, sess.entrypointID, sess.devAddr)
 
 	sess.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -470,6 +503,7 @@ func (s *Service) WriteVideoRTP(pkt *rtp.Packet) {
 		return
 	}
 	tracks := s.videoTracks()
+	s.logVideoPacket(pkt, len(tracks))
 	for _, tr := range tracks {
 		if err := tr.WriteRTP(pkt); err != nil {
 			s.logf("webrtc video write failed: %v", err)
@@ -482,10 +516,39 @@ func (s *Service) WriteAudioRTP(pkt *rtp.Packet) {
 		return
 	}
 	tracks := s.audioTracks()
+	s.logAudioPacket(pkt, len(tracks))
 	for _, tr := range tracks {
 		if err := tr.WriteRTP(pkt); err != nil {
 			s.logf("webrtc audio write failed: %v", err)
 		}
+	}
+}
+
+func (s *Service) logVideoPacket(pkt *rtp.Packet, trackCount int) {
+	s.mu.Lock()
+	s.videoPacketCount++
+	count := s.videoPacketCount
+	shouldLog := count == 1 || time.Since(s.lastVideoCountLog) >= 5*time.Second
+	if shouldLog {
+		s.lastVideoCountLog = time.Now()
+	}
+	s.mu.Unlock()
+	if shouldLog {
+		s.logf("webrtc video rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
+	}
+}
+
+func (s *Service) logAudioPacket(pkt *rtp.Packet, trackCount int) {
+	s.mu.Lock()
+	s.audioPacketCount++
+	count := s.audioPacketCount
+	shouldLog := count == 1 || time.Since(s.lastAudioCountLog) >= 5*time.Second
+	if shouldLog {
+		s.lastAudioCountLog = time.Now()
+	}
+	s.mu.Unlock()
+	if shouldLog {
+		s.logf("webrtc audio rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
 	}
 }
 
