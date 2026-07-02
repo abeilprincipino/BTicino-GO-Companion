@@ -42,9 +42,24 @@ func NewRotatingWriter(path string, maxBytes int64) (*RotatingWriter, error) {
 	return &RotatingWriter{path: path, maxBytes: maxBytes, file: f, size: st.Size()}, nil
 }
 
+// Close closes the underlying file. The writer must not be used afterwards.
+func (w *RotatingWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
+
 func (w *RotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.file == nil {
+		return 0, os.ErrClosed
+	}
 	if w.size+int64(len(p)) > w.maxBytes {
 		if err := w.rotateLocked(); err != nil {
 			return 0, fmt.Errorf("rotate debug log: %w", err)

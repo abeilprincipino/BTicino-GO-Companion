@@ -13,6 +13,7 @@ func TestRotatingWriterWritesAndAppends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new writer failed: %v", err)
 	}
+	defer w.Close()
 	if _, err := w.Write([]byte("hello\n")); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
@@ -34,6 +35,7 @@ func TestRotatingWriterRotatesAtMaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new writer failed: %v", err)
 	}
+	defer w.Close()
 	if _, err := w.Write([]byte("0123456789")); err != nil { // fills exactly to max
 		t.Fatalf("write failed: %v", err)
 	}
@@ -66,6 +68,7 @@ func TestRotatingWriterReplacesOldBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new writer failed: %v", err)
 	}
+	defer w.Close()
 	if _, err := w.Write([]byte("aaaa")); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
@@ -78,5 +81,22 @@ func TestRotatingWriterReplacesOldBackup(t *testing.T) {
 	}
 	if strings.Contains(string(rotated), "stale") {
 		t.Fatalf("old backup not replaced: %q", string(rotated))
+	}
+}
+
+func TestRotatingWriterCloseIsIdempotentAndBlocksWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "companion.log")
+	w, err := NewRotatingWriter(path, 1024)
+	if err != nil {
+		t.Fatalf("new writer failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
+	if _, err := w.Write([]byte("x")); err == nil {
+		t.Fatal("expected write-after-close to fail")
 	}
 }
