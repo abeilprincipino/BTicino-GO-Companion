@@ -97,6 +97,24 @@ func TestExtractAddress(t *testing.T) {
 	}
 }
 
+func TestBuildAVAddStreamVideo(t *testing.T) {
+	if got := BuildAVAddStreamVideo("127.0.0.1", 5007, false); got != "*7*300#127#0#0#1#5007#1*##" {
+		t.Fatalf("unexpected low-res video frame: %s", got)
+	}
+	if got := BuildAVAddStreamVideo("127.0.0.1", 5007, true); got != "*7*300#127#0#0#1#5007#0*##" {
+		t.Fatalf("unexpected high-res video frame: %s", got)
+	}
+	if got := BuildAVAddStreamVideo("192.168.1.5", 10002, false); got != "*7*300#192#168#1#5#10002#1*##" {
+		t.Fatalf("unexpected remote-ip video frame: %s", got)
+	}
+}
+
+func TestBuildAVAddStreamAudio(t *testing.T) {
+	if got := BuildAVAddStreamAudio("127.0.0.1", 5000); got != "*7*300#127#0#0#1#5000#2*##" {
+		t.Fatalf("unexpected audio frame: %s", got)
+	}
+}
+
 func TestParseDiagnosticFrames(t *testing.T) {
 	ip, ok := ParseDiagnosticIP("*#13**10*192*0*2*172##")
 	if !ok || ip != "192.0.2.172" {

@@ -42,12 +42,31 @@ func BuildUnlockClose(devAddr string) string {
 	return fmt.Sprintf("*8*20*%s##", strings.TrimSpace(devAddr))
 }
 
+func encodeIPHashForm(ip string) string {
+	return strings.ReplaceAll(strings.TrimSpace(ip), ".", "#")
+}
+
+// BuildAVAddStreamVideo builds the bt_ipcamera add-stream command that directs
+// the intercom's video RTP to ip:port. Quality: highRes=true -> #0, else #1.
+func BuildAVAddStreamVideo(ip string, port int, highRes bool) string {
+	quality := "1"
+	if highRes {
+		quality = "0"
+	}
+	return fmt.Sprintf("*7*300#%s#%d#%s*##", encodeIPHashForm(ip), port, quality)
+}
+
+// BuildAVAddStreamAudio builds the bt_ipcamera add-stream command for audio (#2).
+func BuildAVAddStreamAudio(ip string, port int) string {
+	return fmt.Sprintf("*7*300#%s#%d#2*##", encodeIPHashForm(ip), port)
+}
+
 func BuildStreamStartVideo(port int) string {
-	return fmt.Sprintf("*7*300#127#0#0#1#%d#0*##", port)
+	return BuildAVAddStreamVideo("127.0.0.1", port, true)
 }
 
 func BuildStreamStartAudio(port int) string {
-	return fmt.Sprintf("*7*300#127#0#0#1#%d#2*##", port)
+	return BuildAVAddStreamAudio("127.0.0.1", port)
 }
 
 func IsRingStart(frame string) bool {
