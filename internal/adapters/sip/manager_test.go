@@ -224,20 +224,27 @@ func TestIncomingInviteExpiryCanBeStopped(t *testing.T) {
 }
 
 func TestClassifyInviteAnswerError(t *testing.T) {
-	busy := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
-	err := classifyInviteAnswerError(busy)
-	if !errors.Is(err, media.ErrSIPCallInProgress) {
-		t.Fatalf("expected ErrSIPCallInProgress for 486, got: %v", err)
+	busyPtr := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	if err := classifyInviteAnswerError(busyPtr); !errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("expected ErrSIPCallInProgress for pointer-form 486 (how sipgo returns it), got: %v", err)
 	}
 
-	notFound := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 404}}
-	err = classifyInviteAnswerError(notFound)
-	if errors.Is(err, media.ErrSIPCallInProgress) {
+	busyVal := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	if err := classifyInviteAnswerError(busyVal); !errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("expected ErrSIPCallInProgress for value-form 486, got: %v", err)
+	}
+
+	notFound := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 404}}
+	if err := classifyInviteAnswerError(notFound); errors.Is(err, media.ErrSIPCallInProgress) {
 		t.Fatalf("404 must not map to ErrSIPCallInProgress: %v", err)
 	}
 
-	err = classifyInviteAnswerError(errors.New("plain transport failure"))
-	if errors.Is(err, media.ErrSIPCallInProgress) {
+	if err := classifyInviteAnswerError(errors.New("plain transport failure")); errors.Is(err, media.ErrSIPCallInProgress) {
 		t.Fatalf("generic error must not map to ErrSIPCallInProgress: %v", err)
+	}
+
+	nilRes := &sipgo.ErrDialogResponse{}
+	if err := classifyInviteAnswerError(nilRes); errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("nil Res must not map to ErrSIPCallInProgress: %v", err)
 	}
 }

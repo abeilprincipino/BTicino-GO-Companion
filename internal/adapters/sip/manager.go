@@ -420,8 +420,12 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 // contract: 486 Busy Here becomes media.ErrSIPCallInProgress so the composite
 // backend can fall through to AV-commands-only.
 func classifyInviteAnswerError(err error) error {
-	var dres sipgo.ErrDialogResponse
-	if errors.As(err, &dres) && dres.Res != nil && dres.Res.StatusCode == 486 {
+	var dresPtr *sipgo.ErrDialogResponse
+	if errors.As(err, &dresPtr) && dresPtr != nil && dresPtr.Res != nil && dresPtr.Res.StatusCode == 486 {
+		return fmt.Errorf("%w: %v", media.ErrSIPCallInProgress, err)
+	}
+	var dresVal sipgo.ErrDialogResponse
+	if errors.As(err, &dresVal) && dresVal.Res != nil && dresVal.Res.StatusCode == 486 {
 		return fmt.Errorf("%w: %v", media.ErrSIPCallInProgress, err)
 	}
 	return fmt.Errorf("wait answer failed: %w", err)
