@@ -240,12 +240,21 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			}()
 		}
 	}
-	mediaBackend := media.NewCompositeBackend(
-		sipManager,
-		commandClient,
-		cfg.MediaRTPAudioPort,
-		cfg.MediaRTPVideoPort,
-	)
+	var avBackend media.StreamCommandBackend
+	if cfg.AVEndpointEnabled() {
+		avBackend = openwebnet.NewAVMediaClient(cfg, logger)
+		logger.Printf("media: AV endpoint backend enabled addr=%s:%d highres=%v",
+			cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo)
+	}
+	mediaBackend := media.NewCompositeBackend(media.CompositeBackendOptions{
+		SIP:       sipManager,
+		Commands:  commandClient,
+		AV:        avBackend,
+		CallState: func() string { return projector.Snapshot().CallState },
+		AudioPort: cfg.MediaRTPAudioPort,
+		VideoPort: cfg.MediaRTPVideoPort,
+		Logger:    logger,
+	})
 	mediaService := media.NewService(mediaBackend)
 	var rtspServer *rtspadapter.Server
 	var snapshotService *snapshot.Service
