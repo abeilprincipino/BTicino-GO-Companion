@@ -17,6 +17,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/protocol/sip"
+	"bticino-go-companion/internal/services/media"
 )
 
 var (
@@ -384,6 +385,9 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()
 
+	m.logger.Printf("sip: invite starting target=%s devaddr=%s transport=%s from=%q",
+		target.URI.String(), streamDevAddr, m.cfg.MediaSIPTransport, m.cfg.MediaSIPFrom)
+
 	dlg, err := m.out.WriteInvite(callCtx, inviteReq)
 	if err != nil {
 		return fmt.Errorf("outgoing invite failed: %w", err)
@@ -395,18 +399,32 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	}
 	if err := dlg.WaitAnswer(callCtx, opts); err != nil {
 		_ = dlg.Close()
-		return fmt.Errorf("wait answer failed: %w", err)
+		classified := classifyInviteAnswerError(err)
+		m.logger.Printf("sip: invite failed target=%s: %v", target.URI.String(), classified)
+		return classified
 	}
 	if err := dlg.Ack(callCtx); err != nil {
 		_ = dlg.Close()
 		return fmt.Errorf("ack failed: %w", err)
 	}
+	m.logger.Printf("sip: invite answered target=%s", target.URI.String())
 
 	m.mu.Lock()
 	m.activeOut = dlg
 	m.mu.Unlock()
 	m.publish(event.TypeCallAnswered, map[string]any{"source": "sip", "mode": "outgoing", "target": target.URI.String()})
 	return nil
+}
+
+// classifyInviteAnswerError maps a WaitAnswer failure to the media-layer
+// contract: 486 Busy Here becomes media.ErrSIPCallInProgress so the composite
+// backend can fall through to AV-commands-only.
+func classifyInviteAnswerError(err error) error {
+	var dres sipgo.ErrDialogResponse
+	if errors.As(err, &dres) && dres.Res != nil && dres.Res.StatusCode == 486 {
+		return fmt.Errorf("%w: %v", media.ErrSIPCallInProgress, err)
+	}
+	return fmt.Errorf("wait answer failed: %w", err)
 }
 
 func (m *Manager) StreamStop(ctx context.Context) error {

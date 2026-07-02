@@ -2,15 +2,18 @@ package sipadapter
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"testing"
 	"time"
 
 	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/services/media"
 )
 
 func TestManagerDisabledLifecycle(t *testing.T) {
@@ -217,5 +220,24 @@ func TestIncomingInviteExpiryCanBeStopped(t *testing.T) {
 	defer m.mu.Unlock()
 	if m.incoming != dlg {
 		t.Fatal("expected incoming dialog to remain after stopped expiry")
+	}
+}
+
+func TestClassifyInviteAnswerError(t *testing.T) {
+	busy := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	err := classifyInviteAnswerError(busy)
+	if !errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("expected ErrSIPCallInProgress for 486, got: %v", err)
+	}
+
+	notFound := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 404}}
+	err = classifyInviteAnswerError(notFound)
+	if errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("404 must not map to ErrSIPCallInProgress: %v", err)
+	}
+
+	err = classifyInviteAnswerError(errors.New("plain transport failure"))
+	if errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("generic error must not map to ErrSIPCallInProgress: %v", err)
 	}
 }
