@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"bticino-go-companion/internal/adapters/sip"
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/debuglog"
 	"bticino-go-companion/internal/domain/event"
 	"bticino-go-companion/internal/protocol/openwebnet"
 	"bticino-go-companion/internal/services/control"
@@ -72,6 +74,21 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
+	if cfg.DebugLogEnabled {
+		if w, err := debuglog.NewRotatingWriter(cfg.DebugLogPath, 5*1024*1024); err != nil {
+			logger.Printf("debug log file disabled: %v", err)
+		} else {
+			logger.SetOutput(io.MultiWriter(os.Stderr, w))
+			logger.Printf("debug log mirroring to %s", cfg.DebugLogPath)
+		}
+	}
+	logger.Printf(
+		"companion starting version=%s model=%s sip_enabled=%v sip_to=%q sip_from=%q av_endpoint=%v av_addr=%s:%d av_highres=%v ingest_audio=%d ingest_video=%d rtsp_addr=%q debug_log=%v",
+		cfg.Version, cfg.DeviceModel, cfg.MediaSIPEnabled, cfg.MediaSIPTo, cfg.MediaSIPFrom,
+		cfg.AVEndpointEnabled(), cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo,
+		cfg.MediaRTPAudioPort, cfg.MediaRTPVideoPort, cfg.MediaRTSPAddress, cfg.DebugLogEnabled,
+	)
+
 	authStore, err := auth.NewStore(resolvedConfigPath, cfg.ClaimCode, cfg.DeviceModel, cfg.DeviceMAC)
 	if err != nil {
 		return fmt.Errorf("init auth store: %w", err)
@@ -92,6 +109,10 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 
 	publish := func(ev event.Envelope) {
 		normalized := normalizer.Normalize(ev)
+		if cfg.DebugLogEnabled && normalized.Type != event.TypeHeartbeat {
+			logger.Printf("event type=%s source=%s entrypoint=%s raw=%q",
+				normalized.Type, normalized.Source, normalized.EntrypointID, normalized.Raw)
+		}
 		if err := validator.Validate(normalized); err != nil {
 			logger.Printf("event validation warning: %v type=%s source=%s", err, normalized.Type, normalized.Source)
 			normalized = event.Envelope{
