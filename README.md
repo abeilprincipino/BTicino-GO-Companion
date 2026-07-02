@@ -447,6 +447,27 @@ Example config generated on a new install:
 
 `claim_code`, `device_id`, model, and runtime metadata are generated or detected on the device. For `C100X`, voicemail is normalized to disabled and not exposed. `openwebnet_command_password` is omitted unless configured.
 
+### C100X AV endpoint & debug logging
+
+On the C100X the SIP INVITE alone does not direct RTP to the companion: the
+stream destination must be pushed to the intercom's AV server (`bt_ipcamera`,
+TCP `127.0.0.1:30007`) with `*7*300#<ip>#<port>#<quality>*##` add-stream
+frames. The companion does this automatically when the device model is
+`C100X`. While a call is ringing or active the SIP INVITE is skipped entirely
+(it would be answered `486 Busy Here`); a 486 reply is likewise treated as
+"call in progress" and the companion falls through to AV commands only.
+
+`config.json` keys (under `companion.config`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `media.av_endpoint_enabled` | auto (C100X only) | Force the AV endpoint backend on/off |
+| `media.av_endpoint_host` | `127.0.0.1` | AV server host |
+| `media.av_endpoint_port` | `30007` | AV server port |
+| `media.av_high_res_video` | `false` | Request high-res video (`#0`) instead of low-res (`#1`) |
+| `debug.log_enabled` | `false` | Mirror logs to a file (the init script discards stdout/stderr) |
+| `debug.log_path` | `/tmp/companion-debug.log` | Log file path (tmpfs by default; rotated once at 5 MB) |
+
 ## Installation
 
 The release bundle is intended to be installed directly on the intercom.
