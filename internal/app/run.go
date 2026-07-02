@@ -63,6 +63,14 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if cfg.DebugLogEnabled {
+		if w, err := debuglog.NewRotatingWriter(cfg.DebugLogPath, 5*1024*1024); err != nil {
+			logger.Printf("debug log file disabled: %v", err)
+		} else {
+			logger.SetOutput(io.MultiWriter(os.Stderr, w))
+			logger.Printf("debug log mirroring to %s", cfg.DebugLogPath)
+		}
+	}
 	if created {
 		logger.Printf("created default config at %s", resolvedConfigPath)
 	}
@@ -74,14 +82,6 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}
 
-	if cfg.DebugLogEnabled {
-		if w, err := debuglog.NewRotatingWriter(cfg.DebugLogPath, 5*1024*1024); err != nil {
-			logger.Printf("debug log file disabled: %v", err)
-		} else {
-			logger.SetOutput(io.MultiWriter(os.Stderr, w))
-			logger.Printf("debug log mirroring to %s", cfg.DebugLogPath)
-		}
-	}
 	logger.Printf(
 		"companion starting version=%s model=%s sip_enabled=%v sip_to=%q sip_from=%q av_endpoint=%v av_addr=%s:%d av_highres=%v ingest_audio=%d ingest_video=%d rtsp_addr=%q debug_log=%v",
 		cfg.Version, cfg.DeviceModel, cfg.MediaSIPEnabled, cfg.MediaSIPTo, cfg.MediaSIPFrom,
