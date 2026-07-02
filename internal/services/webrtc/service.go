@@ -192,6 +192,8 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		return OfferResult{}, ErrEntrypointNotFound
 	}
 
+	s.logf("webrtc: offer received session=%s entrypoint=%s", sessionID, entrypointID)
+
 	s.mu.Lock()
 	s.prunePendingCandidatesLocked(time.Now())
 	if _, exists := s.sessions[sessionID]; exists {
@@ -261,7 +263,12 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		sess.mu.Unlock()
 	})
 
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		s.logf("webrtc: ice state=%s session=%s", state, sess.id)
+	})
+
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.logf("webrtc: peer state=%s session=%s", state, sess.id)
 		switch state {
 		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
 			s.closeSession(sess.id)
@@ -449,6 +456,7 @@ func (s *Service) closeSession(sessionID string) error {
 	}
 
 	sess.closeOnce.Do(func() {
+		s.logf("webrtc: session closed session=%s peer_state=%s", sessionID, sess.pc.ConnectionState())
 		s.mu.Lock()
 		delete(s.sessions, sessionID)
 		delete(s.pendingCandidates, sessionID)
