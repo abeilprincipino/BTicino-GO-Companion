@@ -605,6 +605,7 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 		}
 		if cb := s.audioPacketCallback(); cb != nil {
 			cb(&pkt)
+			s.noteEgress(s.egressWebRTC, description.MediaTypeAudio)
 		}
 
 		s.mu.RLock()
@@ -616,6 +617,8 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 		}
 		if err := stream.WritePacketRTP(audioMed, &pkt); err != nil {
 			s.logf("audio bridge opus stream write failed: %v", err)
+		} else {
+			s.noteEgress(s.egressRTSP, description.MediaTypeAudio)
 		}
 	}
 }

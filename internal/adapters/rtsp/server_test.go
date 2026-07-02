@@ -542,6 +542,90 @@ func TestWriteIngestPacketCountsEgress(t *testing.T) {
 	}
 }
 
+func TestRunBridgeOpusOutListenerCountsEgress(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	const opusPayloadType = 111
+
+	forwarded := 0
+	s.SetOnAudioPacketRTP(func(*rtp.Packet) { forwarded++ })
+
+	port, err := reserveLocalUDPPort()
+	if err != nil {
+		t.Fatalf("reserve local udp port: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.runBridgeOpusOutListener(ctx, port, opusPayloadType)
+		close(done)
+	}()
+
+	// Give the listener goroutine time to bind before sending.
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatalf("dial udp: %v", err)
+	}
+	defer conn.Close()
+
+	send := func(pt uint8) {
+		pkt := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pt}}
+		raw, err := pkt.Marshal()
+		if err != nil {
+			t.Fatalf("marshal packet: %v", err)
+		}
+		if _, err := conn.Write(raw); err != nil {
+			t.Fatalf("write udp: %v", err)
+		}
+	}
+
+	send(opusPayloadType)
+	send(opusPayloadType)
+	// A packet with an unexpected payload type must be ignored entirely.
+	send(opusPayloadType + 1)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.ingestMu.Lock()
+		got := s.egressWebRTC[description.MediaTypeAudio]
+		s.ingestMu.Unlock()
+		if got >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for webrtc egress count, got %d", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if forwarded != 2 {
+		t.Fatalf("expected 2 audio callback forwards, got %d", forwarded)
+	}
+
+	s.ingestMu.Lock()
+	webrtcAudio := s.egressWebRTC[description.MediaTypeAudio]
+	// The static stream is nil (server not started via Start()): only actual
+	// successful WritePacketRTP calls count as RTSP egress, so it must stay 0.
+	rtspAudio := s.egressRTSP[description.MediaTypeAudio]
+	s.ingestMu.Unlock()
+
+	if webrtcAudio != 2 {
+		t.Fatalf("expected egress_webrtc_audio=2, got %d", webrtcAudio)
+	}
+	if rtspAudio != 0 {
+		t.Fatalf("expected egress_rtsp_audio=0 with nil stream, got %d", rtspAudio)
+	}
+
+	cancel()
+	<-done
+}
+
 func TestIngestWatchWarnsWhenNoRTPArrives(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := config.Default()
