@@ -73,6 +73,8 @@ type Server struct {
 	ingestBadPT      map[uint8]bool
 	ingestPackets    map[description.MediaType]uint64
 	ingestBytes      map[description.MediaType]uint64
+	egressRTSP       map[description.MediaType]uint64
+	egressWebRTC     map[description.MediaType]uint64
 	ingestLast       time.Time
 	ingestWatchDelay time.Duration
 
@@ -107,6 +109,8 @@ func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Serv
 		ingestBadPT:      map[uint8]bool{},
 		ingestPackets:    map[description.MediaType]uint64{},
 		ingestBytes:      map[description.MediaType]uint64{},
+		egressRTSP:       map[description.MediaType]uint64{},
+		egressWebRTC:     map[description.MediaType]uint64{},
 		ingestWatchDelay: 3 * time.Second,
 
 		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
@@ -408,10 +412,12 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 		s.writeSnapshotMirror(pkt)
 		if cb := s.videoPacketCallback(); cb != nil {
 			cb(pkt)
+			s.noteEgress(s.egressWebRTC, mediaType)
 		}
 	} else if mediaType == description.MediaTypeAudio {
 		if cb := s.audioPacketCallback(); cb != nil {
 			cb(pkt)
+			s.noteEgress(s.egressWebRTC, mediaType)
 		}
 	}
 
@@ -436,7 +442,15 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 	}
 	if err := stream.WritePacketRTP(media, pkt); err != nil {
 		s.logf("rtsp ingest write packet error: %v", err)
+	} else {
+		s.noteEgress(s.egressRTSP, mediaType)
 	}
+}
+
+func (s *Server) noteEgress(counters map[description.MediaType]uint64, mediaType description.MediaType) {
+	s.ingestMu.Lock()
+	counters[mediaType]++
+	s.ingestMu.Unlock()
 }
 
 func isExpectedPayloadType(mediaType description.MediaType, payloadType uint8) bool {
@@ -510,8 +524,12 @@ func (s *Server) runIngestStatsLogger(ctx context.Context) {
 			ap := s.ingestPackets[description.MediaTypeAudio]
 			vb := s.ingestBytes[description.MediaTypeVideo]
 			ab := s.ingestBytes[description.MediaTypeAudio]
+			erv := s.egressRTSP[description.MediaTypeVideo]
+			era := s.egressRTSP[description.MediaTypeAudio]
+			ewv := s.egressWebRTC[description.MediaTypeVideo]
+			ewa := s.egressWebRTC[description.MediaTypeAudio]
 			s.ingestMu.Unlock()
-			s.logf("rtsp ingest stats video_pkts=%d video_bytes=%d audio_pkts=%d audio_bytes=%d", vp, vb, ap, ab)
+			s.logf("rtsp ingest stats video_pkts=%d video_bytes=%d audio_pkts=%d audio_bytes=%d egress_rtsp_video=%d egress_rtsp_audio=%d egress_webrtc_video=%d egress_webrtc_audio=%d", vp, vb, ap, ab, erv, era, ewv, ewa)
 		}
 	}
 }

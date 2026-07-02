@@ -510,6 +510,38 @@ func TestUnexpectedPayloadTypeLoggedOncePerPT(t *testing.T) {
 	}
 }
 
+func TestWriteIngestPacketCountsEgress(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	forwarded := 0
+	s.SetOnVideoPacketRTP(func(*rtp.Packet) { forwarded++ })
+
+	pkt := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: rtpPayloadTypeH264}}
+	s.writeIngestPacket(description.MediaTypeVideo, pkt)
+	s.writeIngestPacket(description.MediaTypeVideo, pkt)
+
+	// A packet with an unexpected payload type is dropped before any egress.
+	s.writeIngestPacket(description.MediaTypeVideo, &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 33}})
+
+	s.ingestMu.Lock()
+	webrtcVideo := s.egressWebRTC[description.MediaTypeVideo]
+	rtspVideo := s.egressRTSP[description.MediaTypeVideo]
+	s.ingestMu.Unlock()
+
+	if forwarded != 2 {
+		t.Fatalf("expected 2 video callback forwards, got %d", forwarded)
+	}
+	if webrtcVideo != 2 {
+		t.Fatalf("expected egress_webrtc_video=2, got %d", webrtcVideo)
+	}
+	// The static stream is nil (server not started): only actual successful
+	// WritePacketRTP calls count as RTSP egress, so the counter must stay 0.
+	if rtspVideo != 0 {
+		t.Fatalf("expected egress_rtsp_video=0 with nil stream, got %d", rtspVideo)
+	}
+}
+
 func TestIngestWatchWarnsWhenNoRTPArrives(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := config.Default()
