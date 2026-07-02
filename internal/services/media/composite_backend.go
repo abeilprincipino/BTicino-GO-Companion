@@ -7,6 +7,7 @@ import (
 	"sync"
 )
 
+// Must match internal/services/state CallState values (state.CallStateRinging/CallStateActive/CallStateIdle); intentionally duplicated to avoid a media→state dependency.
 const (
 	callStateRinging = "ringing"
 	callStateActive  = "active"

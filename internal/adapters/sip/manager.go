@@ -385,7 +385,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()
 
-	m.logger.Printf("sip: invite starting target=%s devaddr=%s transport=%s from=%q",
+	m.logf("sip: invite starting target=%s devaddr=%s transport=%s from=%q",
 		target.URI.String(), streamDevAddr, m.cfg.MediaSIPTransport, m.cfg.MediaSIPFrom)
 
 	dlg, err := m.out.WriteInvite(callCtx, inviteReq)
@@ -400,14 +400,14 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	if err := dlg.WaitAnswer(callCtx, opts); err != nil {
 		_ = dlg.Close()
 		classified := classifyInviteAnswerError(err)
-		m.logger.Printf("sip: invite failed target=%s: %v", target.URI.String(), classified)
+		m.logf("sip: invite failed target=%s: %v", target.URI.String(), classified)
 		return classified
 	}
 	if err := dlg.Ack(callCtx); err != nil {
 		_ = dlg.Close()
 		return fmt.Errorf("ack failed: %w", err)
 	}
-	m.logger.Printf("sip: invite answered target=%s", target.URI.String())
+	m.logf("sip: invite answered target=%s", target.URI.String())
 
 	m.mu.Lock()
 	m.activeOut = dlg
