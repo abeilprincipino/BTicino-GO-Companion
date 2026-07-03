@@ -79,9 +79,10 @@ type Server struct {
 	ingestWatchDelay time.Duration
 
 	// audio-bridge ingest failure log rate limiting (guarded by ingestMu)
-	bridgeFailCount      uint64    // failures since the last success
+	bridgeFailCount      uint64    // failures since the current outage began
 	bridgeFailSuppressed uint64    // failures suppressed since the last emitted log
 	bridgeFailLastLog    time.Time // when we last emitted a failure log
+	bridgeLastFailAt     time.Time // when the most recent failure occurred
 
 	// backchannel (two-way audio) diagnostics (guarded by ingestMu)
 	backchannelIn       uint64 // packets entering the talk-back path (WebRTC-forwarded + RTSP backchannel)
@@ -422,7 +423,7 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 					s.logf("audio bridge ingest failed: %v", err)
 				}
 			}
-		} else if recovered, failures := s.noteBridgeIngestSuccess(); recovered {
+		} else if recovered, failures := s.noteBridgeIngestSuccess(time.Now()); recovered {
 			s.logf("audio bridge ingest recovered after %d failures", failures)
 		}
 		return
@@ -510,7 +511,15 @@ func (s *Server) noteUnexpectedPayloadType(mediaType description.MediaType, pt u
 	}
 }
 
-const bridgeFailLogInterval = 5 * time.Second
+const (
+	bridgeFailLogInterval = 5 * time.Second
+	// bridgeRecoveryQuietPeriod is how long ingest writes must succeed without
+	// any failure before we declare recovery. UDP connected-socket ICMP
+	// semantics surface a down peer on the *next* write, so writes alternate
+	// fail/success while the bridge is down; a lone success amid that flapping
+	// must not be reported as a recovery.
+	bridgeRecoveryQuietPeriod = 2 * time.Second
+)
 
 // noteBridgeIngestFailure records an audio-bridge ingest failure and decides
 // whether the caller should log now. It logs the first failure immediately,
@@ -521,8 +530,9 @@ func (s *Server) noteBridgeIngestFailure(now time.Time) (logNow bool, suppressed
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
 	s.bridgeFailCount++
+	s.bridgeLastFailAt = now
 	if s.bridgeFailLastLog.IsZero() {
-		// First failure since the last recovery: log immediately.
+		// First failure of a new outage: log immediately.
 		s.bridgeFailLastLog = now
 		s.bridgeFailSuppressed = 0
 		return true, 0
@@ -537,19 +547,25 @@ func (s *Server) noteBridgeIngestFailure(now time.Time) (logNow bool, suppressed
 	return false, 0
 }
 
-// noteBridgeIngestSuccess resets the failure-tracking state after a successful
-// ingest. It reports recovered=true exactly once per failure streak, with the
-// total number of failures that occurred during that streak.
-func (s *Server) noteBridgeIngestSuccess() (recovered bool, failures uint64) {
+// noteBridgeIngestSuccess records a successful ingest write. It reports
+// recovered=true exactly once per outage, but only after a quiet period with no
+// failures (bridgeRecoveryQuietPeriod): a success that arrives while writes are
+// still flapping keeps the outage state intact so the alternating failures keep
+// feeding the 5s summary counter instead of resetting it and re-logging.
+func (s *Server) noteBridgeIngestSuccess(now time.Time) (recovered bool, failures uint64) {
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
 	if s.bridgeFailCount == 0 {
+		return false, 0
+	}
+	if now.Sub(s.bridgeLastFailAt) < bridgeRecoveryQuietPeriod {
 		return false, 0
 	}
 	failures = s.bridgeFailCount
 	s.bridgeFailCount = 0
 	s.bridgeFailSuppressed = 0
 	s.bridgeFailLastLog = time.Time{}
+	s.bridgeLastFailAt = time.Time{}
 	return true, failures
 }
 

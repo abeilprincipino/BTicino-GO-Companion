@@ -661,17 +661,24 @@ func TestBridgeIngestFailureLogRateLimit(t *testing.T) {
 		t.Fatal("failure right after summary should be suppressed")
 	}
 
-	// A success reports recovery once, with the total failure count.
-	recovered, failures := s.noteBridgeIngestSuccess()
+	// A success within the quiet period after the last failure does NOT report
+	// recovery — writes flap under UDP ICMP semantics.
+	if recovered, _ := s.noteBridgeIngestSuccess(base.Add(5*time.Second + 100*time.Millisecond)); recovered {
+		t.Fatal("did not expect recovery within the quiet period after a failure")
+	}
+
+	// A success reports recovery once, but only after the quiet period elapses
+	// with no further failures. Last failure was at base+5s+1ms.
+	recovered, failures := s.noteBridgeIngestSuccess(base.Add(5*time.Second + time.Millisecond + bridgeRecoveryQuietPeriod))
 	if !recovered {
-		t.Fatal("expected recovery to be reported after failures")
+		t.Fatal("expected recovery to be reported after the quiet period")
 	}
 	if failures != 103 { // 1 first + 100 mid + 1 summary + 1 after-summary
 		t.Fatalf("expected 103 total failures, got %d", failures)
 	}
 
 	// A second success without intervening failures reports nothing.
-	if recovered, _ := s.noteBridgeIngestSuccess(); recovered {
+	if recovered, _ := s.noteBridgeIngestSuccess(base.Add(10 * time.Second)); recovered {
 		t.Fatal("did not expect a second recovery report")
 	}
 
@@ -783,6 +790,63 @@ func TestWriteBackchannelOpusCountsIngress(t *testing.T) {
 	// Non-bridge WriteBackchannelOpus writes straight to 127.0.0.1:4000, so Out counts too.
 	if out != 1 {
 		t.Fatalf("expected backchannel_out=1 via WriteBackchannelOpus, got %d", out)
+	}
+}
+
+func TestBridgeIngestRecoveryDebouncedUnderFlapping(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	base := time.Unix(2000, 0)
+
+	failLogs := 0
+	summaryLogs := 0
+	recoveryLogs := 0
+
+	noteFail := func(at time.Time) {
+		if logNow, suppressed := s.noteBridgeIngestFailure(at); logNow {
+			if suppressed > 0 {
+				summaryLogs++
+			} else {
+				failLogs++
+			}
+		}
+	}
+	noteSuccess := func(at time.Time) {
+		if recovered, _ := s.noteBridgeIngestSuccess(at); recovered {
+			recoveryLogs++
+		}
+	}
+
+	// First failure logs immediately.
+	noteFail(base)
+
+	// Flapping: writes alternate success/failure at ~100ms cadence. No success
+	// is far enough from the last failure to be a recovery, and every failure
+	// falls within the 5s summary window (suppressed, feeding the counter).
+	for i := 1; i <= 10; i++ {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		noteSuccess(at)
+		noteFail(at)
+	}
+
+	// A failure at the 5s boundary emits a single summary line.
+	noteFail(base.Add(5 * time.Second))
+
+	// The bridge comes back: writes now succeed. Recovery is declared once, only
+	// after the quiet period from the last failure (base+5s).
+	noteSuccess(base.Add(5*time.Second + 500*time.Millisecond)) // within quiet period: no recovery
+	noteSuccess(base.Add(5*time.Second + bridgeRecoveryQuietPeriod))
+	noteSuccess(base.Add(5*time.Second + bridgeRecoveryQuietPeriod + time.Second))
+
+	if failLogs != 1 {
+		t.Fatalf("expected exactly ONE initial failure log, got %d", failLogs)
+	}
+	if summaryLogs != 1 {
+		t.Fatalf("expected exactly ONE 5s summary log, got %d", summaryLogs)
+	}
+	if recoveryLogs != 1 {
+		t.Fatalf("expected exactly ONE recovery log after the quiet period, got %d", recoveryLogs)
 	}
 }
 
