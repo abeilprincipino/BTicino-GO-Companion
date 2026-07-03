@@ -681,6 +681,111 @@ func TestBridgeIngestFailureLogRateLimit(t *testing.T) {
 	}
 }
 
+func TestBackchannelCountersAndFirstPacketLoggedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(&buf, "", 0), &lifecycleRecorder{})
+
+	inPkt := &rtp.Packet{Header: rtp.Header{PayloadType: rtpPayloadTypeSpeexBackchannel, SSRC: 11}}
+	outPkt := &rtp.Packet{Header: rtp.Header{PayloadType: rtpPayloadTypeSpeexBackchannel, SSRC: 22}}
+
+	s.noteBackchannelIn(inPkt)
+	s.noteBackchannelIn(inPkt)
+	s.noteBackchannelOut(outPkt)
+	s.noteBackchannelOut(outPkt)
+	s.noteBackchannelOut(outPkt)
+
+	s.ingestMu.Lock()
+	in := s.backchannelIn
+	out := s.backchannelOut
+	s.ingestMu.Unlock()
+	if in != 2 {
+		t.Fatalf("expected backchannel_in=2, got %d", in)
+	}
+	if out != 3 {
+		t.Fatalf("expected backchannel_out=3, got %d", out)
+	}
+
+	log := buf.String()
+	if got := strings.Count(log, "backchannel first in packet"); got != 1 {
+		t.Fatalf("expected exactly one first-in log, got %d in: %s", got, log)
+	}
+	if got := strings.Count(log, "backchannel first out packet"); got != 1 {
+		t.Fatalf("expected exactly one first-out log, got %d in: %s", got, log)
+	}
+	if !strings.Contains(log, "ssrc=11") || !strings.Contains(log, "ssrc=22") {
+		t.Fatalf("expected first-packet logs to include SSRC: %s", log)
+	}
+}
+
+func TestForwardReturnAudioCountsBackchannel(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s.returnAudio = newReturnAudioForwarder(conn.LocalAddr().String())
+	s.audioBridge = nil
+	defer s.closeReturnAudio()
+
+	session := &gortsplib.ServerSession{}
+	s.readers[session] = readerInfo{SessionID: "s1", EntrypointID: "main", DevAddr: "20"}
+	pkt := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: rtpPayloadTypeSpeexBackchannel}, Payload: []byte{1}}
+
+	s.forwardReturnAudio(session, pkt)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if n, _, err := conn.ReadFromUDP(make([]byte, 1500)); err != nil || n == 0 {
+		t.Fatalf("expected forwarded packet, n=%d err=%v", n, err)
+	}
+
+	s.ingestMu.Lock()
+	in := s.backchannelIn
+	out := s.backchannelOut
+	s.ingestMu.Unlock()
+	if in != 1 {
+		t.Fatalf("expected backchannel_in=1 via forwardReturnAudio, got %d", in)
+	}
+	if out != 1 {
+		t.Fatalf("expected backchannel_out=1 via forwardReturnAudio, got %d", out)
+	}
+}
+
+func TestWriteBackchannelOpusCountsIngress(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer conn.Close()
+
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s.returnAudio = newReturnAudioForwarder(conn.LocalAddr().String())
+	s.audioBridge = nil
+	defer s.closeReturnAudio()
+
+	pkt := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96}, Payload: []byte{1}}
+	if err := s.WriteBackchannelOpus(pkt); err != nil {
+		t.Fatalf("WriteBackchannelOpus failed: %v", err)
+	}
+
+	s.ingestMu.Lock()
+	in := s.backchannelIn
+	out := s.backchannelOut
+	s.ingestMu.Unlock()
+	if in != 1 {
+		t.Fatalf("expected backchannel_in=1 via WriteBackchannelOpus, got %d", in)
+	}
+	// Non-bridge WriteBackchannelOpus writes straight to 127.0.0.1:4000, so Out counts too.
+	if out != 1 {
+		t.Fatalf("expected backchannel_out=1 via WriteBackchannelOpus, got %d", out)
+	}
+}
+
 func TestIngestWatchWarnsWhenNoRTPArrives(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := config.Default()

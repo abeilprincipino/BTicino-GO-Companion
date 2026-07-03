@@ -286,7 +286,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		if track == nil || track.Kind() != webrtc.RTPCodecTypeAudio || s.backchannel == nil {
 			return
 		}
-		go s.forwardBackchannel(track)
+		go s.forwardBackchannel(sess.id, track)
 	})
 
 	videoTransceiver, err := pc.AddTransceiverFromTrack(videoTrack, webrtc.RTPTransceiverInit{
@@ -521,7 +521,8 @@ func (s *Service) audioTracks() []*webrtc.TrackLocalStaticRTP {
 	return out
 }
 
-func (s *Service) forwardBackchannel(track *webrtc.TrackRemote) {
+func (s *Service) forwardBackchannel(sessionID string, track *webrtc.TrackRemote) {
+	firstLogged := false
 	for {
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
@@ -532,6 +533,10 @@ func (s *Service) forwardBackchannel(track *webrtc.TrackRemote) {
 		}
 		if pkt == nil || s.backchannel == nil {
 			continue
+		}
+		if !firstLogged {
+			firstLogged = true
+			s.logf("webrtc: first backchannel packet session=%s pt=%d ssrc=%d", sessionID, pkt.PayloadType, pkt.SSRC)
 		}
 		pkt.PayloadType = s.backchannel.BackchannelOpusPayloadType()
 		if err := s.backchannel.WriteBackchannelOpus(pkt); err != nil {

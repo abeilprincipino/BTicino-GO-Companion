@@ -83,6 +83,12 @@ type Server struct {
 	bridgeFailSuppressed uint64    // failures suppressed since the last emitted log
 	bridgeFailLastLog    time.Time // when we last emitted a failure log
 
+	// backchannel (two-way audio) diagnostics (guarded by ingestMu)
+	backchannelIn       uint64 // packets entering the talk-back path (WebRTC-forwarded + RTSP backchannel)
+	backchannelOut      uint64 // packets successfully written toward 127.0.0.1:4000
+	backchannelInFirst  bool
+	backchannelOutFirst bool
+
 	returnAudio *returnAudioForwarder
 	audioBridge *audiobridge.Service
 	bridgeCtx   context.Context
@@ -547,6 +553,44 @@ func (s *Server) noteBridgeIngestSuccess() (recovered bool, failures uint64) {
 	return true, failures
 }
 
+// noteBackchannelIn records a packet entering the talk-back path (WebRTC mic
+// forwarded via WriteBackchannelOpus, or an RTSP backchannel packet). It logs
+// the first such packet once with its payload type and SSRC.
+func (s *Server) noteBackchannelIn(pkt *rtp.Packet) {
+	if pkt == nil {
+		return
+	}
+	s.ingestMu.Lock()
+	first := !s.backchannelInFirst
+	if first {
+		s.backchannelInFirst = true
+	}
+	s.backchannelIn++
+	s.ingestMu.Unlock()
+	if first {
+		s.logf("rtsp backchannel first in packet pt=%d ssrc=%d", pkt.PayloadType, pkt.SSRC)
+	}
+}
+
+// noteBackchannelOut records a packet successfully written toward the device
+// return-audio target (127.0.0.1:4000) by the return-audio forwarder or the
+// speex-out listener. It logs the first such packet once.
+func (s *Server) noteBackchannelOut(pkt *rtp.Packet) {
+	if pkt == nil {
+		return
+	}
+	s.ingestMu.Lock()
+	first := !s.backchannelOutFirst
+	if first {
+		s.backchannelOutFirst = true
+	}
+	s.backchannelOut++
+	s.ingestMu.Unlock()
+	if first {
+		s.logf("rtsp backchannel first out packet pt=%d ssrc=%d", pkt.PayloadType, pkt.SSRC)
+	}
+}
+
 // armIngestWatch schedules a one-shot check: if no RTP packet has been
 // ingested within ingestWatchDelay of a stream start, log a loud warning —
 // this is the "PLAY ok but zero frames" signature.
@@ -584,8 +628,10 @@ func (s *Server) runIngestStatsLogger(ctx context.Context) {
 			era := s.egressRTSP[description.MediaTypeAudio]
 			ewv := s.egressWebRTC[description.MediaTypeVideo]
 			ewa := s.egressWebRTC[description.MediaTypeAudio]
+			bcin := s.backchannelIn
+			bcout := s.backchannelOut
 			s.ingestMu.Unlock()
-			s.logf("rtsp ingest stats video_pkts=%d video_bytes=%d audio_pkts=%d audio_bytes=%d egress_rtsp_video=%d egress_rtsp_audio=%d egress_webrtc_video=%d egress_webrtc_audio=%d", vp, vb, ap, ab, erv, era, ewv, ewa)
+			s.logf("rtsp ingest stats video_pkts=%d video_bytes=%d audio_pkts=%d audio_bytes=%d egress_rtsp_video=%d egress_rtsp_audio=%d egress_webrtc_video=%d egress_webrtc_audio=%d backchannel_in=%d backchannel_out=%d", vp, vb, ap, ab, erv, era, ewv, ewa, bcin, bcout)
 		}
 	}
 }
@@ -606,6 +652,7 @@ func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Pack
 		if pkt.PayloadType != s.audioBridge.BackchannelOpusPayloadType() {
 			return
 		}
+		s.noteBackchannelIn(pkt)
 		if err := s.audioBridge.WriteBackchannelOpus(pkt); err != nil {
 			s.logf("rtsp backchannel bridge write failed: %v", err)
 		}
@@ -614,8 +661,11 @@ func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Pack
 	if pkt.PayloadType != rtpPayloadTypeSpeexBackchannel {
 		return
 	}
+	s.noteBackchannelIn(pkt)
 	if err := s.returnAudio.WriteRTP(pkt); err != nil {
 		s.logf("rtsp backchannel forward failed: %v", err)
+	} else {
+		s.noteBackchannelOut(pkt)
 	}
 }
 
@@ -684,13 +734,18 @@ func (s *Server) WriteBackchannelOpus(pkt *rtp.Packet) error {
 		return nil
 	}
 
+	s.noteBackchannelIn(pkt)
 	if s.audioBridge.Enabled() {
 		pkt.PayloadType = s.audioBridge.BackchannelOpusPayloadType()
 		return s.audioBridge.WriteBackchannelOpus(pkt)
 	}
 
 	pkt.PayloadType = rtpPayloadTypeSpeexBackchannel
-	return s.returnAudio.WriteRTP(pkt)
+	if err := s.returnAudio.WriteRTP(pkt); err != nil {
+		return err
+	}
+	s.noteBackchannelOut(pkt)
+	return nil
 }
 
 func (s *Server) BackchannelOpusPayloadType() uint8 {
@@ -749,6 +804,8 @@ func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
 		}
 		if err := s.returnAudio.WriteRTP(&pkt); err != nil {
 			s.logf("audio bridge speex forward failed: %v", err)
+		} else {
+			s.noteBackchannelOut(&pkt)
 		}
 	}
 }
