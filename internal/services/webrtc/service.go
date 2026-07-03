@@ -81,6 +81,7 @@ type Service struct {
 	pendingCandidates map[string]pendingCandidateBatch
 	devAddrMap        map[string]string
 	api               *webrtc.API
+	stunDisc          *stunDiscoverer
 }
 
 type session struct {
@@ -164,14 +165,16 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 	if len(cfg.WebRTCICEServers) > 0 || len(cfg.WebRTCNAT1To1IPs) > 0 {
 		logger.Printf("webrtc: ice servers=%v nat_1to1=%v universal_mux=%v", cfg.WebRTCICEServers, cfg.WebRTCNAT1To1IPs, true)
 	}
+	// Instead of relying on pion's srflx-over-mux gathering (which the pinned
+	// pion/webrtc cannot wire — see wave 3 report Item 4), discover the public
+	// mapping of the muxed 8555 socket via GetXORMappedAddr THROUGH that socket
+	// and inject it as a candidate into each answer (the go2rtc approach).
+	var stunDisc *stunDiscoverer
 	if len(cfg.WebRTCICEServers) > 0 {
-		// The pinned pion/webrtc exposes no SettingEngine setter to route
-		// server-reflexive gathering through the shared UDP mux (there is no
-		// SetICEUDPMuxSrflx / WithUDPMuxSrflx path). srflx candidates are
-		// therefore gathered on ephemeral sockets, which the device firewall
-		// (UDP 8555 only) drops — remote STUN traversal via the media port is
-		// NOT functional with this version.
-		logger.Printf("webrtc: WARNING configured STUN servers gather srflx on ephemeral sockets (pinned pion has no srflx-over-mux support); remote access via the media port is unavailable")
+		stunDisc = newStunDiscoverer(udpMux, cfg.WebRTCICEServers)
+		if stunDisc != nil {
+			logger.Printf("webrtc: STUN public-candidate injection enabled servers=%v", stunDisc.servers)
+		}
 	}
 
 	devAddrMap := make(map[string]string, len(cfg.Entrypoints))
@@ -192,6 +195,7 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 		pendingCandidates: map[string]pendingCandidateBatch{},
 		devAddrMap:        devAddrMap,
 		api:               api,
+		stunDisc:          stunDisc,
 	}, nil
 }
 
@@ -404,6 +408,12 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		return OfferResult{}, errors.New("local answer not available")
 	}
 
+	// Munge the finalized answer string (NOT via SetLocalDescription): inject a
+	// STUN-discovered public reflexive candidate so remote clients behind
+	// carrier NAT can reach the media port. LAN clients are unaffected — the
+	// injected candidate carries a lower priority than the host candidates.
+	answerSDP := s.injectPublicCandidate(local.SDP)
+
 	sess.mu.Lock()
 	candidates := append([]Candidate(nil), sess.candidates...)
 	sess.mu.Unlock()
@@ -412,9 +422,28 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	return OfferResult{
 		SessionID:    sessionID,
 		EntrypointID: entrypointID,
-		AnswerSDP:    local.SDP,
+		AnswerSDP:    answerSDP,
 		Candidates:   candidates,
 	}, nil
+}
+
+// injectPublicCandidate discovers the media socket's public mapping via STUN
+// and appends it as a server-reflexive candidate to the answer SDP. On any
+// discovery failure it logs a warning and returns the answer unchanged (LAN
+// paths are unaffected).
+func (s *Service) injectPublicCandidate(answerSDP string) string {
+	if s.stunDisc == nil {
+		return answerSDP
+	}
+	mapping, cachedFor, err := s.stunDisc.discover()
+	if err != nil {
+		s.logf("webrtc: WARNING public candidate discovery via STUN failed: %v (answer sent without injected candidate; LAN unaffected)", err)
+		return answerSDP
+	}
+	priority := icePriority(srflxTypePreference, candidateLocalPreference, candidateComponentRTP)
+	line := srflxCandidateLine(mapping.ip, mapping.port, priority)
+	s.logf("webrtc: public candidate %s:%d discovered via %s (cached_for=%s)", mapping.ip, mapping.port, mapping.server, cachedFor)
+	return injectCandidateIntoAnswer(answerSDP, line)
 }
 
 func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
