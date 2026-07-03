@@ -626,6 +626,61 @@ func TestRunBridgeOpusOutListenerCountsEgress(t *testing.T) {
 	<-done
 }
 
+func TestBridgeIngestFailureLogRateLimit(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+
+	base := time.Unix(1000, 0)
+
+	// First failure logs immediately, nothing suppressed yet.
+	if logNow, suppressed := s.noteBridgeIngestFailure(base); !logNow || suppressed != 0 {
+		t.Fatalf("first failure should log immediately, got logNow=%v suppressed=%d", logNow, suppressed)
+	}
+
+	// Rapid subsequent failures within the 5s window are suppressed.
+	for i := 1; i <= 100; i++ {
+		if logNow, _ := s.noteBridgeIngestFailure(base.Add(time.Duration(i) * time.Millisecond)); logNow {
+			t.Fatalf("failure #%d within window should be suppressed", i)
+		}
+	}
+
+	// After 5s, a summary is emitted reporting how many were suppressed since
+	// the last emit (100 failures were suppressed between first-log and now).
+	// 101 failures were swallowed since the first log: the 100 mid-window ones
+	// plus this one at the 5s boundary that triggers the summary.
+	logNow, suppressed := s.noteBridgeIngestFailure(base.Add(5 * time.Second))
+	if !logNow {
+		t.Fatal("expected a summary log after 5s window")
+	}
+	if suppressed != 101 {
+		t.Fatalf("expected 101 suppressed since last emit, got %d", suppressed)
+	}
+
+	// Further failures right after the summary are suppressed again.
+	if logNow, _ := s.noteBridgeIngestFailure(base.Add(5*time.Second + time.Millisecond)); logNow {
+		t.Fatal("failure right after summary should be suppressed")
+	}
+
+	// A success reports recovery once, with the total failure count.
+	recovered, failures := s.noteBridgeIngestSuccess()
+	if !recovered {
+		t.Fatal("expected recovery to be reported after failures")
+	}
+	if failures != 103 { // 1 first + 100 mid + 1 summary + 1 after-summary
+		t.Fatalf("expected 103 total failures, got %d", failures)
+	}
+
+	// A second success without intervening failures reports nothing.
+	if recovered, _ := s.noteBridgeIngestSuccess(); recovered {
+		t.Fatal("did not expect a second recovery report")
+	}
+
+	// After recovery, the next failure logs immediately again (state reset).
+	if logNow, suppressed := s.noteBridgeIngestFailure(base.Add(time.Minute)); !logNow || suppressed != 0 {
+		t.Fatalf("post-recovery failure should log immediately, got logNow=%v suppressed=%d", logNow, suppressed)
+	}
+}
+
 func TestIngestWatchWarnsWhenNoRTPArrives(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := config.Default()

@@ -78,6 +78,11 @@ type Server struct {
 	ingestLast       time.Time
 	ingestWatchDelay time.Duration
 
+	// audio-bridge ingest failure log rate limiting (guarded by ingestMu)
+	bridgeFailCount      uint64    // failures since the last success
+	bridgeFailSuppressed uint64    // failures suppressed since the last emitted log
+	bridgeFailLastLog    time.Time // when we last emitted a failure log
+
 	returnAudio *returnAudioForwarder
 	audioBridge *audiobridge.Service
 	bridgeCtx   context.Context
@@ -98,12 +103,12 @@ func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Serv
 	paths := entrypoint.RTSPRoutes(cfg.Entrypoints)
 
 	s := &Server{
-		cfg:         cfg,
-		logger:      logger,
-		transport:   NewTransport(lifecycle),
-		readers:     map[*gortsplib.ServerSession]readerInfo{},
-		paths:       paths,
-		pathList:    sortedRoutePaths(paths),
+		cfg:       cfg,
+		logger:    logger,
+		transport: NewTransport(lifecycle),
+		readers:   map[*gortsplib.ServerSession]readerInfo{},
+		paths:     paths,
+		pathList:  sortedRoutePaths(paths),
 
 		ingestFirstSeen:  map[description.MediaType]bool{},
 		ingestBadPT:      map[uint8]bool{},
@@ -404,7 +409,15 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 	}
 	if mediaType == description.MediaTypeAudio && s.audioBridge.Enabled() {
 		if err := s.audioBridge.WriteIntercomSpeex(pkt); err != nil {
-			s.logf("audio bridge ingest failed: %v", err)
+			if logNow, suppressed := s.noteBridgeIngestFailure(time.Now()); logNow {
+				if suppressed > 0 {
+					s.logf("audio bridge ingest failing: %v (suppressed %d in last 5s)", err, suppressed)
+				} else {
+					s.logf("audio bridge ingest failed: %v", err)
+				}
+			}
+		} else if recovered, failures := s.noteBridgeIngestSuccess(); recovered {
+			s.logf("audio bridge ingest recovered after %d failures", failures)
 		}
 		return
 	}
@@ -489,6 +502,49 @@ func (s *Server) noteUnexpectedPayloadType(mediaType description.MediaType, pt u
 	if !logged {
 		s.logf("rtsp ingest dropping unexpected payload type media=%v pt=%d (logged once)", mediaType, pt)
 	}
+}
+
+const bridgeFailLogInterval = 5 * time.Second
+
+// noteBridgeIngestFailure records an audio-bridge ingest failure and decides
+// whether the caller should log now. It logs the first failure immediately,
+// then suppresses the flood, emitting at most one summary per
+// bridgeFailLogInterval. When logNow is true, suppressed is how many failures
+// were swallowed since the last emitted log (0 for the very first failure).
+func (s *Server) noteBridgeIngestFailure(now time.Time) (logNow bool, suppressed uint64) {
+	s.ingestMu.Lock()
+	defer s.ingestMu.Unlock()
+	s.bridgeFailCount++
+	if s.bridgeFailLastLog.IsZero() {
+		// First failure since the last recovery: log immediately.
+		s.bridgeFailLastLog = now
+		s.bridgeFailSuppressed = 0
+		return true, 0
+	}
+	s.bridgeFailSuppressed++
+	if now.Sub(s.bridgeFailLastLog) >= bridgeFailLogInterval {
+		suppressed = s.bridgeFailSuppressed
+		s.bridgeFailLastLog = now
+		s.bridgeFailSuppressed = 0
+		return true, suppressed
+	}
+	return false, 0
+}
+
+// noteBridgeIngestSuccess resets the failure-tracking state after a successful
+// ingest. It reports recovered=true exactly once per failure streak, with the
+// total number of failures that occurred during that streak.
+func (s *Server) noteBridgeIngestSuccess() (recovered bool, failures uint64) {
+	s.ingestMu.Lock()
+	defer s.ingestMu.Unlock()
+	if s.bridgeFailCount == 0 {
+		return false, 0
+	}
+	failures = s.bridgeFailCount
+	s.bridgeFailCount = 0
+	s.bridgeFailSuppressed = 0
+	s.bridgeFailLastLog = time.Time{}
+	return true, failures
 }
 
 // armIngestWatch schedules a one-shot check: if no RTP packet has been
