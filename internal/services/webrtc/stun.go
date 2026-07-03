@@ -211,9 +211,16 @@ func injectCandidateIntoAnswer(sdp, candidateLine string) string {
 		return sdp
 	}
 
+	// Insert immediately before a=end-of-candidates when present in this
+	// section (RFC 8445 requires it be the last ICE-related line); otherwise
+	// fall back to the section end, before the next m= line or at EOF.
 	insertAt := len(lines)
 	for i := firstM + 1; i < len(lines); i++ {
 		if strings.HasPrefix(lines[i], "m=") {
+			insertAt = i
+			break
+		}
+		if lines[i] == "a=end-of-candidates" {
 			insertAt = i
 			break
 		}

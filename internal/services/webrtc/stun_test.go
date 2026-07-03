@@ -188,6 +188,70 @@ func TestInjectCandidateIntoAnswer(t *testing.T) {
 	}
 }
 
+func TestInjectCandidateIntoAnswerBeforeEndOfCandidates(t *testing.T) {
+	// Realistic pion answer: once ICE gathering completes, pion appends
+	// a=end-of-candidates to each media section. The injected srflx candidate
+	// must land BEFORE that marker (RFC 8445 requires end-of-candidates to be
+	// the last ICE-related line in the section) and only in the first section.
+	answer := "v=0\r\n" +
+		"o=- 0 0 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"a=group:BUNDLE 0 1\r\n" +
+		"m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" +
+		"c=IN IP4 0.0.0.0\r\n" +
+		"a=mid:0\r\n" +
+		"a=candidate:1 1 udp 2130706431 192.168.1.10 8555 typ host\r\n" +
+		"a=end-of-candidates\r\n" +
+		"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
+		"c=IN IP4 0.0.0.0\r\n" +
+		"a=mid:1\r\n" +
+		"a=candidate:1 1 udp 2130706431 192.168.1.10 8556 typ host\r\n" +
+		"a=end-of-candidates\r\n"
+
+	prio := icePriority(srflxTypePreference, candidateLocalPreference, candidateComponentRTP)
+	line := srflxCandidateLine("203.0.113.7", 40000, prio)
+	out := injectCandidateIntoAnswer(answer, line)
+
+	lines := strings.Split(strings.TrimRight(out, "\r\n"), "\r\n")
+	idxInjected, idxVideo, idxAudio := -1, -1, -1
+	idxEndOfCandidates := make([]int, 0, 2)
+	for i, l := range lines {
+		switch {
+		case l == line:
+			idxInjected = i
+		case strings.HasPrefix(l, "m=video"):
+			idxVideo = i
+		case strings.HasPrefix(l, "m=audio"):
+			idxAudio = i
+		case l == "a=end-of-candidates":
+			idxEndOfCandidates = append(idxEndOfCandidates, i)
+		}
+	}
+	if idxInjected < 0 {
+		t.Fatalf("injected candidate line not found in output:\n%s", out)
+	}
+	if !(idxInjected > idxVideo && idxInjected < idxAudio) {
+		t.Fatalf("injected candidate not in first media section (video=%d inj=%d audio=%d)", idxVideo, idxInjected, idxAudio)
+	}
+	if len(idxEndOfCandidates) != 2 {
+		t.Fatalf("expected 2 end-of-candidates markers preserved, got %d", len(idxEndOfCandidates))
+	}
+	firstEndOfCandidates := idxEndOfCandidates[0]
+	if !(idxInjected < firstEndOfCandidates) {
+		t.Fatalf("injected candidate (line %d) must come before first section's end-of-candidates (line %d)", idxInjected, firstEndOfCandidates)
+	}
+	// Second section's end-of-candidates must be untouched (no injection there).
+	secondEndOfCandidates := idxEndOfCandidates[1]
+	if secondEndOfCandidates <= idxAudio {
+		t.Fatalf("second end-of-candidates (line %d) should stay after m=audio (line %d)", secondEndOfCandidates, idxAudio)
+	}
+	// Exactly one injection overall.
+	if strings.Count(out, line) != 1 {
+		t.Fatalf("expected exactly one injected line, got %d", strings.Count(out, line))
+	}
+}
+
 func TestInjectCandidateNoMediaSection(t *testing.T) {
 	sdp := "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
 	out := injectCandidateIntoAnswer(sdp, "a=candidate:x")
