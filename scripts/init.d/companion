@@ -15,6 +15,14 @@ SERVICE="companion"
 BASE_DIR="/home/bticino/cfg/extra/companion"
 BIN_PATH="${BASE_DIR}/companion"
 PIDFILE="/var/run/${SERVICE}.pid"
+GUARDIAN_PIDFILE="/var/run/${SERVICE}-guardian.pid"
+BOOTLOG="${BASE_DIR}/boot.log"
+START_WAIT_SEC="${COMPANION_START_WAIT_SEC:-60}"
+
+boot_log() {
+	# best-effort diagnostic log on the persistent data partition; never fail start
+	echo "$(date 2>/dev/null) [$$] $*" >> "${BOOTLOG}" 2>/dev/null || true
+}
 
 if [ -f /etc/init.d/functions ]; then
 	# shellcheck source=/dev/null
@@ -96,11 +104,45 @@ cleanup_stale_pidfile() {
 	fi
 }
 
-do_start() {
-	if [ ! -x "${BIN_PATH}" ]; then
-		echo "Missing companion binary at ${BIN_PATH}" >&2
-		exit 1
-	fi
+companion_running() {
+	[ -f "${PIDFILE}" ] || return 1
+	pid_matches_binary "$(cat "${PIDFILE}" 2>/dev/null || true)"
+}
+
+guardian_running() {
+	[ -f "${GUARDIAN_PIDFILE}" ] || return 1
+	gpid="$(cat "${GUARDIAN_PIDFILE}" 2>/dev/null || true)"
+	[ -n "${gpid}" ] && [ -d "/proc/${gpid}" ]
+}
+
+device_lan_ip() {
+	for ifc in wlan0 eth0; do
+		addr="$(ip -4 addr show "${ifc}" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
+		if [ -n "${addr}" ]; then
+			printf '%s' "${addr}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+flexisip_listening() {
+	netstat -lnt 2>/dev/null | grep -q '127.0.0.1:5060'
+}
+
+# ensure_flexisip brings up the device's on-demand SIP proxy if it is not
+# already listening. flexisip must be up *before* the BTicino stack registers,
+# so the device registers c100x to it and the local SIP camera path works
+# without the cloud. flexisip does not touch the hardware watchdog, so safe.
+ensure_flexisip() {
+	flexisip_listening && return 0
+	[ -x /etc/init.d/flexisipsh ] || return 0
+	ip="$(device_lan_ip)" || return 0
+	boot_log "ensure_flexisip: starting flexisip for ${ip}"
+	/etc/init.d/flexisipsh start "${ip}" >/dev/null 2>&1 || true
+}
+
+launch_companion() {
 	mkdir -p "$(dirname "${PIDFILE}")"
 	cleanup_stale_pidfile
 	ensure_firewall
@@ -108,7 +150,66 @@ do_start() {
 		--pidfile "${PIDFILE}" --exec "${BIN_PATH}" -- >/dev/null 2>&1
 }
 
+# do_guardian runs detached (reparented to init). bt_daemon's boot-time sweep
+# kills the companion once shortly after boot; this loop simply restarts it
+# until it sticks, then keeps watching. Self-contained: no inittab/rc changes.
+do_guardian() {
+	echo "$$" > "${GUARDIAN_PIDFILE}"
+	while [ -f "${GUARDIAN_PIDFILE}" ]; do
+		ensure_flexisip
+		if ! companion_running; then
+			boot_log "guardian: companion down, restarting"
+			launch_companion
+		fi
+		sleep 15
+	done
+}
+
+do_start() {
+	boot_log "start invoked (runlevel=$(runlevel 2>/dev/null || echo '?'); extra_mounted=$(mount 2>/dev/null | grep -c 'cfg/extra'); binary=$([ -x "${BIN_PATH}" ] && echo yes || echo no))"
+
+	# The binary lives on the /home/bticino/cfg/extra partition. If this runs
+	# before that partition is mounted, wait briefly rather than giving up.
+	waited=0
+	while [ ! -x "${BIN_PATH}" ] && [ "${waited}" -lt "${START_WAIT_SEC}" ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+
+	if [ ! -x "${BIN_PATH}" ]; then
+		boot_log "ABORT: missing companion binary at ${BIN_PATH} after ${waited}s"
+		echo "Missing companion binary at ${BIN_PATH}" >&2
+		exit 1
+	fi
+	[ "${waited}" -gt 0 ] && boot_log "binary appeared after ${waited}s"
+
+	# Bring flexisip up before the BTicino stack registers (so c100x registers
+	# locally and the SIP camera works without the cloud). Wait briefly for the
+	# LAN IP; this also delays bt_daemon's start enough to win the race.
+	ipwait=0
+	while ! device_lan_ip >/dev/null 2>&1 && [ "${ipwait}" -lt 30 ]; do
+		sleep 1
+		ipwait=$((ipwait + 1))
+	done
+	ensure_flexisip
+
+	launch_companion
+	boot_log "started pid=$(cat "${PIDFILE}" 2>/dev/null || echo none)"
+
+	# Detached guardian survives this script and keeps the companion alive
+	# across bt_daemon's one-time boot sweep.
+	if ! guardian_running; then
+		( "${0}" _guardian >/dev/null 2>&1 & )
+		boot_log "guardian launched"
+	fi
+}
+
 do_stop() {
+	# stop the guardian first so it does not immediately restart the companion
+	if guardian_running; then
+		kill "$(cat "${GUARDIAN_PIDFILE}" 2>/dev/null)" 2>/dev/null || true
+	fi
+	rm -f "${GUARDIAN_PIDFILE}"
 	start-stop-daemon --stop --quiet --oknodo --pidfile "${PIDFILE}" --retry=TERM/5/KILL/2 >/dev/null 2>&1 || true
 	rm -f "${PIDFILE}"
 	remove_firewall
@@ -142,6 +243,9 @@ restart|force-reload)
 	;;
 status)
 	do_status
+	;;
+_guardian)
+	do_guardian
 	;;
 *)
 	echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
