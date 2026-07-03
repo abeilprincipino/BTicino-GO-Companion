@@ -308,6 +308,54 @@ install_binary() {
 	log "Installed binary to ${BIN_PATH}"
 }
 
+recreate_gst_symlink_file() {
+	# Git-on-Windows checkouts materialize symlinks (e.g. libgst*.so ->
+	# libgst*.so.0.x) as tiny TEXT files containing the link target name. If such
+	# a file reaches the device verbatim the bundled gst loader fails with
+	# "file too short". Detect these and turn them back into real symlinks.
+	f="$1"
+	[ -f "${f}" ] || return 0
+	if [ -L "${f}" ]; then
+		return 0
+	fi
+	size=$(wc -c < "${f}" 2>/dev/null | tr -d ' ')
+	[ -n "${size}" ] || return 0
+	[ "${size}" -lt 100 ] || return 0
+	target=$(tr -d '\r\n' < "${f}")
+	[ -n "${target}" ] || return 0
+	# Only sibling basenames are expected for the versioned .so links.
+	case "${target}" in
+		*/*) return 0 ;;
+	esac
+	dir=$(dirname "${f}")
+	[ "${target}" = "$(basename "${f}")" ] && return 0
+	[ -e "${dir}/${target}" ] || return 0
+	rm -f "${f}"
+	ln -s "${target}" "${f}"
+	log "Recreated gst symlink $(basename "${f}") -> ${target}"
+}
+
+fixup_gst_materialized_symlinks() {
+	gst_root="$1"
+
+	lib_dir="${gst_root}/lib"
+	if [ -d "${lib_dir}" ]; then
+		for f in "${lib_dir}"/*.so "${lib_dir}"/*.so.0; do
+			[ -e "${f}" ] || continue
+			recreate_gst_symlink_file "${f}"
+		done
+	fi
+
+	# Defensive: the same materialization can hit plugin .so files.
+	libexec_dir="${gst_root}/libexec/gstreamer-1.0"
+	if [ -d "${libexec_dir}" ]; then
+		for f in "${libexec_dir}"/*.so; do
+			[ -e "${f}" ] || continue
+			recreate_gst_symlink_file "${f}"
+		done
+	fi
+}
+
 install_gst_runtime() {
 	src_dir="$1"
 	if [ -z "${src_dir}" ] || [ ! -d "${src_dir}" ]; then
@@ -328,6 +376,7 @@ install_gst_runtime() {
 		mv -f "${BASE_DIR}/gst" "${previous}"
 	fi
 	mv -f "${candidate}" "${BASE_DIR}/gst"
+	fixup_gst_materialized_symlinks "${BASE_DIR}/gst"
 	log "Installed gst runtime to ${BASE_DIR}/gst"
 }
 
