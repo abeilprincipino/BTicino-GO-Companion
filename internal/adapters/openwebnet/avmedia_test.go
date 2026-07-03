@@ -14,11 +14,22 @@ import (
 	"bticino-go-companion/internal/config"
 )
 
+// connScript scripts one accepted connection: the replies it serves (one per
+// received frame, empty string means "stay silent so the client read-times
+// out") and, optionally, how many frames it answers before hanging up the TCP
+// connection (closeAfter > 0) to emulate bt_ipcamera closing the socket.
+type connScript struct {
+	replies    []string
+	closeAfter int
+}
+
 type fakeAVServer struct {
 	ln      net.Listener
 	mu      sync.Mutex
 	frames  []string
-	replies []string // consumed in order; empty string means "no reply" (client should hit read timeout)
+	replies []string      // flat mode: consumed in order across all connections
+	scripts []connScript  // per-connection mode: one script per accepted connection
+	connIdx int           // index of the next connection to accept in scripted mode
 }
 
 func newFakeAVServer(t *testing.T, replies ...string) *fakeAVServer {
@@ -33,13 +44,35 @@ func newFakeAVServer(t *testing.T, replies ...string) *fakeAVServer {
 	return s
 }
 
+// scriptConns switches the server into per-connection mode: each accepted TCP
+// connection is driven by the next connScript. Call before the client dials.
+func (s *fakeAVServer) scriptConns(scripts ...connScript) {
+	s.mu.Lock()
+	s.scripts = scripts
+	s.mu.Unlock()
+}
+
 func (s *fakeAVServer) serve() {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
 			return
 		}
-		go s.handle(conn)
+		s.mu.Lock()
+		scripted := s.scripts != nil
+		var script connScript
+		if scripted {
+			if s.connIdx < len(s.scripts) {
+				script = s.scripts[s.connIdx]
+			}
+			s.connIdx++
+		}
+		s.mu.Unlock()
+		if scripted {
+			go s.handleScripted(conn, script)
+		} else {
+			go s.handle(conn)
+		}
 	}
 }
 
@@ -64,6 +97,32 @@ func (s *fakeAVServer) handle(conn net.Conn) {
 		s.mu.Unlock()
 		if reply != "" {
 			_, _ = conn.Write([]byte(reply))
+		}
+	}
+}
+
+func (s *fakeAVServer) handleScripted(conn net.Conn, script connScript) {
+	defer conn.Close()
+	buf := make([]byte, 256)
+	served := 0
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		s.frames = append(s.frames, string(buf[:n]))
+		s.mu.Unlock()
+		var reply string
+		if served < len(script.replies) {
+			reply = script.replies[served]
+		}
+		served++
+		if reply != "" {
+			_, _ = conn.Write([]byte(reply))
+		}
+		if script.closeAfter > 0 && served >= script.closeAfter {
+			return // hang up the connection
 		}
 	}
 }
@@ -151,6 +210,9 @@ func TestAVMediaClientRetriesOnNAKThenSucceeds(t *testing.T) {
 }
 
 func TestAVMediaClientFailsAfterPersistentNAK(t *testing.T) {
+	// Persistent NAK on the VIDEO command (the load-bearing add-stream) must
+	// fail StreamStart. Video is sent first, so three NAKs exhaust the attempts
+	// before audio is ever attempted.
 	srv := newFakeAVServer(t, "*#*0##", "*#*0##", "*#*0##")
 	c := newTestAVClient(t, srv, false)
 
@@ -162,11 +224,12 @@ func TestAVMediaClientFailsAfterPersistentNAK(t *testing.T) {
 		t.Fatalf("expected ErrAVCommandRejected, got: %v", err)
 	}
 	if got := len(srv.receivedFrames()); got != 3 {
-		t.Fatalf("expected exactly 3 attempts, got %d", got)
+		t.Fatalf("expected exactly 3 video attempts (no audio), got %d", got)
 	}
 }
 
 func TestAVMediaClientErrorsOnGarbageReply(t *testing.T) {
+	// Garbage on the VIDEO command must fail StreamStart.
 	srv := newFakeAVServer(t, "*#*banana##", "*#*banana##", "*#*banana##")
 	c := newTestAVClient(t, srv, false)
 
@@ -176,6 +239,60 @@ func TestAVMediaClientErrorsOnGarbageReply(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAVCommandRejected) {
 		t.Fatalf("expected ErrAVCommandRejected, got: %v", err)
+	}
+}
+
+func TestAVMediaClientAudioNAKIsBestEffort(t *testing.T) {
+	// Video ACK, then audio NAK x3 (persistent). The device commonly starts its
+	// own audio stream, so a rejected add-audio-stream must NOT fail StreamStart.
+	srv := newFakeAVServer(t, "*#*1##", "*#*0##", "*#*0##", "*#*0##")
+	c := newTestAVClient(t, srv, false)
+
+	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
+		t.Fatalf("audio NAK must be best-effort, got: %v", err)
+	}
+	// 1 video (ACK) + 3 audio attempts (all NAK) were attempted.
+	if got := len(srv.receivedFrames()); got != 4 {
+		t.Fatalf("expected 4 frames (1 video + 3 audio), got %d: %v", got, srv.receivedFrames())
+	}
+}
+
+func TestAVMediaClientAudioGarbageIsBestEffort(t *testing.T) {
+	// Video ACK, then garbage on every audio attempt: still returns nil.
+	srv := newFakeAVServer(t, "*#*1##", "*#*banana##", "*#*banana##", "*#*banana##")
+	c := newTestAVClient(t, srv, false)
+
+	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
+		t.Fatalf("audio garbage must be best-effort, got: %v", err)
+	}
+}
+
+func TestAVMediaClientAudioTimeoutIsBestEffort(t *testing.T) {
+	// Video ACK, then no reply at all on audio (read timeout on each attempt):
+	// still returns nil.
+	srv := newFakeAVServer(t, "*#*1##", "", "", "")
+	c := newTestAVClient(t, srv, false)
+
+	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
+		t.Fatalf("audio timeout must be best-effort, got: %v", err)
+	}
+}
+
+func TestAVMediaClientFieldSequenceVideoACKThenAudioEOFRedialNAK(t *testing.T) {
+	// The exact field-observed sequence on the C100X:
+	//   conn 1: video ACK, then server closes the TCP connection (audio attempt
+	//           1 hits "read reply: EOF").
+	//   conn 2 (redial): audio NAK, audio NAK.
+	// StreamStart must still return nil because audio is best-effort.
+	srv := newFakeAVServer(t)
+	srv.scriptConns(
+		connScript{replies: []string{"*#*1##"}, closeAfter: 1}, // video ACK then hang up
+		connScript{replies: []string{"*#*0##", "*#*0##"}},      // audio NAK x2 after redial
+	)
+	c := newTestAVClient(t, srv, false)
+
+	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
+		t.Fatalf("field sequence must be best-effort, got: %v", err)
 	}
 }
 

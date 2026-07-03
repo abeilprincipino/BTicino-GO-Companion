@@ -67,8 +67,16 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 		return ctx.Err()
 	case <-time.After(c.audioDelay):
 	}
+	// The add-audio-stream command is best-effort: the device frequently starts
+	// its own audio stream (its bus shows a device-initiated *7*300#...#2*##),
+	// so bt_ipcamera NAKs our redundant add. Video is the load-bearing add-stream
+	// and stays fatal above; a rejected/failed audio add must not fail the whole
+	// StreamStart (that would trigger a cleanup BYE and kill the working video).
 	audio := openwebnetproto.BuildAVAddStreamAudio(c.streamIP, audioPort)
-	return c.sendCommand(ctx, "add-audio-stream", audio)
+	if err := c.sendCommand(ctx, "add-audio-stream", audio); err != nil {
+		c.logf("av add-audio-stream failed (device likely already streams audio): %v", err)
+	}
+	return nil
 }
 
 func (c *AVMediaClient) sendCommand(ctx context.Context, label, frame string) error {
