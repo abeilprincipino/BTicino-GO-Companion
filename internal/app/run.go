@@ -283,7 +283,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	if cfg.MediaRTSPEnabled {
 		rtspServer = rtspadapter.NewServer(cfg, logger, mediaService)
 		snapshotService = snapshot.New(cfg, mediaService, rtspServer, logger)
-		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg.Entrypoints)
+		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg)
 		if err != nil {
 			return fmt.Errorf("init webrtc service: %w", err)
 		}

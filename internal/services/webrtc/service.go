@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/system"
 
 	"github.com/pion/ice/v4"
@@ -74,6 +74,7 @@ type Service struct {
 	logger      *log.Logger
 	stream      StreamLifecycle
 	backchannel BackchannelWriter
+	cfg         config.Config
 
 	mu                sync.RWMutex
 	sessions          map[string]*session
@@ -98,7 +99,7 @@ type session struct {
 	closeOnce            sync.Once
 }
 
-func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []entrypoint.Model) (*Service, error) {
+func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWriter, cfg config.Config) (*Service, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -136,7 +137,12 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 	if err != nil {
 		return nil, fmt.Errorf("listen webrtc ice udp %d: %w", webrtcICEPort, err)
 	}
-	udpMux := ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: iceConn})
+	// Use a UniversalUDPMux so host candidates share the single media socket
+	// (port webrtcICEPort). This is also the mux type required to gather
+	// server-reflexive candidates through the SAME socket — see the note on
+	// buildRTCConfiguration below for why that matters and why the pinned pion
+	// cannot actually wire srflx-over-mux.
+	udpMux := ice.NewUniversalUDPMuxDefault(ice.UniversalUDPMuxParams{UDPConn: iceConn})
 	iface, _, err := preferredOutboundInterface()
 	if err != nil {
 		return nil, fmt.Errorf("select webrtc interface: %w", err)
@@ -147,13 +153,29 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 	se.SetInterfaceFilter(func(name string) bool {
 		return name == iface.Name
 	})
+	if len(cfg.WebRTCNAT1To1IPs) > 0 {
+		se.SetNAT1To1IPs(cfg.WebRTCNAT1To1IPs, webrtc.ICECandidateTypeHost)
+	}
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(me),
 		webrtc.WithSettingEngine(se),
 	)
 
-	devAddrMap := make(map[string]string, len(entrypoints))
-	for _, ep := range entrypoints {
+	if len(cfg.WebRTCICEServers) > 0 || len(cfg.WebRTCNAT1To1IPs) > 0 {
+		logger.Printf("webrtc: ice servers=%v nat_1to1=%v universal_mux=%v", cfg.WebRTCICEServers, cfg.WebRTCNAT1To1IPs, true)
+	}
+	if len(cfg.WebRTCICEServers) > 0 {
+		// The pinned pion/webrtc exposes no SettingEngine setter to route
+		// server-reflexive gathering through the shared UDP mux (there is no
+		// SetICEUDPMuxSrflx / WithUDPMuxSrflx path). srflx candidates are
+		// therefore gathered on ephemeral sockets, which the device firewall
+		// (UDP 8555 only) drops — remote STUN traversal via the media port is
+		// NOT functional with this version.
+		logger.Printf("webrtc: WARNING configured STUN servers gather srflx on ephemeral sockets (pinned pion has no srflx-over-mux support); remote access via the media port is unavailable")
+	}
+
+	devAddrMap := make(map[string]string, len(cfg.Entrypoints))
+	for _, ep := range cfg.Entrypoints {
 		id := strings.TrimSpace(ep.ID)
 		if id == "" || !ep.HasStream {
 			continue
@@ -165,11 +187,39 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 		logger:            logger,
 		stream:            stream,
 		backchannel:       backchannel,
+		cfg:               cfg,
 		sessions:          map[string]*session{},
 		pendingCandidates: map[string]pendingCandidateBatch{},
 		devAddrMap:        devAddrMap,
 		api:               api,
 	}, nil
+}
+
+// buildRTCConfiguration maps the persisted WebRTC ICE server URLs onto a
+// webrtc.Configuration. An empty list yields the zero-value Configuration so
+// the default behavior (LAN-only, host candidates on the media socket) is
+// unchanged.
+//
+// Only URL-only entries are supported. TURN URLs that require credentials are
+// out of scope here: we set no Username/Credential, so a credentialed turn:
+// URL would be rejected by pion at NewPeerConnection time. Provide STUN URLs
+// (or credential-less TURN, which is rare) only.
+func buildRTCConfiguration(cfg config.Config) webrtc.Configuration {
+	if len(cfg.WebRTCICEServers) == 0 {
+		return webrtc.Configuration{}
+	}
+	servers := make([]webrtc.ICEServer, 0, len(cfg.WebRTCICEServers))
+	for _, url := range cfg.WebRTCICEServers {
+		url = strings.TrimSpace(url)
+		if url == "" {
+			continue
+		}
+		servers = append(servers, webrtc.ICEServer{URLs: []string{url}})
+	}
+	if len(servers) == 0 {
+		return webrtc.Configuration{}
+	}
+	return webrtc.Configuration{ICEServers: servers}
 }
 
 func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointID string, offerSDP string) (OfferResult, error) {
@@ -234,7 +284,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	}
 	audioDirection := answerDirectionFromOfferAudio(offerSDP)
 
-	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
+	pc, err := s.api.NewPeerConnection(buildRTCConfiguration(s.cfg))
 	if err != nil {
 		return OfferResult{}, fmt.Errorf("create peer connection: %w", err)
 	}

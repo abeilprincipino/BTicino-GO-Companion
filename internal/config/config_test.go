@@ -71,6 +71,39 @@ func TestSaveLoadPersistsDeviceModel(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPersistsWebRTCICEConfig(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.WebRTCICEServers = []string{"stun:stun.l.google.com:19302", " stun:stun1.l.google.com:19302 "}
+	cfg.WebRTCNAT1To1IPs = []string{"203.0.113.7", ""}
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if len(loaded.WebRTCICEServers) != 2 {
+		t.Fatalf("expected 2 ice servers, got %v", loaded.WebRTCICEServers)
+	}
+	if loaded.WebRTCICEServers[1] != "stun:stun1.l.google.com:19302" {
+		t.Fatalf("expected trimmed ice server entry, got %q", loaded.WebRTCICEServers[1])
+	}
+	if len(loaded.WebRTCNAT1To1IPs) != 1 || loaded.WebRTCNAT1To1IPs[0] != "203.0.113.7" {
+		t.Fatalf("expected empty nat 1:1 entries dropped, got %v", loaded.WebRTCNAT1To1IPs)
+	}
+}
+
+func TestWebRTCICEDefaultsEmpty(t *testing.T) {
+	cfg := Default()
+	if len(cfg.WebRTCICEServers) != 0 || len(cfg.WebRTCNAT1To1IPs) != 0 {
+		t.Fatalf("expected empty webrtc ice defaults, got servers=%v nat=%v", cfg.WebRTCICEServers, cfg.WebRTCNAT1To1IPs)
+	}
+}
+
 func TestResolveDefaultStreamDevAddr(t *testing.T) {
 	if got := ResolveDefaultStreamDevAddr("C300X", "20"); got != "20" {
 		t.Fatalf("expected C300X stream devaddr fallback 20, got %q", got)

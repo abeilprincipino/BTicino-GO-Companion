@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+
+	"bticino-go-companion/internal/config"
 )
 
 func newServiceForTest(t *testing.T) *Service {
@@ -21,11 +23,35 @@ func newServiceForTest(t *testing.T) *Service {
 		webrtcICEPort = origPort
 		preferredOutboundInterface = origPreferred
 	})
-	svc, err := New(nil, nil, nil, nil)
+	svc, err := New(nil, nil, nil, config.Config{})
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
 	return svc
+}
+
+func TestBuildRTCConfiguration(t *testing.T) {
+	if got := buildRTCConfiguration(config.Config{}); len(got.ICEServers) != 0 {
+		t.Fatalf("empty config must yield zero-value Configuration, got %+v", got)
+	}
+
+	one := buildRTCConfiguration(config.Config{
+		WebRTCICEServers: []string{"stun:stun.l.google.com:19302"},
+	})
+	if len(one.ICEServers) != 1 || len(one.ICEServers[0].URLs) != 1 ||
+		one.ICEServers[0].URLs[0] != "stun:stun.l.google.com:19302" {
+		t.Fatalf("unexpected single-server configuration: %+v", one)
+	}
+
+	two := buildRTCConfiguration(config.Config{
+		WebRTCICEServers: []string{"stun:a.example:3478", "   ", "stun:b.example:3478"},
+	})
+	if len(two.ICEServers) != 2 {
+		t.Fatalf("expected 2 ice servers (blank dropped), got %+v", two.ICEServers)
+	}
+	if two.ICEServers[0].URLs[0] != "stun:a.example:3478" || two.ICEServers[1].URLs[0] != "stun:b.example:3478" {
+		t.Fatalf("unexpected ice server ordering/content: %+v", two.ICEServers)
+	}
 }
 
 func TestAddCandidateQueuesUnknownSession(t *testing.T) {

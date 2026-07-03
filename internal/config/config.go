@@ -67,6 +67,8 @@ type Config struct {
 	MediaAVEndpointHost       string
 	MediaAVEndpointPort       int
 	MediaAVHighResVideo       bool
+	WebRTCICEServers          []string
+	WebRTCNAT1To1IPs          []string
 	DebugLogEnabled           bool
 	DebugLogPath              string
 	VoicemailMessagesDir      string
@@ -162,10 +164,12 @@ type PersistedCompanionAudio struct {
 }
 
 type PersistedCompanionMedia struct {
-	AVEndpointEnabled *bool  `json:"av_endpoint_enabled,omitempty"`
-	AVEndpointHost    string `json:"av_endpoint_host,omitempty"`
-	AVEndpointPort    *int   `json:"av_endpoint_port,omitempty"`
-	AVHighResVideo    *bool  `json:"av_high_res_video,omitempty"`
+	AVEndpointEnabled *bool    `json:"av_endpoint_enabled,omitempty"`
+	AVEndpointHost    string   `json:"av_endpoint_host,omitempty"`
+	AVEndpointPort    *int     `json:"av_endpoint_port,omitempty"`
+	AVHighResVideo    *bool    `json:"av_high_res_video,omitempty"`
+	WebRTCICEServers  []string `json:"webrtc_ice_servers,omitempty"`
+	WebRTCNAT1To1IPs  []string `json:"webrtc_nat_1to1_ips,omitempty"`
 }
 
 type PersistedCompanionDebug struct {
@@ -345,6 +349,8 @@ func Load(path string) (Config, error) {
 		cfg.MediaAVEndpointPort = *persisted.Companion.Config.Media.AVEndpointPort
 	}
 	cfg.MediaAVHighResVideo = boolFromPtr(persisted.Companion.Config.Media.AVHighResVideo, cfg.MediaAVHighResVideo)
+	cfg.WebRTCICEServers = persisted.Companion.Config.Media.WebRTCICEServers
+	cfg.WebRTCNAT1To1IPs = persisted.Companion.Config.Media.WebRTCNAT1To1IPs
 	cfg.DebugLogEnabled = boolFromPtr(persisted.Companion.Config.Debug.LogEnabled, cfg.DebugLogEnabled)
 	if strings.TrimSpace(persisted.Companion.Config.Debug.LogPath) != "" {
 		cfg.DebugLogPath = strings.TrimSpace(persisted.Companion.Config.Debug.LogPath)
@@ -410,6 +416,8 @@ func Save(path string, cfg Config) error {
 					AVEndpointHost:    strings.TrimSpace(cfg.MediaAVEndpointHost),
 					AVEndpointPort:    intPtrPositive(cfg.MediaAVEndpointPort),
 					AVHighResVideo:    boolPtr(cfg.MediaAVHighResVideo),
+					WebRTCICEServers:  cfg.WebRTCICEServers,
+					WebRTCNAT1To1IPs:  cfg.WebRTCNAT1To1IPs,
 				},
 				Debug: PersistedCompanionDebug{
 					LogEnabled: boolPtr(cfg.DebugLogEnabled),
@@ -551,6 +559,8 @@ func (c *Config) normalize() {
 	if c.MediaAVEndpointPort <= 0 || c.MediaAVEndpointPort > 65535 {
 		c.MediaAVEndpointPort = 30007
 	}
+	c.WebRTCICEServers = normalizeStringList(c.WebRTCICEServers)
+	c.WebRTCNAT1To1IPs = normalizeStringList(c.WebRTCNAT1To1IPs)
 	if strings.TrimSpace(c.DebugLogPath) == "" {
 		c.DebugLogPath = "/tmp/companion-debug.log"
 	}
@@ -680,6 +690,26 @@ func normalizeSystemServices(raw map[string]SystemServiceConfig) map[string]Syst
 
 func normalizeName(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// normalizeStringList trims each entry and drops empties, returning nil when
+// nothing remains so an unset list round-trips as absent.
+func normalizeStringList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var c100xModulesPath = "/home/bticino/cfg/extra/.bt_eliot/mymodules"
