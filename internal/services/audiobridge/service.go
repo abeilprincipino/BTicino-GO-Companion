@@ -27,6 +27,11 @@ const (
 
 	pipelineRestartDelay       = time.Second
 	pipelineMaxRestartAttempts = 6
+
+	// pipelineStderrTailBytes bounds how much of a gst pipeline's stderr we
+	// retain per process so a failure reason survives into the exit log without
+	// letting a chatty pipeline grow memory without bound.
+	pipelineStderrTailBytes = 2048
 )
 
 type pipelineSpec struct {
@@ -37,8 +42,54 @@ type pipelineSpec struct {
 }
 
 type managedProcess struct {
-	spec pipelineSpec
-	cmd  *exec.Cmd
+	spec   pipelineSpec
+	cmd    *exec.Cmd
+	stderr *tailWriter
+}
+
+// tailWriter is an io.Writer that retains only the last cap bytes written to
+// it. It is used to capture the tail of a gst pipeline's stderr so we can log
+// the failure reason without letting a chatty pipeline balloon memory. It is
+// safe for concurrent use: the child process writes from an os/exec goroutine
+// while the supervisor reads the tail after Wait returns.
+type tailWriter struct {
+	mu  sync.Mutex
+	cap int
+	buf []byte
+}
+
+func newTailWriter(cap int) *tailWriter {
+	if cap < 0 {
+		cap = 0
+	}
+	return &tailWriter{cap: cap, buf: make([]byte, 0, cap)}
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	total := len(p)
+	if w.cap == 0 {
+		return total, nil
+	}
+	if len(p) >= w.cap {
+		// The incoming chunk alone overflows the cap: keep only its tail.
+		w.buf = append(w.buf[:0], p[len(p)-w.cap:]...)
+		return total, nil
+	}
+	if len(w.buf)+len(p) > w.cap {
+		// Drop the oldest bytes to make room for the new chunk.
+		drop := len(w.buf) + len(p) - w.cap
+		w.buf = w.buf[drop:]
+	}
+	w.buf = append(w.buf, p...)
+	return total, nil
+}
+
+func (w *tailWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.buf)
 }
 
 type Ports struct {
@@ -379,8 +430,13 @@ func (s *Service) startPipelines(ctx context.Context) ([]*managedProcess, error)
 		if spec.bundle {
 			cmd.Env = append([]string{}, bundledGSTEnv(s.cfg.BundleRoot)...)
 		}
+		stderr := newTailWriter(pipelineStderrTailBytes)
 		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
+		cmd.Stderr = stderr
+		// Log the full command once per pipeline at first start; args are long,
+		// so keep them on their own line and out of the recurring exit logs.
+		s.logger.Printf("audio bridge pipeline starting name=%s bin=%s", spec.name, spec.bin)
+		s.logger.Printf("audio bridge pipeline command name=%s args=%s", spec.name, strings.Join(spec.args, " "))
 		if err := cmd.Start(); err != nil {
 			for _, started := range out {
 				if started != nil && started.cmd != nil && started.cmd.Process != nil {
@@ -389,7 +445,7 @@ func (s *Service) startPipelines(ctx context.Context) ([]*managedProcess, error)
 			}
 			return nil, fmt.Errorf("start audio bridge pipeline %s: %w", spec.name, err)
 		}
-		out = append(out, &managedProcess{spec: spec, cmd: cmd})
+		out = append(out, &managedProcess{spec: spec, cmd: cmd, stderr: stderr})
 	}
 	for _, proc := range out {
 		if proc == nil {
@@ -417,10 +473,14 @@ func (s *Service) supervisePipeline(ctx context.Context, proc *managedProcess) {
 			return
 		}
 		restarts++
-		if err != nil {
-			s.logger.Printf("audio bridge pipeline exited name=%s err=%v restart=%d/%d", proc.spec.name, err, restarts, pipelineMaxRestartAttempts)
+		var tail string
+		if proc.stderr != nil {
+			tail = proc.stderr.String()
+		}
+		if tail != "" {
+			s.logger.Printf("audio bridge pipeline exited name=%s err=%v restart=%d/%d stderr=%q", proc.spec.name, err, restarts, pipelineMaxRestartAttempts, tail)
 		} else {
-			s.logger.Printf("audio bridge pipeline exited name=%s restart=%d/%d", proc.spec.name, restarts, pipelineMaxRestartAttempts)
+			s.logger.Printf("audio bridge pipeline exited name=%s err=%v restart=%d/%d", proc.spec.name, err, restarts, pipelineMaxRestartAttempts)
 		}
 		if restarts > pipelineMaxRestartAttempts {
 			s.logger.Printf("audio bridge pipeline disabled after restart budget name=%s", proc.spec.name)
@@ -436,8 +496,12 @@ func (s *Service) supervisePipeline(ctx context.Context, proc *managedProcess) {
 		if proc.spec.bundle {
 			next.Env = append([]string{}, bundledGSTEnv(s.cfg.BundleRoot)...)
 		}
+		// Fresh stderr capture per process — do not share the buffer across
+		// restarts so each exit log reflects only that run's output.
+		nextStderr := newTailWriter(pipelineStderrTailBytes)
 		next.Stdout = io.Discard
-		next.Stderr = io.Discard
+		next.Stderr = nextStderr
+		s.logger.Printf("audio bridge pipeline starting name=%s bin=%s", proc.spec.name, proc.spec.bin)
 		if err := next.Start(); err != nil {
 			s.logger.Printf("audio bridge pipeline restart failed name=%s err=%v", proc.spec.name, err)
 			continue
@@ -452,6 +516,7 @@ func (s *Service) supervisePipeline(ctx context.Context, proc *managedProcess) {
 			return
 		}
 		proc.cmd = next
+		proc.stderr = nextStderr
 		s.mu.Unlock()
 	}
 }
