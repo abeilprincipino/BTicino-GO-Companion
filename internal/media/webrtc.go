@@ -175,7 +175,7 @@ type pionPeer struct {
 func (p *pionPeer) AddTrack(source Source) (RTPWriter, error) {
 	capability := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000}
 	trackID := "video"
-	if source.MediaKind == MediaKindAudio {
+	if source.MediaKind == MediaKindAudio || source.MediaKind == MediaKindAudioOpus {
 		capability = webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}
 		trackID = "audio"
 	}

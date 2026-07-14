@@ -20,6 +20,7 @@ type MediaKind uint8
 const (
 	MediaKindUnknown MediaKind = iota
 	MediaKindAudio
+	MediaKindAudioOpus
 	MediaKindVideo
 )
 
@@ -100,6 +101,14 @@ func (d *Distributor) UnregisterSource(source Source) bool {
 	}
 	delete(d.sources, source.key())
 	return true
+}
+
+func (d *Distributor) ActiveSource(entrypointID core.EntrypointID, mediaKind MediaKind) (Source, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	source, ok := d.sources[sourceKey{entrypointID: entrypointID, mediaKind: mediaKind}]
+	return source, ok
 }
 
 func (d *Distributor) RegisterConsumer(id string, consumer Consumer) error {
