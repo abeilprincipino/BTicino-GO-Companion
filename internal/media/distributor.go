@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	ErrInvalidSource     = errors.New("media: invalid source")
-	ErrInvalidConsumerID = errors.New("media: invalid consumer id")
-	ErrNilConsumer       = errors.New("media: nil consumer")
+	ErrInvalidSource       = errors.New("media: invalid source")
+	ErrInvalidConsumerID   = errors.New("media: invalid consumer id")
+	ErrNilConsumer         = errors.New("media: nil consumer")
+	ErrSourceNotRegistered = errors.New("media: source is not registered")
 )
 
 type MediaKind uint8
@@ -51,17 +52,26 @@ type Distributor struct {
 
 	sources   map[sourceKey]Source
 	consumers map[string]Consumer
+	sessions  map[sessionKey]Consumer
 }
+
+type SessionID string
 
 type sourceKey struct {
 	entrypointID core.EntrypointID
 	mediaKind    MediaKind
 }
 
+type sessionKey struct {
+	source  Source
+	session SessionID
+}
+
 func NewDistributor() *Distributor {
 	return &Distributor{
 		sources:   map[sourceKey]Source{},
 		consumers: map[string]Consumer{},
+		sessions:  map[sessionKey]Consumer{},
 	}
 }
 
@@ -121,6 +131,39 @@ func (d *Distributor) UnregisterConsumer(id string) bool {
 	return true
 }
 
+func (d *Distributor) RegisterSessionConsumer(source Source, sessionID SessionID, consumer Consumer) error {
+	if sessionID == "" {
+		return ErrInvalidConsumerID
+	}
+	if consumer == nil {
+		return ErrNilConsumer
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if registered, ok := d.sources[source.key()]; !ok || registered != source {
+		return ErrSourceNotRegistered
+	}
+	if d.sessions == nil {
+		d.sessions = map[sessionKey]Consumer{}
+	}
+	d.sessions[sessionKey{source: source, session: sessionID}] = consumer
+	return nil
+}
+
+func (d *Distributor) UnregisterSessionConsumer(source Source, sessionID SessionID) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	key := sessionKey{source: source, session: sessionID}
+	if _, ok := d.sessions[key]; !ok {
+		return false
+	}
+	delete(d.sessions, key)
+	return true
+}
+
 func (d *Distributor) Distribute(source Source, packet *rtp.Packet) bool {
 	if packet == nil {
 		return false
@@ -136,6 +179,11 @@ func (d *Distributor) Distribute(source Source, packet *rtp.Packet) bool {
 	consumers := make([]Consumer, 0, len(d.consumers))
 	for _, consumer := range d.consumers {
 		consumers = append(consumers, consumer)
+	}
+	for key, consumer := range d.sessions {
+		if key.source == source {
+			consumers = append(consumers, consumer)
+		}
 	}
 	d.mu.RUnlock()
 

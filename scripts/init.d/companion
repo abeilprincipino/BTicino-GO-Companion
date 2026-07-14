@@ -1,0 +1,100 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          companion
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Companion service
+### END INIT INFO
+
+set -e
+
+PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+SERVICE="companion"
+BASE_DIR="/home/bticino/cfg/extra/companion"
+BIN_PATH="${BASE_DIR}/companion"
+PIDFILE="/var/run/${SERVICE}.pid"
+LOGFILE="/tmp/${SERVICE}.log"
+
+if [ -f /etc/init.d/functions ]; then
+	# shellcheck source=/dev/null
+	. /etc/init.d/functions
+fi
+
+tcp_listen_ports() { echo "8080 80 8554 51826"; }
+udp_listen_ports() { echo "5353 8555"; }
+
+ensure_firewall_rule() {
+	proto="$1"
+	port="$2"
+	if /usr/sbin/iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1; then return; fi
+	/usr/sbin/iptables -I INPUT 1 -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || true
+}
+
+ensure_firewall() {
+	[ -x /usr/sbin/iptables ] || return
+	for port in $(tcp_listen_ports); do ensure_firewall_rule tcp "${port}"; done
+	for port in $(udp_listen_ports); do ensure_firewall_rule udp "${port}"; done
+}
+
+remove_firewall_rule() {
+	proto="$1"
+	port="$2"
+	while /usr/sbin/iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1; do
+		/usr/sbin/iptables -D INPUT -p "${proto}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || break
+	done
+}
+
+remove_firewall() {
+	[ -x /usr/sbin/iptables ] || return
+	for port in $(tcp_listen_ports); do remove_firewall_rule tcp "${port}"; done
+	for port in $(udp_listen_ports); do remove_firewall_rule udp "${port}"; done
+}
+
+pid_matches_binary() {
+	pid="${1:-}"
+	[ -n "${pid}" ] && [ -d "/proc/${pid}" ] || return 1
+	cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+	case "${cmdline}" in *"${BIN_PATH}"*) return 0 ;; *) return 1 ;; esac
+}
+
+cleanup_stale_pidfile() {
+	[ -f "${PIDFILE}" ] || return
+	pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
+	pid_matches_binary "${pid}" || rm -f "${PIDFILE}"
+}
+
+do_start() {
+	if [ ! -x "${BIN_PATH}" ]; then echo "Missing companion binary at ${BIN_PATH}" >&2; exit 1; fi
+	mkdir -p "$(dirname "${PIDFILE}")"
+	: > "${LOGFILE}"
+	cleanup_stale_pidfile
+	ensure_firewall
+	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
+		--pidfile "${PIDFILE}" --startas /bin/sh -- -c "exec '${BIN_PATH}' >>'${LOGFILE}' 2>&1"
+}
+
+do_stop() {
+	start-stop-daemon --stop --quiet --oknodo --pidfile "${PIDFILE}" --retry=TERM/5/KILL/2 >/dev/null 2>&1 || true
+	rm -f "${PIDFILE}"
+	remove_firewall
+}
+
+do_status() {
+	cleanup_stale_pidfile
+	if [ ! -f "${PIDFILE}" ]; then echo "${SERVICE} stopped"; return 3; fi
+	pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
+	if ! pid_matches_binary "${pid}"; then echo "${SERVICE} stale pidfile (${PIDFILE})"; return 1; fi
+	echo "${SERVICE} running (pid ${pid})"
+}
+
+case "${1:-}" in
+start) do_start ;;
+stop) do_stop ;;
+restart|force-reload) do_stop; do_start ;;
+status) do_status ;;
+*) echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2; exit 1 ;;
+esac
+
+exit 0
