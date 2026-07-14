@@ -8,6 +8,7 @@ require (
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/pion/rtp v1.10.3
 	github.com/pion/webrtc/v4 v4.2.16
+	golang.org/x/crypto v0.53.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -36,7 +37,6 @@ require (
 	github.com/pion/turn/v5 v5.0.10 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect

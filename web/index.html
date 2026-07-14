@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BTicino Companion</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <section id="login" class="card">
+      <h1>BTicino Companion</h1>
+      <p>Sign in to manage the intercom.</p>
+      <form id="login-form">
+        <label>Username<input name="username" value="companion" autocomplete="username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <button>Sign in</button>
+      </form>
+    </section>
+    <section id="password" class="card hidden">
+      <h1>Replace default password</h1>
+      <p>The default credentials are temporary.</p>
+      <form id="password-form">
+        <label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
+        <button>Save password</button>
+      </form>
+    </section>
+    <section id="app" class="card hidden">
+      <header><h1>Configuration</h1><button id="logout" class="secondary">Sign out</button></header>
+      <form id="config-form">
+        <label>Companion name<input name="name" required></label>
+        <label>Log level<select name="log_level"><option>debug</option><option>info</option><option>warn</option><option>error</option></select></label>
+        <label><input name="reboot_enabled" type="checkbox"> Enable reboot control</label>
+        <label><input name="update_enabled" type="checkbox"> Enable update checks</label>
+        <label><input name="update_exposed" type="checkbox"> Expose updates</label>
+        <label><input name="allow_rollback" type="checkbox"> Allow rollback</label>
+        <label><input name="homekit_enabled" type="checkbox"> Enable HomeKit</label>
+        <button>Save configuration</button>
+      </form>
+    </section>
+  </main>
+  <div id="toast" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

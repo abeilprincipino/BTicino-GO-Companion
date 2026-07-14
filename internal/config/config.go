@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,8 +22,9 @@ const (
 )
 
 var (
-	ErrMissingMetadata = errors.New("missing device metadata")
-	ErrConfigExists    = errors.New("config already exists")
+	ErrMissingMetadata   = errors.New("missing device metadata")
+	ErrConfigExists      = errors.New("config already exists")
+	ErrInvalidHomeKitPIN = errors.New("invalid homekit pin")
 )
 
 type Config struct {
@@ -124,6 +126,10 @@ func Default(metadata Metadata) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("generate claim code: %w", err)
 	}
+	homeKitPIN, err := generatedHomeKitPIN()
+	if err != nil {
+		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
+	}
 
 	deviceID := strings.ToLower(strings.ReplaceAll(metadata.Model, " ", "-")) + "-" + strings.ReplaceAll(strings.ToLower(metadata.MAC), ":", "")
 	return Config{
@@ -143,7 +149,8 @@ func Default(metadata Metadata) (Config, error) {
 				},
 			}},
 		},
-		Auth: Auth{ClaimCode: claimCode},
+		Auth:    Auth{ClaimCode: claimCode},
+		HomeKit: HomeKit{PIN: homeKitPIN},
 		System: System{
 			RebootEnabled: true,
 			UpdateEnabled: true,
@@ -229,6 +236,12 @@ func Validate(cfg Config) error {
 		}
 		seen[entrypoint.ID] = struct{}{}
 	}
+	if cfg.HomeKit.Enabled && !validHomeKitPIN(cfg.HomeKit.PIN) {
+		return ErrInvalidHomeKitPIN
+	}
+	if cfg.HomeKit.PIN != "" && !validHomeKitPIN(cfg.HomeKit.PIN) {
+		return ErrInvalidHomeKitPIN
+	}
 	return nil
 }
 
@@ -308,6 +321,34 @@ func randomHex(size int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+func generatedHomeKitPIN() (string, error) {
+	for {
+		value, err := rand.Int(rand.Reader, big.NewInt(100000000))
+		if err != nil {
+			return "", err
+		}
+		pin := fmt.Sprintf("%03d-%02d-%03d", value.Int64()/100000, value.Int64()/1000%100, value.Int64()%1000)
+		if pin != "111-11-111" && pin != "123-45-678" {
+			return pin, nil
+		}
+	}
+}
+
+func validHomeKitPIN(pin string) bool {
+	if len(pin) != 10 || pin[3] != '-' || pin[6] != '-' {
+		return false
+	}
+	for i := range pin {
+		if i == 3 || i == 6 {
+			continue
+		}
+		if pin[i] < '0' || pin[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func clone(cfg Config) Config {

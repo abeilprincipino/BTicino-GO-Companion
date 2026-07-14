@@ -102,3 +102,18 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Fatalf("state = %#v, want %#v", got, want)
 	}
 }
+
+func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
+	cfg, err := Default(Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.HomeKit.PIN) != 10 || cfg.HomeKit.PIN[3] != '-' || cfg.HomeKit.PIN[6] != '-' {
+		t.Fatalf("homekit pin = %q, want XXX-XX-XXX", cfg.HomeKit.PIN)
+	}
+	cfg.HomeKit.Enabled = true
+	cfg.HomeKit.PIN = "invalid"
+	if err := Validate(cfg); !errors.Is(err, ErrInvalidHomeKitPIN) {
+		t.Fatalf("Validate() error = %v, want %v", err, ErrInvalidHomeKitPIN)
+	}
+}
