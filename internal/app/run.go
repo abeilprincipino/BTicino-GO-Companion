@@ -6,6 +6,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/media"
+	"bticino-go-companion/internal/openwebnet"
 	"bticino-go-companion/internal/system"
 	"bticino-go-companion/internal/webui"
 	"context"
@@ -54,6 +55,8 @@ func run(
 	}
 
 	projector := core.NewProjector()
+	openWebNetTrace := openwebnet.NewTrace(0)
+	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
 
 	allowedServices := []string{}
 
@@ -72,9 +75,9 @@ func run(
 
 	commands := api.NewProjectorCommands(
 		projector,
-		nil,
-		nil,
-		nil,
+		openWebNetControl,
+		openWebNetControl,
+		openWebNetControl,
 		rt,
 		updater,
 		webrtc,
@@ -84,9 +87,9 @@ func run(
 	authStore := auth.NewStore(configStore)
 
 	server := api.NewServer(authStore, configStore, projector, commands, logger)
-	server.SetEntrypoints(nil)
-	server.SetAudio(nil)
-	server.SetVoicemail(nil)
+	server.SetEntrypoints(openWebNetControl)
+	server.SetAudio(openWebNetControl)
+	server.SetVoicemail(openWebNetControl)
 	server.SetWebRTC(webrtc)
 	server.SetSnapshot(snapshot)
 	server.SetRuntime(rt)
@@ -107,13 +110,40 @@ func run(
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	webUI := webui.New(configStore, logger, func(ctx context.Context) error {
+		return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
+	}, setLogLevel)
+	webUI.SetFrames(openWebNetTrace)
 	webUIServer := &http.Server{
-		Handler: webui.New(configStore, logger, func(ctx context.Context) error {
-			return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
-		}, setLogLevel).Handler(),
+		Handler:           webUI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	applyEvent := func(event core.Event) {
+		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
+			logger.Warn("apply openwebnet event", "event", event.Type(), "error", err)
+			return
+		}
+		server.BroadcastState()
+		server.BroadcastEvent(map[string]any{"type": event.Type()})
+	}
+	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
+	go func() {
+		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
+			logger.Error("openwebnet listener stopped", "error", err)
+		}
+	}()
+	go func() {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		events, err := openWebNetControl.InitialEvents(probeCtx)
+		if err != nil {
+			logger.Debug("openwebnet initial state incomplete", "error", err)
+		}
+		for _, event := range events {
+			applyEvent(event)
+		}
+	}()
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 

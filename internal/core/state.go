@@ -36,6 +36,14 @@ type PreviewStream struct {
 	EntrypointID EntrypointID `json:"entrypoint_id"`
 }
 
+type AudioState struct {
+	Muted bool `json:"muted"`
+}
+
+type VoicemailState struct {
+	Enabled bool `json:"enabled"`
+}
+
 type State struct {
 	Revision      uint64         `json:"revision"`
 	CallState     CallState      `json:"call_state"`
@@ -43,6 +51,8 @@ type State struct {
 	IncomingCall  *IncomingCall  `json:"incoming_call,omitempty"`
 	ActiveCall    *ActiveCall    `json:"active_call,omitempty"`
 	PreviewStream *PreviewStream `json:"preview_stream,omitempty"`
+	Audio         AudioState     `json:"audio"`
+	Voicemail     VoicemailState `json:"voicemail"`
 }
 
 type Projector struct {
@@ -165,6 +175,14 @@ func apply(state *State, event Event) error {
 		}
 
 		state.PreviewStream = nil
+	case AudioMuted:
+		state.Audio.Muted = true
+	case AudioUnmuted:
+		state.Audio.Muted = false
+	case VoicemailEnabled:
+		state.Voicemail.Enabled = true
+	case VoicemailDisabled:
+		state.Voicemail.Enabled = false
 	default:
 		return transitionError("unsupported event %T", event)
 	}

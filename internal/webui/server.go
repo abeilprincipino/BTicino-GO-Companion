@@ -32,11 +32,16 @@ const (
 
 type RestartFunc func(context.Context) error
 
+type FrameProvider interface {
+	Frames() []map[string]any
+}
+
 type Server struct {
 	config      *config.Store
 	logger      *slog.Logger
 	restart     RestartFunc
 	setLogLevel func(string) error
+	frames      FrameProvider
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -94,6 +99,8 @@ func New(store *config.Store, logger *slog.Logger, restart RestartFunc, setLogLe
 
 	return &Server{config: store, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session)}
 }
+
+func (s *Server) SetFrames(provider FrameProvider) { s.frames = provider }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -167,7 +174,11 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFrames(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"available": false, "frames": []any{}})
+	if s.frames == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "frames": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "frames": s.frames.Frames()})
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {

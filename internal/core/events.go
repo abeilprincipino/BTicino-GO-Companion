@@ -18,6 +18,10 @@ const (
 	EventCallHungUp          EventType = "call.hung_up"
 	EventPreviewStarted      EventType = "preview.started"
 	EventPreviewStopped      EventType = "preview.stopped"
+	EventAudioMuted          EventType = "audio.muted"
+	EventAudioUnmuted        EventType = "audio.unmuted"
+	EventVoicemailEnabled    EventType = "voicemail.enabled"
+	EventVoicemailDisabled   EventType = "voicemail.disabled"
 )
 
 type Event interface {
@@ -89,3 +93,23 @@ type PreviewStopped struct {
 
 func (PreviewStopped) Type() EventType { return EventPreviewStopped }
 func (PreviewStopped) event()          {}
+
+type AudioMuted struct{}
+
+func (AudioMuted) Type() EventType { return EventAudioMuted }
+func (AudioMuted) event()          {}
+
+type AudioUnmuted struct{}
+
+func (AudioUnmuted) Type() EventType { return EventAudioUnmuted }
+func (AudioUnmuted) event()          {}
+
+type VoicemailEnabled struct{}
+
+func (VoicemailEnabled) Type() EventType { return EventVoicemailEnabled }
+func (VoicemailEnabled) event()          {}
+
+type VoicemailDisabled struct{}
+
+func (VoicemailDisabled) Type() EventType { return EventVoicemailDisabled }
+func (VoicemailDisabled) event()          {}

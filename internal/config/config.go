@@ -184,7 +184,6 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-
 	if err := ensureSingleDocument(decoder); err != nil {
 		return Config{}, err
 	}
