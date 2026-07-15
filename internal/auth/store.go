@@ -7,18 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	claimCodeBytes   = 4
 	bearerTokenBytes = 32
 	challengeBytes   = 16
 
-	challengeLifetime = 5 * time.Minute
-	rateWindow        = time.Minute
-	maxAttempts       = 5
+	challengeLifetime  = 5 * time.Minute
+	RepairCodeLifetime = 10 * time.Minute
+	rateWindow         = time.Minute
+	maxAttempts        = 5
 )
 
 var (
@@ -29,6 +30,10 @@ var (
 	ErrChallengeExpired        = errors.New("challenge expired")
 	ErrChallengeSourceMismatch = errors.New("challenge source mismatch")
 	ErrInvalidClaimCode        = errors.New("invalid claim code")
+	ErrAlreadyClaimed          = errors.New("device already claimed")
+	ErrRepairNotAllowed        = errors.New("repair flow is not allowed")
+	ErrInvalidRepairCode       = errors.New("invalid repair code")
+	ErrRepairCodeExpired       = errors.New("repair code expired")
 )
 
 type Challenge struct {
@@ -46,6 +51,11 @@ type attempts struct {
 	count       int
 }
 
+type repairCode struct {
+	value     string
+	expiresAt time.Time
+}
+
 type Store struct {
 	config *config.Store
 	now    func() time.Time
@@ -53,6 +63,7 @@ type Store struct {
 	mu         sync.Mutex
 	challenges map[string]challenge
 	attempts   map[string]attempts
+	repair     repairCode
 }
 
 func NewStore(cfg *config.Store) *Store {
@@ -72,6 +83,9 @@ func (s *Store) CreateChallenge(sourceIP string) (Challenge, error) {
 
 	if s.config == nil {
 		return Challenge{}, ErrStoreUnavailable
+	}
+	if !s.NeedsClaim() {
+		return Challenge{}, ErrAlreadyClaimed
 	}
 
 	id, err := config.RandomHex(challengeBytes)
@@ -100,6 +114,9 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 
 	if s.config == nil {
 		return "", ErrStoreUnavailable
+	}
+	if !s.NeedsClaim() {
+		return "", ErrAlreadyClaimed
 	}
 
 	now := s.now()
@@ -131,18 +148,18 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
 
-	nextRepairCode, err := config.RandomHex(claimCodeBytes)
+	nextClaimCode, err := config.GenerateClaimCode()
 	if err != nil {
 		return "", fmt.Errorf("generate repair code: %w", err)
 	}
 
 	if err := s.config.Update(func(cfg *config.Config) error {
-		if !constantTimeHexEqual(repairCode, cfg.Auth.ClaimCode, claimCodeBytes) {
+		if !constantTimeClaimCodeEqual(repairCode, cfg.Auth.ClaimCode) {
 			return ErrInvalidClaimCode
 		}
 
 		cfg.Auth.BearerToken = token
-		cfg.Auth.ClaimCode = nextRepairCode
+		cfg.Auth.ClaimCode = nextClaimCode
 
 		return nil
 	}); err != nil {
@@ -160,6 +177,14 @@ func (s *Store) ValidateBearer(token string) bool {
 	}
 
 	return constantTimeHexEqual(token, s.config.Snapshot().Auth.BearerToken, bearerTokenBytes)
+}
+
+func (s *Store) NeedsClaim() bool {
+	if s.config == nil {
+		return true
+	}
+
+	return s.config.Snapshot().Auth.BearerToken == ""
 }
 
 func (s *Store) RotateBearer() (string, error) {
@@ -193,36 +218,56 @@ func (s *Store) RevokeBearer() error {
 	})
 }
 
-func (s *Store) IssueRepairCode() (string, error) {
-	return s.replaceRepairCode(false)
+func (s *Store) IssueRepairCode() (string, time.Time, error) {
+	if s.NeedsClaim() {
+		return "", time.Time{}, ErrRepairNotAllowed
+	}
+
+	code, err := config.GenerateClaimCode()
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("generate repair code: %w", err)
+	}
+
+	expiresAt := s.now().Add(RepairCodeLifetime)
+	s.mu.Lock()
+	s.repair = repairCode{value: code, expiresAt: expiresAt}
+	s.mu.Unlock()
+
+	return code, expiresAt, nil
 }
 
-func (s *Store) ResetRepairCode() (string, error) {
-	return s.replaceRepairCode(true)
-}
-
-func (s *Store) replaceRepairCode(revokeBearer bool) (string, error) {
+func (s *Store) ResetClaim(code string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-
-	repairCode, err := config.RandomHex(claimCodeBytes)
-	if err != nil {
-		return "", fmt.Errorf("generate repair code: %w", err)
+	if s.NeedsClaim() {
+		return "", ErrRepairNotAllowed
 	}
 
-	if err := s.config.Update(func(cfg *config.Config) error {
-		cfg.Auth.ClaimCode = repairCode
-		if revokeBearer {
-			cfg.Auth.BearerToken = ""
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repair.value == "" || !constantTimeStringEqual(code, s.repair.value) {
+		return "", ErrInvalidRepairCode
+	}
+	if !s.repair.expiresAt.After(s.now()) {
+		s.repair = repairCode{}
+		return "", ErrRepairCodeExpired
+	}
 
+	claimCode, err := config.GenerateClaimCode()
+	if err != nil {
+		return "", fmt.Errorf("generate claim code: %w", err)
+	}
+	if err := s.config.Update(func(cfg *config.Config) error {
+		cfg.Auth.ClaimCode = claimCode
+		cfg.Auth.BearerToken = ""
 		return nil
 	}); err != nil {
 		return "", err
 	}
 
-	return repairCode, nil
+	s.repair = repairCode{}
+	return claimCode, nil
 }
 
 func (s *Store) allowAttempt(sourceIP string, now time.Time) bool {
@@ -272,6 +317,24 @@ func constantTimeHexEqual(left, right string, size int) bool {
 	rightBytes, rightValid := decodeHex(right, size)
 
 	return subtle.ConstantTimeCompare(leftBytes, rightBytes) == 1 && leftValid && rightValid
+}
+
+func constantTimeClaimCodeEqual(left, right string) bool {
+	if !config.ValidClaimCode(left) || !config.ValidClaimCode(right) {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+func constantTimeStringEqual(left, right string) bool {
+	left = strings.ToLower(strings.TrimSpace(left))
+	right = strings.ToLower(strings.TrimSpace(right))
+	if len(left) != len(right) {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
 func decodeHex(value string, size int) ([]byte, bool) {

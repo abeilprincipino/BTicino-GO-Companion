@@ -2,10 +2,45 @@ package system
 
 import (
 	"bufio"
+	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
 	"strings"
 )
+
+func PreferredOutboundInterface() (net.Interface, error) {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return net.Interface{}, fmt.Errorf("detect outbound ipv4: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck // UDP probe is complete
+
+	address, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || address.IP.To4() == nil {
+		return net.Interface{}, fmt.Errorf("detect outbound ipv4")
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return net.Interface{}, fmt.Errorf("list interfaces: %w", err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, ifaceAddress := range addresses {
+			if network, ok := ifaceAddress.(*net.IPNet); ok && network.Contains(address.IP) {
+				return iface, nil
+			}
+		}
+	}
+
+	return net.Interface{}, fmt.Errorf("map outbound ipv4 to interface")
+}
 
 // NetworkSnapshot describes the connected WiFi service reported by ConnMan.
 type NetworkSnapshot struct {

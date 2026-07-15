@@ -156,23 +156,30 @@ func (s *Server) revokeBearer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) issueRepairCode(w http.ResponseWriter, r *http.Request) {
-	code, err := s.auth.IssueRepairCode()
+	code, expiresAt, err := s.auth.IssueRepairCode()
 	if err != nil {
 		writeAuthError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, map[string]any{"repair_code": code})
+	writeOK(w, http.StatusOK, map[string]any{"repair_code": code, "expires_at": expiresAt, "ttl_s": int(auth.RepairCodeLifetime.Seconds())})
 }
 
 func (s *Server) resetClaim(w http.ResponseWriter, r *http.Request) {
-	code, err := s.auth.ResetRepairCode()
+	var body struct {
+		RepairCode string `json:"repair_code"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+
+	code, err := s.auth.ResetClaim(body.RepairCode)
 	if err != nil {
 		writeAuthError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, map[string]any{"repair_code": code})
+	writeOK(w, http.StatusOK, map[string]any{"needs_claim": true, "claim_code": code})
 }
 
 func (s *Server) stateSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -300,6 +307,12 @@ func writeAuthError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "claim attempts are rate limited")
 	case errors.Is(err, auth.ErrChallengeNotFound), errors.Is(err, auth.ErrChallengeExpired), errors.Is(err, auth.ErrChallengeSourceMismatch), errors.Is(err, auth.ErrInvalidClaimCode):
 		writeError(w, http.StatusUnauthorized, "claim_failed", "claim could not be completed")
+	case errors.Is(err, auth.ErrInvalidRepairCode), errors.Is(err, auth.ErrRepairCodeExpired):
+		writeError(w, http.StatusUnauthorized, "repair_code_invalid", "repair code is invalid or expired")
+	case errors.Is(err, auth.ErrRepairNotAllowed):
+		writeError(w, http.StatusConflict, "repair_not_allowed", "claim reset is not currently allowed")
+	case errors.Is(err, auth.ErrAlreadyClaimed):
+		writeError(w, http.StatusConflict, "already_claimed", "device is already claimed")
 	case errors.Is(err, auth.ErrStoreUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is unavailable")
 	default:

@@ -71,7 +71,7 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 		t.Fatalf("saved companion name = %q", store.Snapshot().Companion.Name)
 	}
 
-	if store.Snapshot().Auth.BearerToken != "bearer-secret" || store.Snapshot().Auth.ClaimCode != "01234567" {
+	if store.Snapshot().Auth.BearerToken != "bearer-secret" || store.Snapshot().Auth.ClaimCode != "0123-4567" {
 		t.Fatal("config save changed auth secrets")
 	}
 }
@@ -154,7 +154,7 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 		t.Fatalf("default config: %v", err)
 	}
 
-	cfg.Auth.ClaimCode = "01234567"
+	cfg.Auth.ClaimCode = "0123-4567"
 
 	cfg.Auth.BearerToken = "bearer-secret"
 	if err := writeConfig(path, cfg); err != nil {

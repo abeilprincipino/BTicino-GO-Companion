@@ -128,7 +128,7 @@ func Default(metadata Metadata) (Config, error) {
 		return Config{}, err
 	}
 
-	claimCode, err := RandomHex(4)
+	claimCode, err := GenerateClaimCode()
 	if err != nil {
 		return Config{}, fmt.Errorf("generate claim code: %w", err)
 	}
@@ -237,12 +237,8 @@ func Validate(cfg Config) error {
 		return ErrMissingMetadata
 	}
 
-	if len(cfg.Auth.ClaimCode) != 8 {
-		return errors.New("claim code must be 8 hex characters")
-	}
-
-	if _, err := hex.DecodeString(cfg.Auth.ClaimCode); err != nil {
-		return errors.New("claim code must be hexadecimal")
+	if !ValidClaimCode(cfg.Auth.ClaimCode) {
+		return errors.New("claim code must use xxxx-xxxx hexadecimal format")
 	}
 
 	if len(cfg.Companion.Entrypoints) == 0 {
@@ -324,6 +320,26 @@ func RandomHex(size int) (string, error) {
 	}
 
 	return hex.EncodeToString(bytes), nil
+}
+
+func GenerateClaimCode() (string, error) {
+	first, err := RandomHex(2)
+	if err != nil {
+		return "", err
+	}
+	second, err := RandomHex(2)
+	if err != nil {
+		return "", err
+	}
+	return first + "-" + second, nil
+}
+
+func ValidClaimCode(code string) bool {
+	if len(code) != 9 || code[4] != '-' {
+		return false
+	}
+	_, err := hex.DecodeString(code[:4] + code[5:])
+	return err == nil
 }
 
 func GenerateHomeKitPIN() (string, error) {

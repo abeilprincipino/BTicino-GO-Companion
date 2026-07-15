@@ -135,3 +135,21 @@ func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want %v", err, ErrInvalidHomeKitPIN)
 	}
 }
+
+func TestClaimCodeFormat(t *testing.T) {
+	t.Parallel()
+
+	code, err := GenerateClaimCode()
+	if err != nil {
+		t.Fatalf("generate claim code: %v", err)
+	}
+	if !ValidClaimCode(code) {
+		t.Fatalf("generated invalid claim code %q", code)
+	}
+
+	for _, invalid := range []string{"01234567", "0123_4567", "0123-456", "0123-45678", "zzzz-zzzz"} {
+		if ValidClaimCode(invalid) {
+			t.Errorf("ValidClaimCode(%q) = true, want false", invalid)
+		}
+	}
+}

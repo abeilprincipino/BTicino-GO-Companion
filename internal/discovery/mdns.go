@@ -1,18 +1,24 @@
 package discovery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/grandcat/zeroconf"
 )
 
 const (
-	ServiceType = "_bticomp._tcp"
-	Domain      = "local."
+	ServiceType  = "_bticomp._tcp"
+	Domain       = "local."
+	refreshEvery = 15 * time.Second
+	retryInitial = time.Second
+	retryMaximum = 30 * time.Second
 )
 
 var ErrInvalidDeviceID = errors.New("invalid mDNS device ID")
@@ -46,6 +52,8 @@ type RegistrationRequest struct {
 
 type Service struct {
 	registrar Registrar
+	refresh   time.Duration
+	retryMax  time.Duration
 }
 
 func NewService(registrar Registrar) *Service {
@@ -53,7 +61,7 @@ func NewService(registrar Registrar) *Service {
 		registrar = zeroconfRegistrar{}
 	}
 
-	return &Service{registrar: registrar}
+	return &Service{registrar: registrar, refresh: refreshEvery, retryMax: retryMaximum}
 }
 
 func (s *Service) Advertise(advertisement Advertisement) (Registration, error) {
@@ -63,6 +71,65 @@ func (s *Service) Advertise(advertisement Advertisement) (Registration, error) {
 	}
 
 	return s.registrar.Register(request)
+}
+
+func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error)) error {
+	if snapshot == nil {
+		return errors.New("mDNS snapshot is unavailable")
+	}
+
+	ticker := time.NewTicker(s.refresh)
+	defer ticker.Stop()
+
+	backoff := retryInitial
+	var current Advertisement
+	var registration Registration
+	for {
+		if registration == nil {
+			next, err := snapshot()
+			if err == nil {
+				registration, err = s.Advertise(next)
+			}
+			if err == nil {
+				current = next
+				backoff = retryInitial
+			} else {
+				if err := wait(ctx, backoff); err != nil {
+					return err
+				}
+				backoff = min(backoff*2, s.retryMax)
+				continue
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			registration.Shutdown()
+			return nil
+		case <-ticker.C:
+			next, err := snapshot()
+			if err != nil || advertisementsEqual(current, next) {
+				continue
+			}
+			registration.Shutdown()
+			registration = nil
+		}
+	}
+}
+
+func wait(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func advertisementsEqual(left, right Advertisement) bool {
+	return left.DeviceID == right.DeviceID && left.Name == right.Name && left.Model == right.Model && left.NeedsClaim == right.NeedsClaim && left.Port == right.Port && slices.EqualFunc(left.Interfaces, right.Interfaces, func(a, b net.Interface) bool { return a.Index == b.Index && a.Name == b.Name })
 }
 
 func registrationRequest(advertisement Advertisement) (RegistrationRequest, error) {

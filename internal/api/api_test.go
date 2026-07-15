@@ -104,6 +104,38 @@ func TestServer_Pair(t *testing.T) {
 	}
 }
 
+func TestServer_RepairReset(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issue := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/admin/issue-repair-code", nil)
+	issue.Header.Set("Authorization", "Bearer "+token)
+	issued := httptest.NewRecorder()
+	server.Handler().ServeHTTP(issued, issue)
+	var repair struct {
+		RepairCode string `json:"repair_code"`
+	}
+	if issued.Code != http.StatusOK || json.Unmarshal(issued.Body.Bytes(), &repair) != nil || repair.RepairCode == "" {
+		t.Fatalf("issue repair response = %s", issued.Body.String())
+	}
+
+	reset := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/admin/reset-claim", strings.NewReader(`{"repair_code":"`+repair.RepairCode+`"}`))
+	reset.Header.Set("Authorization", "Bearer "+token)
+	resetResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resetResponse, reset)
+	if resetResponse.Code != http.StatusOK {
+		t.Fatalf("reset repair response = %s", resetResponse.Body.String())
+	}
+	if server.auth.ValidateBearer(token) {
+		t.Fatal("reset repair did not revoke bearer")
+	}
+}
+
 func TestParseMessage(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/diagnostics"
+	"bticino-go-companion/internal/discovery"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
 	"bticino-go-companion/internal/system"
@@ -86,6 +87,7 @@ func run(
 	)
 
 	authStore := auth.NewStore(configStore)
+	mdns := discovery.NewService(nil)
 
 	server := api.NewServer(authStore, configStore, projector, commands, logger)
 	server.SetWebRTC(webrtc)
@@ -146,6 +148,26 @@ func run(
 		}
 	}()
 	diagnosticService.Start(ctx)
+	go func() {
+		err := mdns.Run(ctx, func() (discovery.Advertisement, error) {
+			cfg := configStore.Snapshot()
+			iface, err := system.PreferredOutboundInterface()
+			if err != nil {
+				return discovery.Advertisement{}, err
+			}
+			return discovery.Advertisement{
+				DeviceID:   cfg.Companion.DeviceID,
+				Name:       cfg.Companion.Name,
+				Model:      cfg.Companion.Model,
+				NeedsClaim: authStore.NeedsClaim(),
+				Port:       8080,
+				Interfaces: []net.Interface{iface},
+			}, nil
+		})
+		if err != nil && ctx.Err() == nil {
+			logger.Error("mDNS stopped", "error", err)
+		}
+	}()
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 

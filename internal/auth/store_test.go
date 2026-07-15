@@ -32,12 +32,15 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 		t.Fatal("issued bearer token was not valid")
 	}
 
-	if _, err := store.Claim("192.0.2.1", challenge.ID, code); !errors.Is(err, ErrChallengeNotFound) {
-		t.Fatalf("replayed claim error = %v, want ErrChallengeNotFound", err)
+	if _, err := store.Claim("192.0.2.1", challenge.ID, code); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("replayed claim error = %v, want ErrAlreadyClaimed", err)
 	}
 
 	if got := backend.Snapshot().Auth.ClaimCode; got == code {
 		t.Fatal("successful claim did not replace repair code")
+	}
+	if _, err := store.CreateChallenge("192.0.2.1"); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("challenge after claim error = %v, want ErrAlreadyClaimed", err)
 	}
 }
 
@@ -186,26 +189,33 @@ func TestStore_RepairCodeIssueAndReset(t *testing.T) {
 		t.Fatalf("rotate bearer: %v", err)
 	}
 
-	issued, err := store.IssueRepairCode()
+	issued, expiresAt, err := store.IssueRepairCode()
 	if err != nil {
 		t.Fatalf("issue repair code: %v", err)
 	}
 
-	if len(issued) != claimCodeBytes*2 {
-		t.Fatalf("issued repair code length = %d, want %d", len(issued), claimCodeBytes*2)
+	if !config.ValidClaimCode(issued) {
+		t.Fatalf("issued repair code = %q", issued)
+	}
+	if !expiresAt.After(testNow) {
+		t.Fatalf("repair code expires at %s", expiresAt)
 	}
 
 	if !store.ValidateBearer(token) {
 		t.Fatal("issuing repair code revoked bearer")
 	}
 
-	reset, err := store.ResetRepairCode()
+	if _, err := store.ResetClaim("invalid"); !errors.Is(err, ErrInvalidRepairCode) {
+		t.Fatalf("invalid repair code error = %v, want ErrInvalidRepairCode", err)
+	}
+
+	reset, err := store.ResetClaim(issued)
 	if err != nil {
 		t.Fatalf("reset repair code: %v", err)
 	}
 
-	if len(reset) != claimCodeBytes*2 {
-		t.Fatalf("reset repair code length = %d, want %d", len(reset), claimCodeBytes*2)
+	if !config.ValidClaimCode(reset) {
+		t.Fatalf("reset claim code = %q", reset)
 	}
 
 	if store.ValidateBearer(token) {

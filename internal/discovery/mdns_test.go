@@ -1,10 +1,13 @@
 package discovery
 
 import (
+	"context"
 	"errors"
 	"net"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type recordingRegistrar struct {
@@ -27,6 +30,13 @@ func (r *recordingRegistrar) Register(request RegistrationRequest) (Registration
 type registrationStub struct{}
 
 func (registrationStub) Shutdown() {}
+
+type notifyingRegistrar struct{ registrations chan RegistrationRequest }
+
+func (r notifyingRegistrar) Register(request RegistrationRequest) (Registration, error) {
+	r.registrations <- request
+	return registrationStub{}, nil
+}
 
 func TestServiceAdvertiseUsesDeviceIDAsMDNSHost(t *testing.T) {
 	t.Parallel()
@@ -126,5 +136,26 @@ func TestServiceAdvertiseRejectsInvalidPort(t *testing.T) {
 
 	if registrar.called {
 		t.Fatalf("registrar called with %+v", registrar.request)
+	}
+}
+
+func TestServiceRunReadvertisesChangedClaimState(t *testing.T) {
+	registrar := notifyingRegistrar{registrations: make(chan RegistrationRequest, 2)}
+	service := NewService(registrar)
+	service.refresh = time.Millisecond
+	var claimed atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = service.Run(ctx, func() (Advertisement, error) {
+			return Advertisement{DeviceID: "c300x-aabb", Port: 8080, NeedsClaim: !claimed.Load()}, nil
+		})
+	}()
+
+	first := <-registrar.registrations
+	claimed.Store(true)
+	second := <-registrar.registrations
+	if slices.Contains(first.TXT, "needs_claim=false") || !slices.Contains(second.TXT, "needs_claim=false") {
+		t.Fatalf("claim TXT transition = %#v -> %#v", first.TXT, second.TXT)
 	}
 }
