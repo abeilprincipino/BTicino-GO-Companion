@@ -32,7 +32,7 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 		t.Fatalf("bootstrap config status = %d", response.Code)
 	}
 
-	response = request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Password: "correct-horse"}, cookie)
+	response = request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, cookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("password change status = %d: %s", response.Code, response.Body.String())
 	}
@@ -84,7 +84,7 @@ func TestPasswordChangeRotatesSecretAndInvalidatesEverySession(t *testing.T) {
 	second := passwordSession(t, server, "correct-horse")
 	previousSecret := store.Snapshot().WebUI.SessionSecret
 
-	response := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{CurrentPassword: "correct-horse", Password: "new-password"}, first)
+	response := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", CurrentPassword: "correct-horse", Password: "new-password"}, first)
 	if response.Code != http.StatusOK {
 		t.Fatalf("password change status = %d: %s", response.Code, response.Body.String())
 	}
@@ -148,7 +148,7 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 		t.Fatalf("open config: %v", err)
 	}
 
-	return New(store, slog.New(slog.DiscardHandler), restart), store
+	return New(store, slog.New(slog.DiscardHandler), restart, func(string) error { return nil }), store
 }
 
 func configuredSession(t *testing.T, server *Server) *http.Cookie {
@@ -161,7 +161,7 @@ func configuredSession(t *testing.T, server *Server) *http.Cookie {
 
 	cookie := sessionCookieFrom(t, bootstrap)
 
-	changed := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Password: "correct-horse"}, cookie)
+	changed := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, cookie)
 	if changed.Code != http.StatusOK {
 		t.Fatalf("bootstrap password status = %d", changed.Code)
 	}
@@ -172,7 +172,7 @@ func configuredSession(t *testing.T, server *Server) *http.Cookie {
 func passwordSession(t *testing.T, server *Server, password string) *http.Cookie {
 	t.Helper()
 
-	response := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: password}, nil)
+	response := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: "admin", Password: password}, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("configured login status = %d", response.Code)
 	}

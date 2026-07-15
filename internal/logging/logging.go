@@ -77,7 +77,17 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 		if route == "" {
 			route = r.URL.Path
 		}
-		logger.InfoContext(r.Context(), "http request", "method", r.Method, "route", route, "status", response.status, "duration", time.Since(started), "remote_addr", r.RemoteAddr)
+		if route == "/webui/api/logs" {
+			return
+		}
+
+		attributes := []any{"method", r.Method, "route", route, "status", response.status, "duration", time.Since(started), "remote_addr", r.RemoteAddr}
+		if response.status >= http.StatusBadRequest {
+			logger.WarnContext(r.Context(), "http request failed", attributes...)
+			return
+		}
+
+		logger.DebugContext(r.Context(), "http request", attributes...)
 	})
 }
 

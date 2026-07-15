@@ -7,39 +7,276 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <main>
-    <section id="login" class="card">
-      <h1>BTicino Companion</h1>
-      <p>Sign in to manage the intercom.</p>
-      <form id="login-form">
-        <label>Username<input name="username" value="companion" autocomplete="username" required></label>
-        <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-        <button>Sign in</button>
-      </form>
-    </section>
-    <section id="password" class="card hidden">
-      <h1>Replace default password</h1>
-      <p>The default credentials are temporary.</p>
-      <form id="password-form">
-        <label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
-        <button>Save password</button>
-      </form>
-    </section>
-    <section id="app" class="card hidden">
-      <header><h1>Configuration</h1><button id="logout" class="secondary">Sign out</button></header>
-      <form id="config-form">
-        <label>Companion name<input name="name" required></label>
-        <label>Log level<select name="log_level"><option>debug</option><option>info</option><option>warn</option><option>error</option></select></label>
-        <label><input name="reboot_enabled" type="checkbox"> Enable reboot control</label>
-        <label><input name="update_enabled" type="checkbox"> Enable update checks</label>
-        <label><input name="update_exposed" type="checkbox"> Expose updates</label>
-        <label><input name="allow_rollback" type="checkbox"> Allow rollback</label>
-        <label><input name="homekit_enabled" type="checkbox"> Enable HomeKit</label>
-        <button>Save configuration</button>
-      </form>
-    </section>
-  </main>
-  <div id="toast" aria-live="polite"></div>
-  <script src="/app.js"></script>
+
+<!-- Login -->
+<div id="loginView" class="auth-container">
+  <div class="auth-card">
+    <h1>BTicino Companion</h1>
+    <p class="auth-subtitle">Sign in to manage the intercom</p>
+    <div id="loginError" class="auth-error"></div>
+    <p id="loginHelp" class="auth-help">First login uses <strong>companion / companion</strong>, then you must replace the default credentials.</p>
+    <form id="loginForm">
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <input class="form-input" name="username" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn btn-primary">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<!-- Setup (bootstrap credential replacement) -->
+<div id="setupView" class="auth-container hidden">
+  <div class="auth-card">
+    <h1>Replace Default Account</h1>
+    <p class="auth-subtitle">Set a real username and password</p>
+    <div id="setupError" class="auth-error"></div>
+    <p class="auth-help">The bootstrap login is intentionally temporary. Set a real username and password before config or logs are exposed.</p>
+    <form id="setupForm">
+      <div class="form-group">
+        <label class="form-label">New username</label>
+        <input class="form-input" name="username" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">New password</label>
+        <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
+      </div>
+      <button type="submit" class="btn btn-primary">Save Credentials</button>
+    </form>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="appView" class="hidden">
+  <nav class="nav" id="nav"></nav>
+
+  <div class="container">
+
+    <!-- About Page -->
+    <div id="aboutPage" class="page">
+      <div class="about-hero">
+        <div class="about-logo"><img src="/bticino-logo.svg" height="64" alt="BTicino"></div>
+        <h1>BTicino Companion</h1>
+        <p>Intercom management dashboard</p>
+      </div>
+
+      <div class="grid grid-2 section">
+        <div class="card">
+          <div class="card-header">Device</div>
+          <div class="info-row"><span class="info-label">Model</span><span class="info-value" id="statusModel">-</span></div>
+          <div class="info-row"><span class="info-label">Firmware</span><span class="info-value" id="statusFirmware">-</span></div>
+          <div class="info-row"><span class="info-label">Hardware</span><span class="info-value" id="statusHardware">-</span></div>
+        </div>
+        <div class="card">
+          <div class="card-header">Companion</div>
+          <div class="info-row">
+            <span class="info-label">Version</span>
+            <span class="info-value" id="aboutVersion">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Git SHA</span>
+            <span class="info-value mono" id="aboutGitSHA">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Update</span>
+            <span class="info-value"><span id="aboutUpdateBadge" class="badge badge-info">-</span></span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">Status</div>
+          <div class="info-row"><span class="info-label">Uptime</span><span class="info-value" id="statusUptime">-</span></div>
+          <div class="info-row"><span class="info-label">Free RAM</span><span class="info-value" id="statusFreeRAM">-</span></div>
+          <div class="info-row"><span class="info-label">Wi-Fi</span><span class="info-value" id="statusWifi">-</span></div>
+        </div>
+      </div>
+
+      <h2 class="section-title">Resources</h2>
+      <div class="card section">
+        <ul class="link-list">
+          <li>
+            <span class="link-label">GO Companion</span>
+            <a class="link-url" href="https://github.com/owner/BTicino-GO-Companion" target="_blank" rel="noopener">github.com/owner/BTicino-GO-Companion</a>
+          </li>
+          <li>
+            <span class="link-label">GO Integration</span>
+            <a class="link-url" href="https://github.com/owner/BTicino-GO-Integration" target="_blank" rel="noopener">github.com/owner/BTicino-GO-Integration</a>
+          </li>
+          <li>
+            <span class="link-label">Pion Stack</span>
+            <a class="link-url" href="https://github.com/pion" target="_blank" rel="noopener">github.com/pion</a>
+          </li>
+          <li>
+            <span class="link-label">gortsplib Library</span>
+            <a class="link-url" href="https://github.com/bluenviron/gortsplib" target="_blank" rel="noopener">github.com/bluenviron/gortsplib</a>
+          </li>
+          <li>
+            <span class="link-label">sipgo Library</span>
+            <a class="link-url" href="https://github.com/emiago/sipgo" target="_blank" rel="noopener">github.com/emiago/sipgo</a>
+          </li>
+          <li>
+            <span class="link-label">mDNS and Zeroconf</span>
+            <a class="link-url" href="https://github.com/grandcat/zeroconf" target="_blank" rel="noopener">github.com/grandcat/zeroconf</a>
+          </li>
+          <li>
+            <span class="link-label">GO Websocket</span>
+            <a class="link-url" href="https://github.com/gorilla/websocket" target="_blank" rel="noopener">github.com/gorilla/websocket</a>
+          </li>
+          <li>
+            <span class="link-label">GStreamer Opus plugin</span>
+            <a class="link-url" href="https://github.com/gstreamer/gstreamer" target="_blank" rel="noopener">github.com/gstreamer/gstreamer</a>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Config: Home Assistant -->
+    <div id="configHaPage" class="page hidden">
+      <div class="flex-between mb-16">
+        <div>
+          <h1 class="page-title">Home Assistant</h1>
+          <p class="page-desc" style="margin-bottom:0">Pairing and local API credentials</p>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="saveHomeAssistantConfig(this)">Save</button>
+      </div>
+      <div class="card section">
+        <div class="card-header">Pairing</div>
+        <div class="info-row mb-16">
+          <span class="info-label">Status</span>
+          <span class="info-value"><span id="haConfigBadge" class="badge badge-info">-</span></span>
+        </div>
+        <form id="haConfigForm" onsubmit="return false">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Claim Code</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="claim_code" type="password" autocomplete="off">
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">API Bearer Token</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="bearer_token" type="password" autocomplete="off">
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+          </div>
+          <details class="advanced-section">
+            <summary>Advanced</summary>
+            <div class="advanced-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Device ID</label>
+                  <input class="form-input" name="device_id" type="text" autocomplete="off" readonly>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Key ID</label>
+                  <input class="form-input" name="key_id" type="text" autocomplete="off" readonly>
+                </div>
+              </div>
+            </div>
+          </details>
+          <div id="haConfigStatus" class="form-status"></div>
+        </form>
+      </div>
+
+      <div class="card section">
+        <div class="card-header">WebRTC ICE Servers</div>
+        <p class="card-desc">Optional STUN/TURN servers used by browser WebRTC clients when direct local ICE is not enough. Leave empty for local-network use.<br>Tip: Public STUN servers are best-effort and not guaranteed. For reliable remote access, use your own TURN server.</p>
+        <div id="iceServersList"></div>
+      </div>
+    </div>
+
+    <!-- Config: Entrypoints -->
+    <div id="configEntrypointsPage" class="page hidden">
+      <div class="flex-between mb-16">
+        <div>
+          <h1 class="page-title">Entrypoints</h1>
+          <p class="page-desc" style="margin-bottom:0">Gates, addresses, and exposed capabilities</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary btn-sm" onclick="addEntrypointCard()">+ Add</button>
+          <button class="btn btn-primary btn-sm" onclick="saveEntrypointsConfig(this)">Save</button>
+        </div>
+      </div>
+      <div id="entrypointsList"></div>
+      <div id="entrypointsStatus" class="form-status"></div>
+    </div>
+
+    <!-- Admin: User -->
+    <div id="adminUserPage" class="page hidden">
+      <h1 class="page-title">User</h1>
+      <p class="page-desc">Web UI login credentials</p>
+      <div class="card section">
+        <div class="card-header">Account</div>
+        <form id="adminUserForm" onsubmit="return false">
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input class="form-input" name="username" autocomplete="username" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Current Password</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="current_password" type="password" autocomplete="current-password" required>
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">New Password</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+          </div>
+          <div class="flex-between">
+            <span id="adminUserStatus" class="form-status"></span>
+            <button type="button" class="btn btn-primary" onclick="saveAdminUser()">Save Credentials</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    <div id="logsPage" class="page hidden">
+      <div class="card">
+        <div class="card-header">Log Viewer</div>
+        <div class="toolbar-row">
+          <select class="form-input filter-select" id="logRuntimeLevel" title="Log level">
+            <option value="debug">Log Level: DEBUG</option>
+            <option value="info">Log Level: INFO</option>
+            <option value="warn">Log Level: WARN</option>
+            <option value="error">Log Level: ERROR</option>
+          </select>
+          <input class="form-input log-search" id="logSearch" type="text" placeholder="Search…">
+          <button class="btn btn-primary btn-sm" id="logPauseBtn" onclick="toggleLogPause()">Pause</button>
+        </div>
+        <div class="log-output no-scrollbar" id="logOutput"><pre></pre></div>
+      </div>
+    </div>
+
+    <!-- BUS Frames -->
+    <div id="busframesPage" class="page hidden">
+      <div class="card">
+        <div class="card-header">BUS Frames</div>
+        <div class="toolbar-row">
+          <span class="frame-count" id="frameCount"></span>
+          <button class="btn btn-primary btn-sm" id="framePauseBtn" onclick="toggleFramePause()">Pause</button>
+        </div>
+        <div class="frames-output no-scrollbar" id="framesOutput"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="footer">Copyright &copy; 2026 owner. MIT License</div>
+
+<script src="/app.js"></script>
 </body>
 </html>

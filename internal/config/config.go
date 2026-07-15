@@ -63,6 +63,7 @@ type Auth struct {
 }
 
 type WebUI struct {
+	AdminUsername     string `yaml:"admin_username"`
 	AdminPasswordHash string `yaml:"admin_password_hash"`
 	SessionSecret     string `yaml:"session_secret"`
 }

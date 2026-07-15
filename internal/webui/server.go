@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,22 +24,32 @@ const (
 	defaultUsername = "companion"
 	defaultPassword = "companion"
 	sessionCookie   = "companion_web_session"
+	sessionIdle     = 30 * time.Minute
+	sessionLifetime = 12 * time.Hour
+	maxSessions     = 32
+	restartTimeout  = 30 * time.Second
 )
 
 type RestartFunc func(context.Context) error
 
 type Server struct {
-	config  *config.Store
-	logger  *slog.Logger
-	restart RestartFunc
+	config      *config.Store
+	logger      *slog.Logger
+	restart     RestartFunc
+	setLogLevel func(string) error
 
 	mu       sync.Mutex
 	sessions map[string]session
+
+	restartMu      sync.Mutex
+	restartPending bool
 }
 
 type session struct {
 	bootstrap bool
 	secret    string
+	createdAt time.Time
+	lastSeen  time.Time
 }
 
 type editableConfig struct {
@@ -71,16 +82,17 @@ type loginRequest struct {
 }
 
 type passwordRequest struct {
+	Username        string `json:"username"`
 	CurrentPassword string `json:"current_password"`
 	Password        string `json:"password"`
 }
 
-func New(store *config.Store, logger *slog.Logger, restart RestartFunc) *Server {
+func New(store *config.Store, logger *slog.Logger, restart RestartFunc, setLogLevel func(string) error) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, logger: logger, restart: restart, sessions: make(map[string]session)}
+	return &Server{config: store, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -89,12 +101,73 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webui/api/login", s.handleLogin)
 	mux.HandleFunc("POST /webui/api/logout", s.handleLogout)
 	mux.HandleFunc("POST /webui/api/password", s.handlePassword)
+	mux.HandleFunc("POST /webui/api/credentials", s.handlePassword)
 	mux.HandleFunc("GET /webui/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("PUT /webui/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("POST /webui/api/restart", s.requireReady(s.handleRestart))
+	mux.HandleFunc("GET /webui/api/status", s.requireReady(s.handleStatus))
+	mux.HandleFunc("GET /webui/api/logs", s.requireReady(s.handleLogs))
+	mux.HandleFunc("GET /webui/api/logging", s.requireReady(s.handleLogging))
+	mux.HandleFunc("PUT /webui/api/logging", s.requireReady(s.handleLogging))
+	mux.HandleFunc("GET /webui/api/frames", s.requireReady(s.handleFrames))
 	mux.Handle("/", s.staticHandler())
 
 	return logging.HTTP(s.logger, mux)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := s.snapshot()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"model": cfg.Companion.Model, "device_id": cfg.Companion.DeviceID, "available": false})
+}
+
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(logging.Path)
+	if err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, "read log failed")
+		return
+	}
+	if len(data) > 512<<10 {
+		data = data[len(data)-(512<<10):]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"log": string(data)})
+}
+
+func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg, ok := s.snapshot()
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"level": cfg.Companion.LogLevel})
+		return
+	}
+
+	var body struct {
+		Level string `json:"level"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if s.setLogLevel == nil || s.setLogLevel(body.Level) != nil {
+		writeError(w, http.StatusBadRequest, "invalid log level")
+		return
+	}
+	if err := s.config.Update(func(cfg *config.Config) error { cfg.Companion.LogLevel = body.Level; return nil }); err != nil {
+		writeError(w, http.StatusInternalServerError, "save log level failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"level": body.Level})
+}
+
+func (s *Server) handleFrames(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"available": false, "frames": []any{}})
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -105,9 +178,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	current, authenticated := s.currentSession(r, cfg)
+	if authenticated {
+		refreshSessionCookie(w, r)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated":            authenticated,
 		"password_change_required": authenticated && current.bootstrap,
+		"bootstrap":                authenticated && current.bootstrap,
+		"bootstrap_required":       cfg.WebUI.AdminPasswordHash == "",
+		"username":                 cfg.WebUI.AdminUsername,
 	})
 }
 
@@ -133,7 +212,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if bootstrap {
 		valid = valid && request.Password == defaultPassword
 	} else {
-		valid = valid && bcrypt.CompareHashAndPassword([]byte(cfg.WebUI.AdminPasswordHash), []byte(request.Password)) == nil
+		valid = request.Username == cfg.WebUI.AdminUsername && bcrypt.CompareHashAndPassword([]byte(cfg.WebUI.AdminPasswordHash), []byte(request.Password)) == nil
 	}
 
 	if !valid {
@@ -150,7 +229,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.sessions[token] = session{bootstrap: bootstrap, secret: cfg.WebUI.SessionSecret}
+	s.pruneSessions(time.Now())
+	if len(s.sessions) >= maxSessions {
+		s.removeOldestSession()
+	}
+	now := time.Now()
+	s.sessions[token] = session{bootstrap: bootstrap, secret: cfg.WebUI.SessionSecret, createdAt: now, lastSeen: now}
 	s.mu.Unlock()
 	setSessionCookie(w, token)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "password_change_required": bootstrap})
@@ -192,8 +276,10 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	refreshSessionCookie(w, r)
 
-	if len(request.Password) < 8 || (current.bootstrap && request.Password == defaultPassword) {
+	request.Username = strings.TrimSpace(request.Username)
+	if request.Username == "" || len(request.Password) < 8 || (current.bootstrap && (request.Password == defaultPassword || request.Username == defaultUsername)) {
 		writeError(w, http.StatusBadRequest, "password must replace the default and contain at least 8 characters")
 		return
 	}
@@ -220,6 +306,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.config.Update(func(cfg *config.Config) error {
+		cfg.WebUI.AdminUsername = request.Username
 		cfg.WebUI.AdminPasswordHash = string(hash)
 		cfg.WebUI.SessionSecret = secret
 
@@ -292,15 +379,33 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go func() {
-		time.Sleep(250 * time.Millisecond)
+	s.restartMu.Lock()
+	if s.restartPending {
+		s.restartMu.Unlock()
+		writeError(w, http.StatusConflict, "restart is already in progress")
+		return
+	}
+	s.restartPending = true
+	s.restartMu.Unlock()
 
-		if err := s.restart(context.Background()); err != nil {
-			s.logger.Error("restart companion", "error", err)
-		}
-	}()
+	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), restartTimeout)
+	go s.runRestart(restartCtx, cancel)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
+}
+
+func (s *Server) runRestart(ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
+	defer func() {
+		s.restartMu.Lock()
+		s.restartPending = false
+		s.restartMu.Unlock()
+	}()
+
+	s.logger.InfoContext(ctx, "restart companion requested")
+	if err := s.restart(ctx); err != nil {
+		s.logger.ErrorContext(ctx, "restart companion", "error", err)
+	}
 }
 
 func (s *Server) requireReady(next http.HandlerFunc) http.HandlerFunc {
@@ -316,6 +421,7 @@ func (s *Server) requireReady(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
+		refreshSessionCookie(w, r)
 
 		if current.bootstrap {
 			writeError(w, http.StatusForbidden, "password change required")
@@ -340,19 +446,49 @@ func (s *Server) currentSession(r *http.Request, cfg config.Config) (session, bo
 		return session{}, false
 	}
 
+	now := time.Now()
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.pruneSessions(now)
 	current, ok := s.sessions[cookie.Value]
-	s.mu.Unlock()
 
 	if !ok {
 		return session{}, false
 	}
 
-	if current.bootstrap {
-		return current, cfg.WebUI.AdminPasswordHash == ""
+	valid := current.bootstrap && cfg.WebUI.AdminPasswordHash == ""
+	if !current.bootstrap {
+		valid = cfg.WebUI.SessionSecret != "" && subtle.ConstantTimeCompare([]byte(current.secret), []byte(cfg.WebUI.SessionSecret)) == 1
+	}
+	if !valid {
+		delete(s.sessions, cookie.Value)
+		return session{}, false
 	}
 
-	return current, cfg.WebUI.SessionSecret != "" && subtle.ConstantTimeCompare([]byte(current.secret), []byte(cfg.WebUI.SessionSecret)) == 1
+	current.lastSeen = now
+	s.sessions[cookie.Value] = current
+	return current, true
+}
+
+func (s *Server) pruneSessions(now time.Time) {
+	for token, current := range s.sessions {
+		if now.Sub(current.createdAt) >= sessionLifetime || now.Sub(current.lastSeen) >= sessionIdle {
+			delete(s.sessions, token)
+		}
+	}
+}
+
+func (s *Server) removeOldestSession() {
+	var oldestToken string
+	var oldest time.Time
+	for token, current := range s.sessions {
+		if oldestToken == "" || current.lastSeen.Before(oldest) {
+			oldestToken = token
+			oldest = current.lastSeen
+		}
+	}
+	delete(s.sessions, oldestToken)
 }
 
 func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
@@ -412,7 +548,14 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode})
+}
+
+func refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(sessionCookie)
+	if err == nil {
+		setSessionCookie(w, cookie.Value)
+	}
 }
 
 func clearSessionCookie(w http.ResponseWriter) {

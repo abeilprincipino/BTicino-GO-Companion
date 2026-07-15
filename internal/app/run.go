@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 )
 
@@ -107,7 +108,9 @@ func run(
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	webUIServer := &http.Server{
-		Handler:           webui.New(configStore, logger, nil).Handler(),
+		Handler: webui.New(configStore, logger, func(ctx context.Context) error {
+			return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
+		}, setLogLevel).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
