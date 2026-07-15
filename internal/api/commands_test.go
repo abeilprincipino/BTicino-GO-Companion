@@ -460,12 +460,12 @@ func (f *fakeRuntimeControl) Reboot(context.Context) error {
 	return nil
 }
 
-func (f *fakeRuntimeControl) RestartService(_ context.Context, service string) error {
+func (f *fakeRuntimeControl) Restart(_ context.Context, service string) error {
 	f.restarted = service
 	return nil
 }
 
-func (f *fakeRuntimeControl) ServiceStatus(_ context.Context, service string) (system.ServiceStatus, error) {
+func (f *fakeRuntimeControl) Status(_ context.Context, service string) (system.ServiceStatus, error) {
 	f.statusQueried = service
 	return f.status, nil
 }

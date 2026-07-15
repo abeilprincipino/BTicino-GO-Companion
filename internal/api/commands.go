@@ -77,7 +77,7 @@ func (p *ProjectorCommands) HandleCommand(r *http.Request, cmd Command) (any, er
 	case cmd.Action == "system.reboot":
 		return nil, p.runtimeCommand(func(ctx context.Context) error { return p.runtime.Reboot(ctx) }, r.Context())
 	case isServiceAction(cmd.Action, "restart"):
-		return p.serviceCommand(r.Context(), cmd.Action, p.runtime.RestartService)
+		return p.serviceCommand(r.Context(), cmd.Action, p.runtime.Restart)
 	case isServiceAction(cmd.Action, "status"):
 		return p.serviceStatusCommand(r.Context(), cmd.Action)
 	case cmd.Action == "system.update.status":
@@ -283,7 +283,7 @@ func (p *ProjectorCommands) serviceStatusCommand(ctx context.Context, action str
 		return nil, errors.New("runtime control is unavailable")
 	}
 
-	return p.runtime.ServiceStatus(ctx, service)
+	return p.runtime.Status(ctx, service)
 }
 
 func parseServiceName(action string) (string, error) {

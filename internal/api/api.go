@@ -4,10 +4,10 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -26,19 +26,16 @@ type (
 )
 
 type Server struct {
-	auth        *auth.Store
-	config      *config.Store
-	state       StateProvider
-	commands    CommandHandler
-	clients     clientSet
-	entrypoints EntrypointControl
-	audio       AudioControl
-	voicemail   VoicemailControl
-	webrtc      WebRTCControl
-	snapshot    SnapshotControl
-	runtime     RuntimeControl
-	update      UpdateControl
-	logger      *slog.Logger
+	auth     *auth.Store
+	config   *config.Store
+	state    StateProvider
+	commands CommandHandler
+	clients  clientSet
+	webrtc   WebRTCControl
+	snapshot SnapshotControl
+	runtime  RuntimeControl
+	update   UpdateControl
+	logger   *slog.Logger
 }
 
 func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, commands CommandHandler, logger *slog.Logger) *Server {
@@ -49,13 +46,10 @@ func NewServer(authStore *auth.Store, configStore *config.Store, state StateProv
 	return &Server{auth: authStore, config: configStore, state: state, commands: commands, logger: logger}
 }
 
-func (s *Server) SetEntrypoints(v EntrypointControl) { s.entrypoints = v }
-func (s *Server) SetAudio(v AudioControl)            { s.audio = v }
-func (s *Server) SetVoicemail(v VoicemailControl)    { s.voicemail = v }
-func (s *Server) SetWebRTC(v WebRTCControl)          { s.webrtc = v }
-func (s *Server) SetSnapshot(v SnapshotControl)      { s.snapshot = v }
-func (s *Server) SetRuntime(v RuntimeControl)        { s.runtime = v }
-func (s *Server) SetUpdate(v UpdateControl)          { s.update = v }
+func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
+func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
+func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
+func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -71,29 +65,13 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints", s.handleEntrypoints)
 	s.handleProtected(mux, "GET", "/api/v3/capabilities", s.handleCapabilities)
 
-	s.handleProtected(mux, "POST", "/api/v3/control/call/answer", s.command("call.answer"))
-	s.handleProtected(mux, "POST", "/api/v3/control/call/decline", s.command("call.decline"))
-	s.handleProtected(mux, "POST", "/api/v3/control/call/hangup", s.command("call.hangup"))
-	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/unlock", s.entrypointUnlock)
-	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/stream", s.entrypointStream)
-	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/snapshot", s.entrypointSnapshot)
-	s.handleProtected(mux, "POST", "/api/v3/control/audio/mute", s.audioMute)
-	s.handleProtected(mux, "POST", "/api/v3/control/audio/unmute", s.audioUnmute)
-	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/enable", s.voicemailEnable)
-	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/disable", s.voicemailDisable)
-	s.handleProtected(mux, "POST", "/api/v3/webrtc/offer", s.webrtcOffer)
-	s.handleProtected(mux, "POST", "/api/v3/webrtc/candidate", s.webrtcCandidate)
-	s.handleProtected(mux, "POST", "/api/v3/webrtc/close", s.webrtcClose)
-	s.handleProtected(mux, "GET", "/api/v3/system/reboot", s.systemReboot)
-	s.handleProtected(mux, "POST", "/api/v3/system/service/{name}/restart", s.systemServiceRestart)
-	s.handleProtected(mux, "GET", "/api/v3/system/service/{name}/status", s.systemServiceStatus)
-	s.handleProtected(mux, "GET", "/api/v3/system/update/status", s.systemUpdateStatus)
-	s.handleProtected(mux, "GET", "/api/v3/system/update/check", s.systemUpdateCheck)
-	s.handleProtected(mux, "POST", "/api/v3/system/update/apply", s.systemUpdateApply)
-	s.handleProtected(mux, "POST", "/api/v3/system/update/rollback", s.systemUpdateRollback)
-
-	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/latest.jpg", s.snapshotLatest)
-	mux.HandleFunc("GET /api/v3/ws", s.websocket)
+	// Call control is not exposed until it controls the physical intercom.
+	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/unlock", s.entrypointCommand("unlock"))
+	s.handleProtected(mux, "POST", "/api/v3/control/audio/mute", s.command("audio.mute"))
+	s.handleProtected(mux, "POST", "/api/v3/control/audio/unmute", s.command("audio.unmute"))
+	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/enable", s.command("voicemail.enable"))
+	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/disable", s.command("voicemail.disable"))
+	s.handleProtected(mux, "GET", "/api/v3/ws", s.websocket)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
 	return logging.HTTP(s.logger, mux)
@@ -240,16 +218,12 @@ func (s *Server) currentState() core.State {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	if decoder.Decode(target) != nil {
+	if err := httputil.DecodeJSON(r.Body, maxJSONBody, target); err != nil {
+		if errors.Is(err, httputil.ErrMultipleJSONValues) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one JSON object")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
-		return false
-	}
-
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one JSON object")
 		return false
 	}
 

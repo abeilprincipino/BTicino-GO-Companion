@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bticino-go-companion/internal/storage"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"maps"
 	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -133,7 +133,7 @@ func Default(metadata Metadata) (Config, error) {
 		return Config{}, fmt.Errorf("generate claim code: %w", err)
 	}
 
-	homeKitPIN, err := generateHomeKitPIN()
+	homeKitPIN, err := GenerateHomeKitPIN()
 	if err != nil {
 		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
 	}
@@ -283,12 +283,6 @@ func validateMetadata(metadata Metadata) error {
 }
 
 func saveNew(path string, cfg Config) error {
-	if _, err := os.Stat(path); err == nil {
-		return ErrConfigExists
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat config: %w", err)
-	}
-
 	return save(path, cfg, true)
 }
 
@@ -298,47 +292,11 @@ func save(path string, cfg Config, exclusive bool) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
-	if err != nil {
-		return fmt.Errorf("create temporary config: %w", err)
-	}
-
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }() // best-effort cleanup
-
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("set temporary config mode: %w", err)
-	}
-
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("write temporary config: %w", err)
-	}
-
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("sync temporary config: %w", err)
-	}
-
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary config: %w", err)
-	}
-
-	if exclusive {
-		if _, err := os.Stat(path); err == nil {
+	if err := storage.WritePrivateFile(path, ".config-*.yaml", data, exclusive); err != nil {
+		if exclusive && errors.Is(err, os.ErrExist) {
 			return ErrConfigExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("stat config before create: %w", err)
 		}
-	}
-
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("replace config: %w", err)
+		return fmt.Errorf("save config: %w", err)
 	}
 
 	return nil
@@ -368,7 +326,7 @@ func RandomHex(size int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-func generateHomeKitPIN() (string, error) {
+func GenerateHomeKitPIN() (string, error) {
 	for range 10 {
 		value, err := rand.Int(rand.Reader, big.NewInt(100000000))
 		if err != nil {

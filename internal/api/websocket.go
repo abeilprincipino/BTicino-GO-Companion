@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,12 +28,6 @@ type client struct {
 }
 
 func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || token == "" || s.auth == nil || !s.auth.ValidateBearer(token) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "a valid bearer token is required")
-		return
-	}
-
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
 		return

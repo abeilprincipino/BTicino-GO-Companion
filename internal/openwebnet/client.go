@@ -9,12 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -25,178 +23,9 @@ var (
 )
 
 const (
-	multicastGroup = "239.255.76.67"
-	multicastPort  = 7667
-	readBufferSize = 65535
-	commandHost    = "127.0.0.1"
-	commandPort    = 20000
+	commandHost = "127.0.0.1"
+	commandPort = 20000
 )
-
-// Listener converts device multicast frames into projector events.
-type Listener struct {
-	group  string
-	port   int
-	buffer int
-	parser Parser
-	mapper *Mapper
-	logger *slog.Logger
-	trace  *Trace
-}
-
-func NewListener(entrypoints []config.Entrypoint, logger *slog.Logger, trace *Trace) *Listener {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Listener{
-		group:  multicastGroup,
-		port:   multicastPort,
-		buffer: readBufferSize,
-		mapper: NewMapper(entrypoints),
-		logger: logger,
-		trace:  trace,
-	}
-}
-
-func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
-	ip := net.ParseIP(l.group)
-	if ip == nil {
-		return fmt.Errorf("invalid multicast group %q", l.group)
-	}
-	if l.buffer <= 0 {
-		l.buffer = 65535
-	}
-	conn, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: l.port})
-	if err != nil {
-		return fmt.Errorf("listen multicast: %w", err)
-	}
-	defer conn.Close()
-	if err := conn.SetReadBuffer(l.buffer); err != nil {
-		l.logger.Warn("set multicast read buffer", "error", err)
-	}
-
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
-	buf := make([]byte, l.buffer)
-	for {
-		n, _, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
-				return nil
-			}
-			l.logger.Warn("read multicast frame", "error", err)
-			continue
-		}
-		message, err := l.parser.Parse(buf[:n])
-		if err != nil {
-			continue
-		}
-		events := l.mapper.Map(message)
-		l.trace.Record(message, len(events))
-		for _, event := range events {
-			sink(event)
-		}
-	}
-}
-
-// Mapper keeps enough device context to correlate ring start and stop frames.
-type Mapper struct {
-	mu               sync.Mutex
-	entrypoints      map[string]core.EntrypointID
-	recentFrames     map[string]time.Time
-	dialog           core.DialogID
-	activeEntrypoint core.EntrypointID
-}
-
-func NewMapper(entrypoints []config.Entrypoint) *Mapper {
-	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time)}
-	for _, entrypoint := range entrypoints {
-		m.entrypoints[entrypoint.DevAddr] = core.EntrypointID(entrypoint.ID)
-	}
-	return m
-}
-
-func (m *Mapper) Map(message Message) []core.Event {
-	if system := strings.ToLower(strings.TrimSpace(message.System)); system != "open" && system != "aswm" {
-		return nil
-	}
-	raw := strings.TrimSpace(message.Raw)
-	if raw == "" {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := time.Now()
-	if m.duplicate(raw, now) {
-		return nil
-	}
-
-	if IsRingStart(raw) {
-		if m.dialog != "" {
-			return nil
-		}
-		id := m.resolveEntrypoint(raw)
-		if id == "" {
-			return nil
-		}
-		m.activeEntrypoint = id
-		m.dialog = core.DialogID(fmt.Sprintf("openwebnet-%d", now.UnixNano()))
-		return []core.Event{core.RingStarted{EntrypointID: id}, core.IncomingCallStarted{DialogID: m.dialog, EntrypointID: id}}
-	}
-	if raw == FrameAudioMuted {
-		return []core.Event{core.AudioMuted{}}
-	}
-	if raw == FrameAudioUnmuted {
-		return []core.Event{core.AudioUnmuted{}}
-	}
-	if enabled, _, ok := ParseVoicemailStatus(raw); ok {
-		if enabled {
-			return []core.Event{core.VoicemailEnabled{}}
-		}
-		return []core.Event{core.VoicemailDisabled{}}
-	}
-	if IsStreamStop(raw) || IsFreeAVResources(raw) {
-		if m.activeEntrypoint == "" {
-			return nil
-		}
-		events := []core.Event{core.RingCleared{EntrypointID: m.activeEntrypoint}}
-		if m.dialog != "" {
-			events = append(events, core.CallHungUp{DialogID: m.dialog})
-		}
-		m.dialog = ""
-		m.activeEntrypoint = ""
-		return events
-	}
-	return nil
-}
-
-func (m *Mapper) duplicate(raw string, now time.Time) bool {
-	for frame, seen := range m.recentFrames {
-		if now.Sub(seen) > 300*time.Millisecond {
-			delete(m.recentFrames, frame)
-		}
-	}
-	if seen, ok := m.recentFrames[raw]; ok && now.Sub(seen) <= 300*time.Millisecond {
-		m.recentFrames[raw] = now
-		return true
-	}
-	m.recentFrames[raw] = now
-	return false
-}
-
-func (m *Mapper) resolveEntrypoint(frame string) core.EntrypointID {
-	if id := m.entrypoints[ExtractAddress(frame)]; id != "" {
-		return id
-	}
-	if len(m.entrypoints) == 1 {
-		for _, id := range m.entrypoints {
-			return id
-		}
-	}
-	return ""
-}
 
 // Control implements the V3 entrypoint, audio, and voicemail control interfaces.
 type Control struct {
@@ -207,10 +36,7 @@ type Control struct {
 	timeout     time.Duration
 	trace       *Trace
 }
-
-type VoicemailStatus struct {
-	Enabled bool
-}
+type VoicemailStatus struct{ Enabled bool }
 
 func NewControl(entrypoints []config.Entrypoint, trace *Trace) *Control {
 	addresses := make(map[core.EntrypointID]string, len(entrypoints))
@@ -219,7 +45,6 @@ func NewControl(entrypoints []config.Entrypoint, trace *Trace) *Control {
 	}
 	return &Control{host: commandHost, port: commandPort, entrypoints: addresses, timeout: 3 * time.Second, trace: trace}
 }
-
 func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
 	address := c.entrypoints[id]
 	if address == "" {
@@ -242,7 +67,6 @@ func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
 		return nil
 	})
 }
-
 func (c *Control) Stream(context.Context, core.EntrypointID) error {
 	return errors.New("stream control is unavailable")
 }
@@ -261,7 +85,6 @@ func (c *Control) Enable(ctx context.Context) error {
 func (c *Control) Disable(ctx context.Context) error {
 	return c.command(ctx, FrameVoicemailDisableCmd, FrameACK)
 }
-
 func (c *Control) InitialEvents(ctx context.Context) ([]core.Event, error) {
 	events := make([]core.Event, 0, 2)
 	var errs []error
@@ -285,7 +108,6 @@ func (c *Control) InitialEvents(ctx context.Context) ([]core.Event, error) {
 	}
 	return events, errors.Join(errs...)
 }
-
 func (c *Control) AudioMutedStatus(ctx context.Context) (bool, error) {
 	frame, err := c.status(ctx, FrameAudioStatusCmd, FrameAudioMuted, FrameAudioUnmuted)
 	if err != nil {
@@ -293,7 +115,6 @@ func (c *Control) AudioMutedStatus(ctx context.Context) (bool, error) {
 	}
 	return frame == FrameAudioMuted, nil
 }
-
 func (c *Control) VoicemailStatus(ctx context.Context) (VoicemailStatus, error) {
 	frame, err := c.status(ctx, FrameVoicemailStatusCmd)
 	if err != nil {
@@ -305,11 +126,9 @@ func (c *Control) VoicemailStatus(ctx context.Context) (VoicemailStatus, error) 
 	}
 	return VoicemailStatus{Enabled: enabled}, nil
 }
-
 func (c *Control) command(ctx context.Context, frame string, accepted ...string) error {
 	return c.exec(ctx, func(reader *frameReader) error { return c.send(reader, frame, accepted...) })
 }
-
 func (c *Control) status(ctx context.Context, command string, accepted ...string) (string, error) {
 	var result string
 	err := c.exec(ctx, func(reader *frameReader) error {
@@ -322,7 +141,6 @@ func (c *Control) status(ctx context.Context, command string, accepted ...string
 	})
 	return result, err
 }
-
 func (c *Control) exec(ctx context.Context, fn func(*frameReader) error) error {
 	dialer := net.Dialer{Timeout: c.timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
@@ -361,7 +179,6 @@ func (c *Control) exec(ctx context.Context, fn func(*frameReader) error) error {
 	}
 	return fn(reader)
 }
-
 func (c *Control) send(reader *frameReader, frame string, accepted ...string) error {
 	response, err := c.sendFrame(reader, frame)
 	if err != nil {
@@ -390,7 +207,6 @@ func (c *Control) send(reader *frameReader, frame string, accepted ...string) er
 	}
 	return nil
 }
-
 func (c *Control) sendStatus(reader *frameReader, command string, accepted ...string) (string, error) {
 	frame, err := c.sendFrame(reader, command)
 	if err != nil {
@@ -429,7 +245,6 @@ func (c *Control) sendStatus(reader *frameReader, command string, accepted ...st
 	}
 	return "", ErrUnexpectedReply
 }
-
 func acceptedFrame(frame string, accepted []string) bool {
 	for _, expected := range accepted {
 		if frame == expected {
@@ -438,7 +253,6 @@ func acceptedFrame(frame string, accepted []string) bool {
 	}
 	return false
 }
-
 func (c *Control) sendFrame(reader *frameReader, frame string) (string, error) {
 	if _, err := reader.conn.Write([]byte(frame)); err != nil {
 		return "", err
@@ -451,7 +265,6 @@ func (c *Control) sendFrame(reader *frameReader, frame string) (string, error) {
 	c.trace.RecordTCP("RX", response)
 	return response, nil
 }
-
 func (c *Control) authenticate(reader *frameReader) error {
 	if _, err := reader.conn.Write([]byte(FrameACK)); err != nil {
 		return err
@@ -509,7 +322,6 @@ func (r *frameReader) read() (string, error) {
 		}
 	}
 }
-
 func readFrameWithTimeout(reader *frameReader, timeout time.Duration) (string, bool, error) {
 	if err := reader.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return "", false, err
@@ -527,7 +339,6 @@ func readFrameWithTimeout(reader *frameReader, timeout time.Duration) (string, b
 	}
 	return "", false, err
 }
-
 func challengeToHex(frame string) (string, error) {
 	if !strings.HasPrefix(frame, "*#") || !strings.HasSuffix(frame, "##") {
 		return "", errors.New("invalid auth challenge")
@@ -550,7 +361,6 @@ func challengeToHex(frame string) (string, error) {
 	}
 	return builder.String(), nil
 }
-
 func hexToDigit(value string) string {
 	var builder strings.Builder
 	for _, char := range value {
@@ -565,7 +375,6 @@ func hexToDigit(value string) string {
 	}
 	return builder.String()
 }
-
 func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])

@@ -25,8 +25,8 @@ type VoicemailControl interface {
 
 type RuntimeControl interface {
 	Reboot(ctx context.Context) error
-	RestartService(ctx context.Context, service string) error
-	ServiceStatus(ctx context.Context, service string) (system.ServiceStatus, error)
+	Restart(ctx context.Context, service string) error
+	Status(ctx context.Context, service string) (system.ServiceStatus, error)
 }
 
 type UpdateControl interface {

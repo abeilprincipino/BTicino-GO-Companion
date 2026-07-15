@@ -1,11 +1,11 @@
 package homekit
 
 import (
+	"bticino-go-companion/internal/storage"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -68,39 +68,8 @@ func (s *FileStateStore) Save(state State) error {
 		return fmt.Errorf("encode homekit state: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("create homekit state directory: %w", err)
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(s.path), ".homekit-state-*.yaml")
-	if err != nil {
-		return fmt.Errorf("create temporary homekit state: %w", err)
-	}
-
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }() // best-effort cleanup
-
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("set temporary homekit state mode: %w", err)
-	}
-
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("write temporary homekit state: %w", err)
-	}
-
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("sync temporary homekit state: %w", err)
-	}
-
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary homekit state: %w", err)
-	}
-
-	if err := os.Rename(temporaryPath, s.path); err != nil {
-		return fmt.Errorf("replace homekit state: %w", err)
+	if err := storage.WritePrivateFile(s.path, ".homekit-state-*.yaml", data, false); err != nil {
+		return fmt.Errorf("save homekit state: %w", err)
 	}
 
 	return nil

@@ -2,12 +2,12 @@ package webui
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
 	"bticino-go-companion/web"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -529,15 +529,7 @@ func redactedConfig(cfg config.Config) editableConfig {
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer r.Body.Close() //nolint:errcheck // request body already consumed
 
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return false
-	}
-
-	if decoder.Decode(&struct{}{}) != io.EOF {
+	if err := httputil.DecodeJSON(r.Body, 64<<10, dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return false
 	}

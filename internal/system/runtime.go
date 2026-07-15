@@ -63,14 +63,6 @@ func (r *RuntimeControl) Restart(ctx context.Context, service string) error {
 	return r.services.Restart(ctx, service)
 }
 
-func (r *RuntimeControl) RestartService(ctx context.Context, service string) error {
-	return r.Restart(ctx, service)
-}
-
-func (r *RuntimeControl) ServiceStatus(ctx context.Context, service string) (ServiceStatus, error) {
-	return r.Status(ctx, service)
-}
-
 func (r *RuntimeControl) Reboot(ctx context.Context) error {
 	if r.rebooter == nil {
 		return ErrRuntimeUnavailable

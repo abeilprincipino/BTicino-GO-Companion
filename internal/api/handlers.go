@@ -34,6 +34,12 @@ func (s *Server) command(action string) http.HandlerFunc {
 	}
 }
 
+func (s *Server) entrypointCommand(verb string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.command("entrypoints."+r.PathValue("id")+"."+verb)(w, r)
+	}
+}
+
 func readBody(r *http.Request) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody+1))
 	if err != nil {
@@ -65,105 +71,6 @@ func writeCommandError(w http.ResponseWriter, err error) {
 	}
 
 	writeError(w, status, code, err.Error())
-}
-
-func (s *Server) entrypointUnlock(w http.ResponseWriter, r *http.Request) {
-	if s.entrypoints == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "entrypoint control is unavailable")
-		return
-	}
-
-	if err := s.entrypoints.Unlock(r.Context(), core.EntrypointID(r.PathValue("id"))); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) entrypointStream(w http.ResponseWriter, r *http.Request) {
-	if s.entrypoints == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "entrypoint control is unavailable")
-		return
-	}
-
-	if err := s.entrypoints.Stream(r.Context(), core.EntrypointID(r.PathValue("id"))); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) entrypointSnapshot(w http.ResponseWriter, r *http.Request) {
-	if s.entrypoints == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "entrypoint control is unavailable")
-		return
-	}
-
-	image, err := s.entrypoints.Snapshot(r.Context(), core.EntrypointID(r.PathValue("id")))
-	if err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeJPEG(w, image)
-}
-
-func (s *Server) audioMute(w http.ResponseWriter, r *http.Request) {
-	if s.audio == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "audio control is unavailable")
-		return
-	}
-
-	if err := s.audio.Mute(r.Context()); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) audioUnmute(w http.ResponseWriter, r *http.Request) {
-	if s.audio == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "audio control is unavailable")
-		return
-	}
-
-	if err := s.audio.Unmute(r.Context()); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) voicemailEnable(w http.ResponseWriter, r *http.Request) {
-	if s.voicemail == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "voicemail control is unavailable")
-		return
-	}
-
-	if err := s.voicemail.Enable(r.Context()); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) voicemailDisable(w http.ResponseWriter, r *http.Request) {
-	if s.voicemail == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "voicemail control is unavailable")
-		return
-	}
-
-	if err := s.voicemail.Disable(r.Context()); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
 }
 
 func (s *Server) webrtcOffer(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +163,7 @@ func (s *Server) systemServiceRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.runtime.RestartService(r.Context(), r.PathValue("name")); err != nil {
+	if err := s.runtime.Restart(r.Context(), r.PathValue("name")); err != nil {
 		writeCommandError(w, err)
 		return
 	}
@@ -270,7 +177,7 @@ func (s *Server) systemServiceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.runtime.ServiceStatus(r.Context(), r.PathValue("name"))
+	status, err := s.runtime.Status(r.Context(), r.PathValue("name"))
 	if err != nil {
 		writeCommandError(w, err)
 		return

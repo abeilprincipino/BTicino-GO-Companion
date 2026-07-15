@@ -87,9 +87,6 @@ func run(
 	authStore := auth.NewStore(configStore)
 
 	server := api.NewServer(authStore, configStore, projector, commands, logger)
-	server.SetEntrypoints(openWebNetControl)
-	server.SetAudio(openWebNetControl)
-	server.SetVoicemail(openWebNetControl)
 	server.SetWebRTC(webrtc)
 	server.SetSnapshot(snapshot)
 	server.SetRuntime(rt)

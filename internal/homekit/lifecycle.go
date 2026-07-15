@@ -2,10 +2,7 @@ package homekit
 
 import (
 	"bticino-go-companion/internal/config"
-	"crypto/rand"
 	"errors"
-	"fmt"
-	"math/big"
 )
 
 var ErrConfigStoreUnavailable = errors.New("homekit: config store is unavailable")
@@ -49,7 +46,7 @@ func (m *Manager) Enable() (string, error) {
 		if pin == "" {
 			var err error
 
-			pin, err = newPIN()
+			pin, err = config.GenerateHomeKitPIN()
 			if err != nil {
 				return err
 			}
@@ -81,22 +78,4 @@ func (m *Manager) Disable() error {
 
 func (m *Manager) Enabled() bool {
 	return m != nil && m.config != nil && m.config.Snapshot().HomeKit.Enabled
-}
-
-func newPIN() (string, error) {
-	const maxAttempts = 10
-
-	for range maxAttempts {
-		value, err := rand.Int(rand.Reader, big.NewInt(100000000))
-		if err != nil {
-			return "", fmt.Errorf("generate homekit pin: %w", err)
-		}
-
-		pin := fmt.Sprintf("%03d-%02d-%03d", value.Int64()/100000, value.Int64()/1000%100, value.Int64()%1000)
-		if pin != "111-11-111" && pin != "123-45-678" {
-			return pin, nil
-		}
-	}
-
-	return "", errors.New("generate homekit pin: exceeded maximum attempts")
 }
