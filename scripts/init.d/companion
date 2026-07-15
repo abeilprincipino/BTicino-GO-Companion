@@ -14,6 +14,8 @@ PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
 SERVICE="companion"
 BASE_DIR="/home/bticino/cfg/extra/companion"
 BIN_PATH="${BASE_DIR}/companion"
+STAGED_BIN_PATH="${BASE_DIR}/companion.new"
+PREVIOUS_BIN_PATH="${BASE_DIR}/companion.previous"
 PIDFILE="/var/run/${SERVICE}.pid"
 LOGFILE="/tmp/${SERVICE}.log"
 
@@ -33,7 +35,7 @@ ensure_firewall_rule() {
 }
 
 ensure_firewall() {
-	[ -x /usr/sbin/iptables ] || return
+	[ -x /usr/sbin/iptables ] || return 0
 	for port in $(tcp_listen_ports); do ensure_firewall_rule tcp "${port}"; done
 	for port in $(udp_listen_ports); do ensure_firewall_rule udp "${port}"; done
 }
@@ -47,7 +49,7 @@ remove_firewall_rule() {
 }
 
 remove_firewall() {
-	[ -x /usr/sbin/iptables ] || return
+	[ -x /usr/sbin/iptables ] || return 0
 	for port in $(tcp_listen_ports); do remove_firewall_rule tcp "${port}"; done
 	for port in $(udp_listen_ports); do remove_firewall_rule udp "${port}"; done
 }
@@ -60,19 +62,30 @@ pid_matches_binary() {
 }
 
 cleanup_stale_pidfile() {
-	[ -f "${PIDFILE}" ] || return
+	[ -f "${PIDFILE}" ] || return 0
 	pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
 	pid_matches_binary "${pid}" || rm -f "${PIDFILE}"
 }
 
+activate_staged_binary() {
+	[ -f "${STAGED_BIN_PATH}" ] || return 0
+	[ -x "${STAGED_BIN_PATH}" ] || { echo "Staged companion binary is not executable" >&2; return 1; }
+	if [ -e "${BIN_PATH}" ]; then
+		ln -f "${BIN_PATH}" "${PREVIOUS_BIN_PATH}"
+	fi
+	mv -f "${STAGED_BIN_PATH}" "${BIN_PATH}"
+	chmod 755 "${BIN_PATH}"
+}
+
 do_start() {
+	activate_staged_binary
 	if [ ! -x "${BIN_PATH}" ]; then echo "Missing companion binary at ${BIN_PATH}" >&2; exit 1; fi
 	mkdir -p "$(dirname "${PIDFILE}")"
 	: > "${LOGFILE}"
 	cleanup_stale_pidfile
 	ensure_firewall
-	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
-		--pidfile "${PIDFILE}" --startas /bin/sh -- -c "exec '${BIN_PATH}' >>'${LOGFILE}' 2>&1"
+	nohup "${BIN_PATH}" >>"${LOGFILE}" 2>&1 </dev/null &
+	echo $! > "${PIDFILE}"
 }
 
 do_stop() {

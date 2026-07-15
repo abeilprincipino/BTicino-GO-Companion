@@ -14,14 +14,15 @@ import (
 var ErrNotImplemented = errors.New("not implemented")
 
 type ProjectorCommands struct {
-	projector   *core.Projector
-	entrypoints EntrypointControl
-	audio       AudioControl
-	voicemail   VoicemailControl
-	runtime     RuntimeControl
-	update      UpdateControl
-	webrtc      WebRTCControl
-	snapshot    SnapshotControl
+	projector    *core.Projector
+	entrypoints  EntrypointControl
+	audio        AudioControl
+	voicemail    VoicemailControl
+	runtime      RuntimeControl
+	update       UpdateControl
+	updatePolicy func() system.UpdatePolicy
+	webrtc       WebRTCControl
+	snapshot     SnapshotControl
 }
 
 func NewProjectorCommands(
@@ -83,11 +84,11 @@ func (p *ProjectorCommands) HandleCommand(r *http.Request, cmd Command) (any, er
 	case cmd.Action == "system.update.status":
 		return p.updateCommand(func(ctx context.Context) (any, error) { return p.update.Status(ctx) }, r.Context())
 	case cmd.Action == "system.update.check":
-		return p.updateCommand(func(ctx context.Context) (any, error) { return p.update.Check(ctx) }, r.Context())
-	case cmd.Action == "system.update.apply":
-		return nil, p.updateApply(r.Context(), cmd.Payload)
-	case cmd.Action == "system.update.rollback":
-		return nil, p.updateCommandErr(func(ctx context.Context) error { return p.update.Rollback(ctx) }, r.Context())
+		return p.updateAction(func(ctx context.Context) (any, error) { return p.update.Check(ctx) }, r.Context())
+	case cmd.Action == "system.update.stage":
+		return p.updateAction(func(ctx context.Context) (any, error) { return p.update.Stage(ctx) }, r.Context())
+	case cmd.Action == "system.update.install":
+		return p.updateAction(func(ctx context.Context) (any, error) { return p.update.Install(ctx) }, r.Context())
 	default:
 		return nil, errors.New("unsupported action")
 	}
@@ -303,24 +304,13 @@ func (p *ProjectorCommands) updateCommand(fn func(context.Context) (any, error),
 	return fn(ctx)
 }
 
-func (p *ProjectorCommands) updateCommandErr(fn func(context.Context) error, ctx context.Context) error {
-	if p.update == nil {
-		return errors.New("update control is unavailable")
-	}
-
-	return fn(ctx)
+func (p *ProjectorCommands) SetUpdatePolicy(policy func() system.UpdatePolicy) {
+	p.updatePolicy = policy
 }
 
-func (p *ProjectorCommands) updateApply(ctx context.Context, payload json.RawMessage) error {
-	var req system.UpdateRequest
-
-	if json.Unmarshal(payload, &req) != nil {
-		return errors.New("invalid payload")
+func (p *ProjectorCommands) updateAction(fn func(context.Context) (any, error), ctx context.Context) (any, error) {
+	if p.updatePolicy == nil || !p.updatePolicy().Enabled || !p.updatePolicy().Exposed {
+		return nil, system.ErrUpdateUnavailable
 	}
-
-	if p.update == nil {
-		return errors.New("update control is unavailable")
-	}
-
-	return p.update.Apply(ctx, req)
+	return p.updateCommand(fn, ctx)
 }

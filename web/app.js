@@ -646,6 +646,57 @@ function renderAbout() {
   var cachedStatus = getCached('/webui/api/status');
   if (cachedStatus) renderStatusData(cachedStatus);
   apiGet('/webui/api/status', { cache: true }).then(renderStatusData).catch(function(err) { handleApiError(err); });
+  loadUpdateStatus();
+}
+
+function loadUpdateStatus() {
+  apiGet('/webui/api/update/status').then(function(update) {
+    renderUpdateStatus(update);
+    if (update.update_available) showToast('Companion update ' + (update.latest_version || '') + ' is available.', 'info');
+    if (update.restart_required) showToast('Companion update is staged and will activate on restart.', 'warning');
+  }).catch(function(err) { handleApiError(err); });
+}
+
+function renderUpdateStatus(update) {
+  var badge = document.getElementById('aboutUpdateBadge');
+  if (!badge) return;
+  var label = update.stage;
+  if (update.stage === 'available') {
+    label = update.latest_version || 'Available';
+    badge.className = 'badge badge-info';
+  } else if (update.stage === 'idle') {
+    label = 'Up-to-date';
+    badge.className = 'badge badge-success';
+  } else if (update.stage === 'staged') {
+    label = 'Restart required';
+    badge.className = 'badge badge-info';
+  } else if (update.stage === 'failed') {
+    label = 'Update failed';
+    badge.className = 'badge badge-danger';
+  } else {
+    badge.className = 'badge badge-info';
+  }
+  badge.textContent = label;
+  var install = document.getElementById('aboutUpdateInstall');
+  if (install) install.classList.toggle('hidden', !update.update_available);
+}
+
+function installUpdate() {
+  var button = document.getElementById('aboutUpdateInstall');
+  if (button) button.disabled = true;
+  apiPost('/webui/api/update/install', {}).then(function(update) {
+    if (!update.restart_required) {
+      if (button) button.disabled = false;
+      showToast('No update is available.', 'info');
+      loadUpdateStatus();
+      return;
+    }
+    showToast('Update installed. Companion is restarting...', 'success');
+    setTimeout(pollRestartReady, 1500);
+  }).catch(function(err) {
+    if (button) button.disabled = false;
+    handleApiError(err, 'Update failed');
+  });
 }
 
 function renderAboutData(session) {
@@ -663,29 +714,6 @@ function renderStatusData(status) {
   document.getElementById('statusFreeRAM').textContent = formatKB(status.free_ram_kb);
   document.getElementById('statusWifi').textContent = formatPercent(status.wifi_strength);
 
-  var update = status.update_status || {stage: 'checking'};
-  var badge = document.getElementById('aboutUpdateBadge');
-  var label = update.stage;
-  if (update.stage === 'available') {
-    label = update.available || 'Available';
-    badge.className = 'badge badge-info';
-  } else if (update.stage === 'healthy' || update.stage === 'idle') {
-    label = 'Up-to-date';
-    badge.className = 'badge badge-success';
-  } else if (update.stage === 'checking') {
-    label = 'Checking…';
-    badge.className = 'badge badge-info';
-  } else if (update.stage === 'failed') {
-    label = 'Update failed';
-    badge.className = 'badge badge-danger';
-  } else if (update.stage === 'applying' || update.stage === 'restarting') {
-    label = 'Applying…';
-    badge.className = 'badge badge-info';
-  } else {
-    label = update.stage;
-    badge.className = 'badge badge-info';
-  }
-  badge.textContent = label;
 }
 
 function renderDiagnostics() {

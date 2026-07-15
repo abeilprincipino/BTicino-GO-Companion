@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -70,7 +71,19 @@ func run(
 
 	rt := system.NewRuntimeControl(nil, nil, allowedServices)
 
-	updater := system.NewUpdater(nil, nil, nil)
+	build := system.CurrentBuildInfo()
+	updatePolicy := func() system.UpdatePolicy {
+		cfg := configStore.Snapshot().System
+		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: cfg.UpdateDataDir}
+	}
+	var updateSource system.ReleaseSource
+	if strings.TrimSpace(build.ReleaseRepo) != "" {
+		updateSource = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
+	}
+	restartCompanion := func(ctx context.Context) error {
+		return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
+	}
+	updater := system.NewUpdater(updateSource, build, updatePolicy, restartCompanion)
 
 	webrtc := media.NewWebRTCService(nil, nil, nil, nil)
 	snapshot := media.NewSnapshotService(nil, nil, nil)
@@ -85,6 +98,7 @@ func run(
 		webrtc,
 		snapshot,
 	)
+	commands.SetUpdatePolicy(updatePolicy)
 
 	authStore := auth.NewStore(configStore)
 	mdns := discovery.NewService(nil)
@@ -112,15 +126,15 @@ func run(
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	webUI := webui.New(configStore, logger, func(ctx context.Context) error {
-		return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
-	}, setLogLevel)
+	webUI := webui.New(configStore, logger, restartCompanion, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
 	webUI.SetDiagnostics(diagnosticService)
+	webUI.SetUpdate(updater)
 	webUIServer := &http.Server{
 		Handler:           webUI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	go checkUpdates(ctx, updater, server.BroadcastState, logger)
 
 	applyEvent := func(event core.Event) {
 		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
@@ -169,6 +183,36 @@ func run(
 		}
 	}()
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
+}
+
+func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func(), logger *slog.Logger) {
+	delay := 20 * time.Second
+	backoff := 2 * time.Minute
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		_, err := updater.Check(checkCtx)
+		cancel()
+		if errors.Is(err, system.ErrUpdateUnavailable) {
+			return
+		}
+		if err != nil {
+			logger.Debug("check companion update", "error", err)
+			delay = backoff
+			backoff = min(backoff*2, time.Hour)
+		} else {
+			delay = 3 * time.Hour
+			backoff = 2 * time.Minute
+		}
+		broadcast()
+	}
 }
 
 func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*config.Store, bool, error) {

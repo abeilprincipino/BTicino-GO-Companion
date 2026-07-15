@@ -78,6 +78,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v3/diagnostics", s.requireBearer(s.diagnosticsRefresh))
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints", s.handleEntrypoints)
 	s.handleProtected(mux, "GET", "/api/v3/capabilities", s.handleCapabilities)
+	s.handleProtected(mux, "GET", "/api/v3/system/update/status", s.systemUpdateStatus)
+	s.handleProtected(mux, "POST", "/api/v3/system/update/check", s.systemUpdateCheck)
+	s.handleProtected(mux, "POST", "/api/v3/system/update/stage", s.systemUpdateStage)
 
 	// Call control is not exposed until it controls the physical intercom.
 	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/unlock", s.entrypointCommand("unlock"))
@@ -273,6 +276,18 @@ func (s *Server) currentPayload() map[string]any {
 		"firmware": diagnostic.OpenWebNet.Firmware,
 		"hardware": diagnostic.OpenWebNet.Hardware,
 	}
+	systemControl := map[string]any{}
+	if s.config != nil {
+		cfg := s.config.Snapshot().System
+		systemControl["reboot_enabled"] = cfg.RebootEnabled
+		systemControl["services"] = cfg.Services
+	}
+	if s.update != nil {
+		if update, err := s.update.Status(context.Background()); err == nil {
+			systemControl["update"] = update
+		}
+	}
+	payload["system_control"] = systemControl
 	return payload
 }
 

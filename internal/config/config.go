@@ -72,7 +72,7 @@ type System struct {
 	RebootEnabled bool               `yaml:"reboot_enabled"`
 	UpdateEnabled bool               `yaml:"update_enabled"`
 	UpdateExposed bool               `yaml:"update_exposed"`
-	AllowRollback bool               `yaml:"allow_rollback"`
+	UpdateDataDir string             `yaml:"update_data_dir"`
 	Services      map[string]Service `yaml:"services"`
 }
 
@@ -162,6 +162,7 @@ func Default(metadata Metadata) (Config, error) {
 		System: System{
 			RebootEnabled: true,
 			UpdateEnabled: true,
+			UpdateDataDir: "/home/bticino/cfg/extra/companion",
 			Services: map[string]Service{
 				"dropbear": {Enabled: true, Exposed: true},
 			},

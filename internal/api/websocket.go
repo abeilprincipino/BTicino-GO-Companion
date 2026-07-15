@@ -108,6 +108,7 @@ func (s *Server) handleMessage(client *client, request *http.Request, message Me
 			s.logger.WarnContext(request.Context(), "websocket command failed", "command_id", message.ID, "action", message.Action, "error", err)
 		}
 		_ = client.write(commandResult(message.ID, payload, err))
+		s.BroadcastState()
 	}
 }
 

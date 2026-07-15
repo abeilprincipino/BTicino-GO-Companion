@@ -207,47 +207,28 @@ func (s *Server) systemUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manifest, err := s.update.Check(r.Context())
+	status, err := s.update.Check(r.Context())
 	if err != nil {
 		writeCommandError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, map[string]any{"manifest": manifest})
+	writeOK(w, http.StatusOK, map[string]any{"status": status})
 }
 
-func (s *Server) systemUpdateApply(w http.ResponseWriter, r *http.Request) {
+func (s *Server) systemUpdateStage(w http.ResponseWriter, r *http.Request) {
 	if s.update == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "update control is unavailable")
 		return
 	}
 
-	var req system.UpdateRequest
-
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-
-	if err := s.update.Apply(r.Context(), req); err != nil {
+	status, err := s.update.Stage(r.Context())
+	if err != nil {
 		writeCommandError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, nil)
-}
-
-func (s *Server) systemUpdateRollback(w http.ResponseWriter, r *http.Request) {
-	if s.update == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "update control is unavailable")
-		return
-	}
-
-	if err := s.update.Rollback(r.Context()); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
+	writeOK(w, http.StatusOK, map[string]any{"status": status})
 }
 
 func (s *Server) snapshotLatest(w http.ResponseWriter, r *http.Request) {

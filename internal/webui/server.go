@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
+	"bticino-go-companion/internal/system"
 	"bticino-go-companion/web"
 	"context"
 	"crypto/subtle"
@@ -39,6 +40,10 @@ type FrameProvider interface {
 }
 
 type DiagnosticsProvider interface{ Snapshot() diagnostics.Snapshot }
+type UpdateProvider interface {
+	Status(context.Context) (system.UpdateStatus, error)
+	Install(context.Context) (system.UpdateStatus, error)
+}
 
 type Server struct {
 	config      *config.Store
@@ -47,6 +52,7 @@ type Server struct {
 	setLogLevel func(string) error
 	frames      FrameProvider
 	diagnostics DiagnosticsProvider
+	update      UpdateProvider
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -79,7 +85,6 @@ type editableSystem struct {
 	RebootEnabled bool                      `json:"reboot_enabled"`
 	UpdateEnabled bool                      `json:"update_enabled"`
 	UpdateExposed bool                      `json:"update_exposed"`
-	AllowRollback bool                      `json:"allow_rollback"`
 	Services      map[string]config.Service `json:"services"`
 }
 
@@ -108,6 +113,7 @@ func New(store *config.Store, logger *slog.Logger, restart RestartFunc, setLogLe
 
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
 func (s *Server) SetDiagnostics(provider DiagnosticsProvider) { s.diagnostics = provider }
+func (s *Server) SetUpdate(provider UpdateProvider)           { s.update = provider }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -120,6 +126,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /webui/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("POST /webui/api/restart", s.requireReady(s.handleRestart))
 	mux.HandleFunc("GET /webui/api/status", s.requireReady(s.handleStatus))
+	mux.HandleFunc("GET /webui/api/update/status", s.requireReady(s.handleUpdateStatus))
+	mux.HandleFunc("POST /webui/api/update/install", s.requireReady(s.handleUpdateInstall))
 	mux.HandleFunc("GET /webui/api/logs", s.requireReady(s.handleLogs))
 	mux.HandleFunc("GET /webui/api/logging", s.requireReady(s.handleLogging))
 	mux.HandleFunc("PUT /webui/api/logging", s.requireReady(s.handleLogging))
@@ -141,6 +149,36 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		diagnostic = s.diagnostics.Snapshot()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"model": cfg.Companion.Model, "device_id": cfg.Companion.DeviceID, "firmware": diagnostic.OpenWebNet.Firmware, "hardware": diagnostic.OpenWebNet.Hardware, "uptime_seconds": int64(time.Since(s.bootTime).Seconds()), "free_ram_kb": readMemAvailableKB(), "wifi_strength": diagnostic.Local.WiFiStrength, "diagnostics": diagnostic})
+}
+
+func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "update status is unavailable")
+		return
+	}
+	status, err := s.update.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "update status is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
+		return
+	}
+
+	status, err := s.update.Install(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "update install failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, status)
 }
 
 func readMemAvailableKB() int64 {
@@ -227,6 +265,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		"bootstrap":                authenticated && current.bootstrap,
 		"bootstrap_required":       cfg.WebUI.AdminPasswordHash == "",
 		"username":                 cfg.WebUI.AdminUsername,
+		"version":                  system.BuildVersion,
+		"git_sha":                  system.BuildGitSHA,
 	})
 }
 
@@ -392,7 +432,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.System.RebootEnabled = next.System.RebootEnabled
 			cfg.System.UpdateEnabled = next.System.UpdateEnabled
 			cfg.System.UpdateExposed = next.System.UpdateExposed
-			cfg.System.AllowRollback = next.System.AllowRollback
 			cfg.System.Services = next.System.Services
 			cfg.HomeKit.Enabled = next.HomeKit.Enabled
 
@@ -550,7 +589,7 @@ func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 func redactedConfig(cfg config.Config) editableConfig {
 	return editableConfig{
 		Companion: editableCompanion{Name: cfg.Companion.Name, LogLevel: cfg.Companion.LogLevel, Entrypoints: cfg.Companion.Entrypoints},
-		System:    editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, AllowRollback: cfg.System.AllowRollback, Services: cfg.System.Services},
+		System:    editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, Services: cfg.System.Services},
 		HomeKit:   editableHomeKit{Enabled: cfg.HomeKit.Enabled},
 	}
 }

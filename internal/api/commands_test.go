@@ -284,49 +284,61 @@ func TestProjectorCommands_UpdateStatus(t *testing.T) {
 func TestProjectorCommands_UpdateCheck(t *testing.T) {
 	t.Parallel()
 
-	update := &fakeUpdateControl{manifest: system.ReleaseManifest{TagName: "v2"}}
+	update := &fakeUpdateControl{status: system.UpdateStatus{LatestVersion: "v2"}}
 	commands := NewProjectorCommands(core.NewProjector(), nil, nil, nil, nil, update, nil, nil)
+	commands.SetUpdatePolicy(func() system.UpdatePolicy { return system.UpdatePolicy{Enabled: true, Exposed: true} })
 
 	result, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.check"})
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
 
-	manifest, ok := result.(system.ReleaseManifest)
-	if !ok || manifest.TagName != "v2" {
-		t.Fatalf("manifest = %#v", result)
+	status, ok := result.(system.UpdateStatus)
+	if !ok || status.LatestVersion != "v2" {
+		t.Fatalf("status = %#v", result)
 	}
 }
 
-func TestProjectorCommands_UpdateApply(t *testing.T) {
+func TestProjectorCommands_UpdateStage(t *testing.T) {
 	t.Parallel()
 
 	update := &fakeUpdateControl{}
 
 	commands := NewProjectorCommands(core.NewProjector(), nil, nil, nil, nil, update, nil, nil)
+	commands.SetUpdatePolicy(func() system.UpdatePolicy { return system.UpdatePolicy{Enabled: true, Exposed: true} })
 
-	payload := json.RawMessage(`{"asset_name":"companion.tar.gz","plan":{"service":"companion","rotation":{"current_path":"/opt/companion","previous_path":"/opt/companion.previous"},"health_url":"http://127.0.0.1:8080/api/v3/health","health_timeout":60000000000}}`)
-	if _, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.apply", Payload: payload}); err != nil {
-		t.Fatalf("apply: %v", err)
+	if _, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.stage"}); err != nil {
+		t.Fatalf("stage: %v", err)
 	}
 
-	if update.applied.AssetName != "companion.tar.gz" {
-		t.Fatalf("applied = %#v", update.applied)
+	if !update.staged {
+		t.Fatal("stage was not called")
 	}
 }
 
-func TestProjectorCommands_UpdateRollback(t *testing.T) {
+func TestProjectorCommands_UpdateInstall(t *testing.T) {
+	t.Parallel()
+
+	update := &fakeUpdateControl{}
+	commands := NewProjectorCommands(core.NewProjector(), nil, nil, nil, nil, update, nil, nil)
+	commands.SetUpdatePolicy(func() system.UpdatePolicy { return system.UpdatePolicy{Enabled: true, Exposed: true} })
+
+	if _, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.install"}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !update.installed {
+		t.Fatal("install was not called")
+	}
+}
+
+func TestProjectorCommands_UpdateStageRequiresExposedPolicy(t *testing.T) {
 	t.Parallel()
 
 	update := &fakeUpdateControl{}
 
 	commands := NewProjectorCommands(core.NewProjector(), nil, nil, nil, nil, update, nil, nil)
-	if _, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.rollback"}); err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
-
-	if !update.rolledBack {
-		t.Fatal("rollback was not called")
+	if _, err := commands.HandleCommand(testRequest(), Command{Action: "system.update.stage"}); err == nil {
+		t.Fatal("stage succeeded without exposed policy")
 	}
 }
 
@@ -471,26 +483,25 @@ func (f *fakeRuntimeControl) Status(_ context.Context, service string) (system.S
 }
 
 type fakeUpdateControl struct {
-	manifest   system.ReleaseManifest
-	status     system.UpdateStatus
-	applied    system.UpdateRequest
-	rolledBack bool
+	status    system.UpdateStatus
+	staged    bool
+	installed bool
 }
 
-func (f *fakeUpdateControl) Check(context.Context) (system.ReleaseManifest, error) {
-	return f.manifest, nil
+func (f *fakeUpdateControl) Check(context.Context) (system.UpdateStatus, error) {
+	return f.status, nil
 }
 
 func (f *fakeUpdateControl) Status(context.Context) (system.UpdateStatus, error) {
 	return f.status, nil
 }
 
-func (f *fakeUpdateControl) Apply(_ context.Context, req system.UpdateRequest) error {
-	f.applied = req
-	return nil
+func (f *fakeUpdateControl) Stage(context.Context) (system.UpdateStatus, error) {
+	f.staged = true
+	return f.status, nil
 }
 
-func (f *fakeUpdateControl) Rollback(context.Context) error {
-	f.rolledBack = true
-	return nil
+func (f *fakeUpdateControl) Install(context.Context) (system.UpdateStatus, error) {
+	f.installed = true
+	return f.status, nil
 }

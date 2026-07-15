@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Run tests
+        run: go test ./...
+      - name: Build static ARMv7 binary
+        env:
+          VERSION: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          mkdir -p dist
+          GIT_SHA="$(git rev-parse --short=7 "$GITHUB_SHA")"
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -buildvcs=false -trimpath \
+            -ldflags "-s -w -X bticino-go-companion/internal/system.BuildVersion=${VERSION} -X bticino-go-companion/internal/system.BuildGitSHA=${GIT_SHA} -X bticino-go-companion/internal/system.BuildReleaseRepo=${RELEASE_REPO}" \
+            -o dist/companion ./cmd/companion
+      - name: Publish GitHub release asset
+        uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/companion
+          generate_release_notes: true

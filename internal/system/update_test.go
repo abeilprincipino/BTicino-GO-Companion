@@ -1,116 +1,117 @@
 package system
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestUpdater_DelegatesBinaryRotationAndExternalRollback(t *testing.T) {
+func TestUpdaterStagesVerifiedNewerBinary(t *testing.T) {
 	t.Parallel()
+	data := []byte("new companion")
+	digest := sha256.Sum256(data)
+	dir := t.TempDir()
+	updater := NewUpdater(&testReleaseSource{manifest: ReleaseManifest{TagName: "v1.2.4", Assets: []ReleaseAsset{{Name: companionAssetName, Digest: "sha256:" + hex.EncodeToString(digest[:])}}}, data: data}, BuildInfo{Version: "v1.2.3", ReleaseRepo: "owner/repo"}, func() UpdatePolicy { return UpdatePolicy{Enabled: true, Exposed: true, DataDir: dir} }, nil)
 
-	source := &testArtifactSource{
-		manifest: ReleaseManifest{TagName: "v1", Assets: []ReleaseAsset{{Name: testAssetName}}},
-		artifact: Artifact{Path: "/tmp/companion.tar.gz"},
-	}
-	rotator := &testRotator{}
-	executor := &testPostRestartRollback{}
-	updater := NewUpdater(source, rotator, executor)
-
-	request := UpdateRequest{
-		AssetName: testAssetName,
-		Plan: RollbackPlan{
-			Service:       testServiceName,
-			Rotation:      BinaryRotation{CurrentPath: "/opt/companion", PreviousPath: "/opt/companion.previous"},
-			HealthURL:     "http://127.0.0.1:8080/api/v3/health",
-			HealthTimeout: time.Minute,
-		},
-	}
-	if err := updater.Apply(context.Background(), request); err != nil {
+	status, err := updater.Stage(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	if rotator.artifact != source.artifact || rotator.rotation != request.Plan.Rotation {
-		t.Fatalf("rotation = %#v, artifact = %#v", rotator.rotation, rotator.artifact)
+	if !status.RestartRequired || status.StagedVersion != "v1.2.4" || status.Stage != "staged" {
+		t.Fatalf("status = %#v", status)
 	}
-
-	if executor.plan != request.Plan {
-		t.Fatalf("rollback plan = %#v", executor.plan)
+	staged, err := os.ReadFile(filepath.Join(dir, "companion.new"))
+	if err != nil || !bytes.Equal(staged, data) {
+		t.Fatalf("staged = %q, err = %v", staged, err)
 	}
 }
 
-func TestUpdater_DoesNotExecuteRollbackWhenRotationFails(t *testing.T) {
+func TestUpdaterRejectsDigestMismatch(t *testing.T) {
 	t.Parallel()
-
-	rotator := &testRotator{err: errors.New("rotation failed")}
-	executor := &testPostRestartRollback{}
-	updater := NewUpdater(&testArtifactSource{
-		manifest: ReleaseManifest{TagName: "v1", Assets: []ReleaseAsset{{Name: testAssetName}}},
-		artifact: Artifact{Path: "/tmp/companion.tar.gz"},
-	}, rotator, executor)
-
-	err := updater.Apply(context.Background(), validUpdateRequest())
-	if err == nil || executor.called {
-		t.Fatalf("Apply() error = %v, executor called = %t", err, executor.called)
+	dir := t.TempDir()
+	updater := NewUpdater(&testReleaseSource{manifest: ReleaseManifest{TagName: "v1.2.4", Assets: []ReleaseAsset{{Name: companionAssetName, Digest: "sha256:" + strings.Repeat("0", 64)}}}, data: []byte("tampered")}, BuildInfo{Version: "v1.2.3", ReleaseRepo: "owner/repo"}, func() UpdatePolicy { return UpdatePolicy{Enabled: true, DataDir: dir} }, nil)
+	if _, err := updater.Stage(context.Background()); err != ErrArtifactDigestMismatch {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "companion.new")); !os.IsNotExist(err) {
+		t.Fatalf("staged binary exists, err = %v", err)
 	}
 }
 
-func TestUpdater_RejectsIncompleteRequest(t *testing.T) {
+func TestUpdaterDoesNotUpdateSameVersionWithDifferentSHA(t *testing.T) {
 	t.Parallel()
-
-	updater := NewUpdater(&testArtifactSource{}, &testRotator{}, &testPostRestartRollback{})
-	if err := updater.Apply(context.Background(), UpdateRequest{}); !errors.Is(err, ErrUpdateUnavailable) {
-		t.Fatalf("Apply() error = %v", err)
+	updater := NewUpdater(&testReleaseSource{manifest: ReleaseManifest{TagName: "v1.2.3"}}, BuildInfo{Version: "v1.2.3", GitSHA: "old", ReleaseRepo: "owner/repo"}, func() UpdatePolicy { return UpdatePolicy{Enabled: true, DataDir: t.TempDir()} }, nil)
+	status, err := updater.Check(context.Background())
+	if err != nil || status.UpdateAvailable {
+		t.Fatalf("status = %#v, err = %v", status, err)
 	}
 }
 
-func validUpdateRequest() UpdateRequest {
-	return UpdateRequest{
-		AssetName: testAssetName,
-		Plan: RollbackPlan{
-			Service:       testServiceName,
-			Rotation:      BinaryRotation{CurrentPath: "/opt/companion", PreviousPath: "/opt/companion.previous"},
-			HealthURL:     "http://127.0.0.1:8080/api/v3/health",
-			HealthTimeout: time.Minute,
+func TestUpdaterUnavailableWithoutReleaseRepo(t *testing.T) {
+	t.Parallel()
+	updater := NewUpdater(nil, BuildInfo{Version: "v1.2.3"}, func() UpdatePolicy { return UpdatePolicy{Enabled: true} }, nil)
+	status, err := updater.Status(context.Background())
+	if err != nil || status.Stage != "unavailable" {
+		t.Fatalf("status = %#v, err = %v", status, err)
+	}
+}
+
+func TestUpdaterInstallStagesBeforeDelayedRestart(t *testing.T) {
+	t.Parallel()
+	data := []byte("new companion")
+	digest := sha256.Sum256(data)
+	restarted := make(chan struct{}, 1)
+	updater := NewUpdater(
+		&testReleaseSource{manifest: ReleaseManifest{TagName: "v1.2.4", Assets: []ReleaseAsset{{Name: companionAssetName, Digest: "sha256:" + hex.EncodeToString(digest[:])}}}, data: data},
+		BuildInfo{Version: "v1.2.3", ReleaseRepo: "owner/repo"},
+		func() UpdatePolicy { return UpdatePolicy{Enabled: true, DataDir: t.TempDir()} },
+		func(context.Context) error {
+			restarted <- struct{}{}
+			return nil
 		},
+	)
+
+	status, err := updater.Install(context.Background())
+	if err != nil || !status.RestartRequired {
+		t.Fatalf("Install() status = %#v, err = %v", status, err)
+	}
+	select {
+	case <-restarted:
+		t.Fatal("restart occurred before Install returned")
+	default:
+	}
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("restart was not requested")
 	}
 }
 
-type testArtifactSource struct {
+func TestNewerVersion(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		candidate, current string
+		want               bool
+	}{{"v1.2.4", "v1.2.3", true}, {"v1.2.3", "v1.2.3", false}, {"v1.2.3", "v1.2.3+other", false}, {"v1.2.3", "dev", false}, {"v1.2.3", "v1.2", false}, {"v1.2.3", "v1.2.3-rc.1", true}} {
+		if got := newerVersion(test.candidate, test.current); got != test.want {
+			t.Fatalf("newerVersion(%q, %q) = %t", test.candidate, test.current, got)
+		}
+	}
+}
+
+type testReleaseSource struct {
 	manifest ReleaseManifest
-	artifact Artifact
+	data     []byte
 }
 
-func (s *testArtifactSource) Latest(context.Context) (ReleaseManifest, error) {
-	return s.manifest, nil
-}
-
-func (s *testArtifactSource) Artifact(context.Context, ReleaseAsset) (Artifact, error) {
-	return s.artifact, nil
-}
-
-type testRotator struct {
-	artifact Artifact
-	rotation BinaryRotation
-	err      error
-}
-
-func (r *testRotator) Rotate(_ context.Context, artifact Artifact, rotation BinaryRotation) error {
-	r.artifact = artifact
-	r.rotation = rotation
-
-	return r.err
-}
-
-type testPostRestartRollback struct {
-	plan   RollbackPlan
-	called bool
-}
-
-func (e *testPostRestartRollback) Start(_ context.Context, plan RollbackPlan) error {
-	e.plan = plan
-	e.called = true
-
-	return nil
+func (s *testReleaseSource) Latest(context.Context) (ReleaseManifest, error) { return s.manifest, nil }
+func (s *testReleaseSource) Download(context.Context, ReleaseAsset) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.data)), nil
 }

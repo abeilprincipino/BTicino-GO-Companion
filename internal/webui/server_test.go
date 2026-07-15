@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/system"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -94,6 +95,26 @@ func TestStatusIncludesRuntimeMetrics(t *testing.T) {
 	}
 }
 
+func TestSessionIncludesBuildInfoAndUpdateStatusEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{status: system.UpdateStatus{Enabled: true, CurrentVersion: "v1.2.3", Stage: "idle"}})
+	cookie := configuredSession(t, server)
+
+	session := request(t, server, http.MethodGet, "/webui/api/session", nil, cookie)
+	var sessionBody map[string]any
+	decodeResponse(t, session, &sessionBody)
+	if sessionBody["version"] == "" || sessionBody["git_sha"] == "" {
+		t.Fatalf("session build info = %#v", sessionBody)
+	}
+
+	response := request(t, server, http.MethodGet, "/webui/api/update/status", nil, cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"current_version":"v1.2.3"`) {
+		t.Fatalf("update status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestPasswordChangeRotatesSecretAndInvalidatesEverySession(t *testing.T) {
 	t.Parallel()
 
@@ -142,6 +163,32 @@ func TestRestartRequiresConfiguredSession(t *testing.T) {
 	case <-restarted:
 	case <-time.After(time.Second):
 		t.Fatal("restart was not requested")
+	}
+}
+
+func TestUpdateInstallRequiresConfiguredSessionAndInvokesUpdater(t *testing.T) {
+	t.Parallel()
+
+	installed := make(chan struct{}, 1)
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{install: func(context.Context) (system.UpdateStatus, error) {
+		installed <- struct{}{}
+		return system.UpdateStatus{RestartRequired: true}, nil
+	}})
+
+	response := request(t, server, http.MethodPost, "/webui/api/update/install", map[string]string{}, nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated install status = %d", response.Code)
+	}
+
+	response = request(t, server, http.MethodPost, "/webui/api/update/install", map[string]string{}, configuredSession(t, server))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("install status = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-installed:
+	case <-time.After(time.Second):
+		t.Fatal("update install was not requested")
 	}
 }
 
@@ -263,4 +310,20 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, dst any) 
 	if err := json.NewDecoder(response.Body).Decode(dst); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+}
+
+type fakeUpdateProvider struct {
+	status  system.UpdateStatus
+	install func(context.Context) (system.UpdateStatus, error)
+}
+
+func (f fakeUpdateProvider) Status(context.Context) (system.UpdateStatus, error) {
+	return f.status, nil
+}
+
+func (f fakeUpdateProvider) Install(ctx context.Context) (system.UpdateStatus, error) {
+	if f.install == nil {
+		return f.status, nil
+	}
+	return f.install(ctx)
 }

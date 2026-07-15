@@ -31,9 +31,9 @@ type RuntimeControl interface {
 
 type UpdateControl interface {
 	Status(ctx context.Context) (system.UpdateStatus, error)
-	Check(ctx context.Context) (system.ReleaseManifest, error)
-	Apply(ctx context.Context, request system.UpdateRequest) error
-	Rollback(ctx context.Context) error
+	Check(ctx context.Context) (system.UpdateStatus, error)
+	Stage(ctx context.Context) (system.UpdateStatus, error)
+	Install(ctx context.Context) (system.UpdateStatus, error)
 }
 
 type WebRTCControl interface {

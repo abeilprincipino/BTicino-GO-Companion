@@ -9,8 +9,7 @@ INIT_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 LOCAL_INIT_TEMPLATE="${SCRIPT_DIR}/init.d/companion"
 
-DEFAULT_RELEASE_REPO="owner/BTicino-GO-Companion"
-REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
+REPO="${COMPANION_RELEASE_REPO:-}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"
 HEALTHCHECK_TIMEOUT_SEC="${COMPANION_HEALTHCHECK_TIMEOUT_SEC:-45}"
 BASE_URL="${COMPANION_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
@@ -219,6 +218,7 @@ resolve_local_install_inputs() {
 }
 
 download_latest_artifacts() {
+	[ -n "${REPO}" ] || { log "Set COMPANION_RELEASE_REPO to download a release."; exit 1; }
 	ROOT="/tmp/companion-install.$$"; mkdir -p "${ROOT}"
 	log "Downloading latest release bundle..."
 	bundle="${ROOT}/${BUNDLE_ASSET}"

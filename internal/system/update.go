@@ -2,122 +2,327 @@ package system
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 )
 
 var ErrUpdateUnavailable = errors.New("system: update control is unavailable")
 
+const companionAssetName = "companion"
+
+var (
+	BuildVersion     = "dev"
+	BuildGitSHA      = "-"
+	BuildReleaseRepo string
+)
+
+type BuildInfo struct {
+	Version     string `json:"version"`
+	GitSHA      string `json:"git_sha"`
+	ReleaseRepo string `json:"release_repo,omitempty"`
+}
+
+func CurrentBuildInfo() BuildInfo {
+	return BuildInfo{Version: BuildVersion, GitSHA: BuildGitSHA, ReleaseRepo: BuildReleaseRepo}
+}
+
+const (
+	restartDelay   = 250 * time.Millisecond
+	restartTimeout = 30 * time.Second
+)
+
+type RestartFunc func(context.Context) error
+
+type UpdatePolicy struct {
+	Enabled bool
+	Exposed bool
+	DataDir string
+}
+
 type UpdateStatus struct {
-	CurrentVersion  string
-	LatestVersion   string
-	UpdateAvailable bool
+	Enabled         bool   `json:"enabled"`
+	Exposed         bool   `json:"exposed"`
+	CurrentVersion  string `json:"current_version"`
+	LatestVersion   string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"update_available"`
+	StagedVersion   string `json:"staged_version,omitempty"`
+	RestartRequired bool   `json:"restart_required"`
+	Stage           string `json:"stage"`
+	Error           string `json:"error,omitempty"`
 }
 
-type Artifact struct {
-	Path string
-}
-
-type VerifiedArtifactSource interface {
+type ReleaseSource interface {
 	Latest(context.Context) (ReleaseManifest, error)
-	Artifact(context.Context, ReleaseAsset) (Artifact, error)
-}
-
-type BinaryRotation struct {
-	CurrentPath  string `json:"current_path"`
-	PreviousPath string `json:"previous_path"`
-}
-
-type BinaryRotator interface {
-	Rotate(context.Context, Artifact, BinaryRotation) error
-}
-
-type RollbackPlan struct {
-	Service       string         `json:"service"`
-	Rotation      BinaryRotation `json:"rotation"`
-	HealthURL     string         `json:"health_url"`
-	HealthTimeout time.Duration  `json:"health_timeout"`
-}
-
-type PostRestartRollback interface {
-	Start(context.Context, RollbackPlan) error
-}
-
-type UpdateRequest struct {
-	AssetName string       `json:"asset_name"`
-	Plan      RollbackPlan `json:"plan"`
+	Download(context.Context, ReleaseAsset) (io.ReadCloser, error)
 }
 
 type Updater struct {
-	source   VerifiedArtifactSource
-	rotator  BinaryRotator
-	rollback PostRestartRollback
+	source  ReleaseSource
+	build   BuildInfo
+	policy  func() UpdatePolicy
+	restart RestartFunc
+
+	mu     sync.RWMutex
+	latest string
+	staged string
+	err    error
 }
 
-func NewUpdater(source VerifiedArtifactSource, rotator BinaryRotator, rollback PostRestartRollback) *Updater {
-	return &Updater{source: source, rotator: rotator, rollback: rollback}
+func NewUpdater(source ReleaseSource, build BuildInfo, policy func() UpdatePolicy, restart RestartFunc) *Updater {
+	return &Updater{source: source, build: build, policy: policy, restart: restart}
 }
 
-func (u *Updater) Status(ctx context.Context) (UpdateStatus, error) {
-	if u == nil || u.source == nil {
+func (u *Updater) Status(_ context.Context) (UpdateStatus, error) {
+	if u == nil {
 		return UpdateStatus{}, ErrUpdateUnavailable
 	}
+	policy := u.currentPolicy()
+	status := UpdateStatus{Enabled: policy.Enabled, Exposed: policy.Exposed, CurrentVersion: u.build.Version}
+	if strings.TrimSpace(u.build.ReleaseRepo) == "" {
+		status.Exposed = false
+		status.Stage = "unavailable"
+		return status, nil
+	}
 
+	u.mu.RLock()
+	status.LatestVersion = u.latest
+	status.StagedVersion = u.staged
+	if u.err != nil {
+		status.Error = u.err.Error()
+	}
+	u.mu.RUnlock()
+	status.UpdateAvailable = newerVersion(status.LatestVersion, status.CurrentVersion)
+	status.RestartRequired = status.StagedVersion != ""
+	switch {
+	case status.Error != "":
+		status.Stage = "failed"
+	case status.RestartRequired:
+		status.Stage = "staged"
+	case status.UpdateAvailable:
+		status.Stage = "available"
+	default:
+		status.Stage = "idle"
+	}
+	return status, nil
+}
+
+func (u *Updater) Check(ctx context.Context) (UpdateStatus, error) {
+	if err := u.available(); err != nil {
+		return UpdateStatus{}, err
+	}
 	manifest, err := u.source.Latest(ctx)
+	u.mu.Lock()
+	if err != nil {
+		u.err = err
+	} else {
+		u.latest = manifest.TagName
+		u.err = nil
+	}
+	u.mu.Unlock()
 	if err != nil {
 		return UpdateStatus{}, err
 	}
-
-	return UpdateStatus{LatestVersion: manifest.TagName}, nil
+	return u.Status(ctx)
 }
 
-func (u *Updater) Check(ctx context.Context) (ReleaseManifest, error) {
-	if u == nil || u.source == nil {
-		return ReleaseManifest{}, ErrUpdateUnavailable
+func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
+	if err := u.available(); err != nil {
+		return UpdateStatus{}, err
 	}
-
-	return u.source.Latest(ctx)
-}
-
-func (u *Updater) Rollback(_ context.Context) error {
-	if u == nil {
-		return ErrUpdateUnavailable
-	}
-
-	return ErrUpdateUnavailable
-}
-
-func (u *Updater) Apply(ctx context.Context, request UpdateRequest) error {
-	if u == nil || u.source == nil || u.rotator == nil || u.rollback == nil {
-		return ErrUpdateUnavailable
-	}
-
-	if request.AssetName == "" || request.Plan.Service == "" || request.Plan.Rotation.CurrentPath == "" || request.Plan.Rotation.PreviousPath == "" || request.Plan.HealthURL == "" || request.Plan.HealthTimeout <= 0 {
-		return ErrUpdateUnavailable
-	}
-
 	manifest, err := u.source.Latest(ctx)
 	if err != nil {
-		return err
+		u.setError(err)
+		return UpdateStatus{}, err
 	}
-
-	asset, err := manifest.Asset(request.AssetName)
+	if !newerVersion(manifest.TagName, u.build.Version) {
+		u.mu.Lock()
+		u.latest, u.err = manifest.TagName, nil
+		u.mu.Unlock()
+		return u.Status(ctx)
+	}
+	asset, err := manifest.Asset(companionAssetName)
 	if err != nil {
-		return err
+		u.setError(err)
+		return UpdateStatus{}, err
 	}
-
-	artifact, err := u.source.Artifact(ctx, asset)
+	body, err := u.source.Download(ctx, asset)
 	if err != nil {
-		return err
+		u.setError(err)
+		return UpdateStatus{}, err
+	}
+	defer body.Close() //nolint:errcheck // read error is returned below
+
+	policy := u.currentPolicy()
+	if err := stageBinary(body, asset.Digest, policy.DataDir); err != nil {
+		u.setError(err)
+		return UpdateStatus{}, err
+	}
+	u.mu.Lock()
+	u.latest, u.staged, u.err = manifest.TagName, manifest.TagName, nil
+	u.mu.Unlock()
+	return u.Status(ctx)
+}
+
+// Install stages the newest release and restarts after the caller receives its response.
+func (u *Updater) Install(ctx context.Context) (UpdateStatus, error) {
+	if u == nil || u.restart == nil {
+		return UpdateStatus{}, ErrUpdateUnavailable
 	}
 
-	if artifact.Path == "" {
+	status, err := u.Stage(ctx)
+	if err != nil {
+		return UpdateStatus{}, err
+	}
+	if !status.RestartRequired {
+		return status, nil
+	}
+
+	go func() {
+		time.Sleep(restartDelay)
+		restartCtx, cancel := context.WithTimeout(context.Background(), restartTimeout)
+		defer cancel()
+		if err := u.restart(restartCtx); err != nil {
+			u.setError(fmt.Errorf("restart companion: %w", err))
+		}
+	}()
+
+	return status, nil
+}
+
+func (u *Updater) available() error {
+	if u == nil || u.source == nil || strings.TrimSpace(u.build.ReleaseRepo) == "" || !u.currentPolicy().Enabled {
 		return ErrUpdateUnavailable
 	}
+	return nil
+}
 
-	if err := u.rotator.Rotate(ctx, artifact, request.Plan.Rotation); err != nil {
+func (u *Updater) currentPolicy() UpdatePolicy {
+	if u.policy == nil {
+		return UpdatePolicy{}
+	}
+	return u.policy()
+}
+
+func (u *Updater) setError(err error) {
+	u.mu.Lock()
+	u.err = err
+	u.mu.Unlock()
+}
+
+func stageBinary(source io.Reader, digest, dataDir string) error {
+	if strings.TrimSpace(dataDir) == "" {
+		return ErrUpdateUnavailable
+	}
+	expected, err := parseSHA256Digest(digest)
+	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("create update directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(dataDir, ".companion-*")
+	if err != nil {
+		return fmt.Errorf("create staged binary: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath) //nolint:errcheck // successful rename removes the source
 
-	return u.rollback.Start(ctx, request.Plan)
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(temporary, hash), source); err != nil {
+		temporary.Close() //nolint:errcheck // original copy error is primary
+		return fmt.Errorf("write staged binary: %w", err)
+	}
+	if err := temporary.Chmod(0755); err != nil {
+		temporary.Close() //nolint:errcheck // chmod error is primary
+		return fmt.Errorf("chmod staged binary: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close() //nolint:errcheck // sync error is primary
+		return fmt.Errorf("sync staged binary: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close staged binary: %w", err)
+	}
+	if string(hash.Sum(nil)) != string(expected) {
+		return ErrArtifactDigestMismatch
+	}
+	if err := os.Rename(temporaryPath, filepath.Join(dataDir, "companion.new")); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	return nil
+}
+
+var semverPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$`)
+
+func newerVersion(candidate, current string) bool {
+	candidateParts := semverPattern.FindStringSubmatch(candidate)
+	currentParts := semverPattern.FindStringSubmatch(current)
+	if candidateParts == nil || currentParts == nil {
+		return false
+	}
+	for i := 1; i <= 3; i++ {
+		if len(candidateParts[i]) != len(currentParts[i]) {
+			return len(candidateParts[i]) > len(currentParts[i])
+		}
+		if candidateParts[i] != currentParts[i] {
+			return candidateParts[i] > currentParts[i]
+		}
+	}
+	return comparePrerelease(candidateParts[4], currentParts[4]) > 0
+}
+
+func comparePrerelease(candidate, current string) int {
+	if candidate == current {
+		return 0
+	}
+	if candidate == "" {
+		return 1
+	}
+	if current == "" {
+		return -1
+	}
+	left, right := strings.Split(candidate, "."), strings.Split(current, ".")
+	for i := 0; i < len(left) && i < len(right); i++ {
+		if left[i] == right[i] {
+			continue
+		}
+		leftNumber, rightNumber := isNumeric(left[i]), isNumeric(right[i])
+		if leftNumber != rightNumber {
+			if leftNumber {
+				return -1
+			}
+			return 1
+		}
+		if leftNumber && len(left[i]) != len(right[i]) {
+			if len(left[i]) > len(right[i]) {
+				return 1
+			}
+			return -1
+		}
+		if left[i] > right[i] {
+			return 1
+		}
+		return -1
+	}
+	if len(left) > len(right) {
+		return 1
+	}
+	return -1
+}
+
+func isNumeric(value string) bool {
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
