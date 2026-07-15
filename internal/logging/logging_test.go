@@ -1,10 +1,14 @@
 package logging
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
@@ -38,6 +42,24 @@ func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("log mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestHumanHandlerFormatsReadableLine(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	handler := newHumanHandler(&output, level)
+	record := slog.NewRecord(time.Date(2026, time.July, 15, 13, 49, 48, 0, time.Local), slog.LevelInfo, "api listening", 0)
+	record.AddAttrs(slog.String("addr", ":8080"), slog.String("error", "unexpected reply"))
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("handle record: %v", err)
+	}
+
+	if got, want := output.String(), "2026-07-15 13:49:48 INF api listening addr=:8080 error=\"unexpected reply\"\n"; got != want {
+		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
 

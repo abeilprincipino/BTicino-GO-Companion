@@ -170,7 +170,7 @@ func serve(
 
 func serveServer(logger *slog.Logger, name string, listener net.Listener, server *http.Server, errs chan<- error) {
 	go func() {
-		logger.Info("http server listening", "server", name, "addr", listener.Addr().String())
+		logger.Info(name+" listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("serve %s: %w", name, err)
 		}
