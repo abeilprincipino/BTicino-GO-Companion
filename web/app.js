@@ -188,13 +188,7 @@ function checkSession() {
     _session = session;
     if (!session.authenticated) {
       stopSessionMonitor();
-      var help = document.getElementById('loginHelp');
-      if (session.bootstrap_required) {
-        help.innerHTML = 'First login uses <strong>companion / companion</strong>, then you must replace the default credentials.';
-        help.style.display = 'block';
-      } else {
-        help.style.display = 'none';
-      }
+      renderLoginHelp(session.bootstrap_required);
       resetLoginForm();
       show('loginView');
       return;
@@ -213,6 +207,17 @@ function checkSession() {
     show('loginView');
     showToast(err.message || 'Failed to connect', 'error');
   });
+}
+
+function renderLoginHelp(bootstrapRequired) {
+  var help = document.getElementById('loginHelp');
+  if (!help) return;
+  if (bootstrapRequired) {
+    help.innerHTML = 'First login uses <strong>companion / companion</strong>, then you must replace the default credentials.';
+    help.style.display = 'block';
+    return;
+  }
+  help.style.display = 'none';
 }
 
 function show(viewId) {
@@ -239,6 +244,7 @@ function startSessionMonitor() {
       if (session.authenticated) return;
       _session = null;
       stopSessionMonitor();
+      renderLoginHelp(session.bootstrap_required);
       resetLoginForm();
       show('loginView');
       showToast('Companion restarted. Sign in again.', 'info');
