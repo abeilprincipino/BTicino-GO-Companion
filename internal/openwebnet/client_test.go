@@ -69,6 +69,59 @@ func TestControlInitialEventsReadsAudioAndVoicemailStatus(t *testing.T) {
 	}
 }
 
+func TestControlDiagnosticSnapshotUsesOneSession(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		reader := &frameReader{conn: conn}
+		if frame, err := reader.read(); err != nil || frame != FrameSessionStartCmd {
+			done <- errUnexpectedFrame(frame, err)
+			return
+		}
+		_, _ = conn.Write([]byte(FrameACK))
+		responses := map[string]string{
+			FrameDiagIPCmd: "*#13**10*192*0*2*10##", FrameDiagNetmaskCmd: "*#13**11*255*255*255*0##",
+			FrameDiagMACCmd: "*#13**12*0*17*34*51*68*85##", FrameDiagFirmwareCmd: "*#13**16*2*3*4##",
+			FrameDiagHardwareCmd: "*#13**17*rev*b##", FrameDiagKernelCmd: "*#13**23*6*1##", FrameDiagDistributionCmd: "*#13**24*openwrt##",
+		}
+		for range responses {
+			frame, err := reader.read()
+			if err != nil {
+				done <- err
+				return
+			}
+			_, _ = conn.Write([]byte(responses[frame]))
+		}
+		done <- nil
+	}()
+
+	host, portText, _ := net.SplitHostPort(listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	control := NewControl(nil, nil)
+	control.host, control.port, control.timeout = host, port, time.Second
+	snapshot, err := control.DiagnosticSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostic snapshot: %v", err)
+	}
+	if snapshot.IP != "192.0.2.10" || snapshot.MAC != "00:11:22:33:44:55" || snapshot.Firmware != "2.3.4" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+}
+
 func errUnexpectedFrame(frame string, err error) error {
 	if err != nil {
 		return err

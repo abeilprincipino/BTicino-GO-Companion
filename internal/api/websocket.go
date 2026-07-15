@@ -43,7 +43,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		s.logger.InfoContext(r.Context(), "websocket disconnected", "remote_addr", r.RemoteAddr)
 	}()
 
-	if client.write(Message{Type: "state", Payload: mustJSON(s.currentState())}) != nil {
+	if client.write(Message{Type: "state", Payload: mustJSON(s.currentPayload())}) != nil {
 		return
 	}
 
@@ -94,7 +94,7 @@ func (s *Server) handleMessage(client *client, request *http.Request, message Me
 		_ = client.write(Message{Type: "pong", ID: message.ID})
 	case "command":
 		if message.Action == "state.get" {
-			_ = client.write(commandResult(message.ID, s.currentState(), nil))
+			_ = client.write(commandResult(message.ID, s.currentPayload(), nil))
 			return
 		}
 
@@ -112,7 +112,7 @@ func (s *Server) handleMessage(client *client, request *http.Request, message Me
 }
 
 func (s *Server) BroadcastState() {
-	s.broadcast(Message{Type: "state", Payload: mustJSON(s.currentState())})
+	s.broadcast(Message{Type: "state", Payload: mustJSON(s.currentPayload())})
 }
 
 func (s *Server) BroadcastEvent(payload any) {

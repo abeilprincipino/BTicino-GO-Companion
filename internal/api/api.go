@@ -4,8 +4,10 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -26,16 +28,20 @@ type (
 )
 
 type Server struct {
-	auth     *auth.Store
-	config   *config.Store
-	state    StateProvider
-	commands CommandHandler
-	clients  clientSet
-	webrtc   WebRTCControl
-	snapshot SnapshotControl
-	runtime  RuntimeControl
-	update   UpdateControl
-	logger   *slog.Logger
+	auth        *auth.Store
+	config      *config.Store
+	state       StateProvider
+	commands    CommandHandler
+	clients     clientSet
+	webrtc      WebRTCControl
+	snapshot    SnapshotControl
+	runtime     RuntimeControl
+	update      UpdateControl
+	diagnostics interface {
+		Snapshot() diagnostics.Snapshot
+		Refresh(context.Context)
+	}
+	logger *slog.Logger
 }
 
 func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, commands CommandHandler, logger *slog.Logger) *Server {
@@ -50,6 +56,12 @@ func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
 func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
 func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
 func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
+func (s *Server) SetDiagnostics(v interface {
+	Snapshot() diagnostics.Snapshot
+	Refresh(context.Context)
+}) {
+	s.diagnostics = v
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -62,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "POST", "/api/v3/admin/issue-repair-code", s.issueRepairCode)
 	s.handleProtected(mux, "POST", "/api/v3/admin/reset-claim", s.resetClaim)
 	s.handleProtected(mux, "GET", "/api/v3/state", s.stateSnapshot)
+	s.handleProtected(mux, "GET", "/api/v3/diagnostics", s.diagnosticsSnapshot)
+	mux.HandleFunc("POST /api/v3/diagnostics", s.requireBearer(s.diagnosticsRefresh))
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints", s.handleEntrypoints)
 	s.handleProtected(mux, "GET", "/api/v3/capabilities", s.handleCapabilities)
 
@@ -162,7 +176,20 @@ func (s *Server) resetClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stateSnapshot(w http.ResponseWriter, r *http.Request) {
-	writeOK(w, http.StatusOK, map[string]any{"state": s.currentState()})
+	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
+
+func (s *Server) diagnosticsSnapshot(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, http.StatusOK, map[string]any{"diagnostics": s.currentDiagnostics()})
+}
+
+func (s *Server) diagnosticsRefresh(w http.ResponseWriter, r *http.Request) {
+	if s.diagnostics == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "diagnostics are unavailable")
+		return
+	}
+	go s.diagnostics.Refresh(context.WithoutCancel(r.Context()))
+	writeOK(w, http.StatusAccepted, map[string]any{"diagnostics": s.currentDiagnostics()})
 }
 
 func (s *Server) handleEntrypoints(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +241,32 @@ func (s *Server) currentState() core.State {
 	}
 
 	return s.state.Snapshot()
+}
+
+func (s *Server) currentDiagnostics() diagnostics.Snapshot {
+	if s.diagnostics == nil {
+		return diagnostics.Snapshot{}
+	}
+	return s.diagnostics.Snapshot()
+}
+
+func (s *Server) currentPayload() map[string]any {
+	state := s.currentState()
+	payload := map[string]any{}
+	data, _ := json.Marshal(state)
+	_ = json.Unmarshal(data, &payload)
+	diagnostic := s.currentDiagnostics()
+	payload["diagnostics"] = diagnostic
+	model := ""
+	if s.config != nil {
+		model = s.config.Snapshot().Companion.Model
+	}
+	payload["device"] = map[string]any{
+		"model":    model,
+		"firmware": diagnostic.OpenWebNet.Firmware,
+		"hardware": diagnostic.OpenWebNet.Hardware,
+	}
+	return payload
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {

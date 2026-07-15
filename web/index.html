@@ -133,6 +133,30 @@
       </div>
     </div>
 
+    <div id="diagnosticsPage" class="page hidden">
+      <h1 class="page-title">Diagnostics</h1>
+      <p class="page-desc">Cached device and local network information</p>
+      <div class="grid grid-2 section">
+        <div class="card">
+          <div class="card-header">OpenWebNet</div>
+          <div class="info-row"><span class="info-label">IP Address</span><span class="info-value" id="diagIP">-</span></div>
+          <div class="info-row"><span class="info-label">Netmask</span><span class="info-value" id="diagNetmask">-</span></div>
+          <div class="info-row"><span class="info-label">MAC Address</span><span class="info-value" id="diagMAC">-</span></div>
+          <div class="info-row"><span class="info-label">Firmware</span><span class="info-value" id="diagFirmware">-</span></div>
+          <div class="info-row"><span class="info-label">Hardware</span><span class="info-value" id="diagHardware">-</span></div>
+          <div class="info-row"><span class="info-label">Kernel</span><span class="info-value" id="diagKernel">-</span></div>
+          <div class="info-row"><span class="info-label">Distribution</span><span class="info-value" id="diagDistribution">-</span></div>
+        </div>
+        <div class="card">
+          <div class="card-header">Local</div>
+          <div class="info-row"><span class="info-label">Interface</span><span class="info-value" id="diagInterface">-</span></div>
+          <div class="info-row"><span class="info-label">Wi-Fi Strength</span><span class="info-value" id="diagWiFi">-</span></div>
+          <div class="info-row"><span class="info-label">Last Refresh</span><span class="info-value" id="diagRefreshed">-</span></div>
+          <div class="info-row"><span class="info-label">Refresh Error</span><span class="info-value" id="diagError">-</span></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Config: Home Assistant -->
     <div id="configHaPage" class="page hidden">
       <div class="flex-between mb-16">

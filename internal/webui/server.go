@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
 	"bticino-go-companion/web"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,18 +38,22 @@ type FrameProvider interface {
 	Frames() []map[string]any
 }
 
+type DiagnosticsProvider interface{ Snapshot() diagnostics.Snapshot }
+
 type Server struct {
 	config      *config.Store
 	logger      *slog.Logger
 	restart     RestartFunc
 	setLogLevel func(string) error
 	frames      FrameProvider
+	diagnostics DiagnosticsProvider
 
 	mu       sync.Mutex
 	sessions map[string]session
 
 	restartMu      sync.Mutex
 	restartPending bool
+	bootTime       time.Time
 }
 
 type session struct {
@@ -97,10 +103,11 @@ func New(store *config.Store, logger *slog.Logger, restart RestartFunc, setLogLe
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session)}
+	return &Server{config: store, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
 }
 
-func (s *Server) SetFrames(provider FrameProvider) { s.frames = provider }
+func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
+func (s *Server) SetDiagnostics(provider DiagnosticsProvider) { s.diagnostics = provider }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -129,7 +136,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"model": cfg.Companion.Model, "device_id": cfg.Companion.DeviceID, "available": false})
+	diagnostic := diagnostics.Snapshot{}
+	if s.diagnostics != nil {
+		diagnostic = s.diagnostics.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"model": cfg.Companion.Model, "device_id": cfg.Companion.DeviceID, "firmware": diagnostic.OpenWebNet.Firmware, "hardware": diagnostic.OpenWebNet.Hardware, "uptime_seconds": int64(time.Since(s.bootTime).Seconds()), "free_ram_kb": readMemAvailableKB(), "wifi_strength": diagnostic.Local.WiFiStrength, "diagnostics": diagnostic})
+}
+
+func readMemAvailableKB() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "MemAvailable:" {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err == nil {
+			return value
+		}
+	}
+	return 0
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

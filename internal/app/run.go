@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
 	"bticino-go-companion/internal/system"
@@ -91,6 +92,8 @@ func run(
 	server.SetSnapshot(snapshot)
 	server.SetRuntime(rt)
 	server.SetUpdate(updater)
+	diagnosticService := diagnostics.New(openWebNetControl, configStore.Snapshot().Companion.Model, server.BroadcastState)
+	server.SetDiagnostics(diagnosticService)
 
 	apiListener, err := net.Listen("tcp", apiAddr)
 	if err != nil {
@@ -111,6 +114,7 @@ func run(
 		return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
 	}, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
+	webUI.SetDiagnostics(diagnosticService)
 	webUIServer := &http.Server{
 		Handler:           webUI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -141,6 +145,7 @@ func run(
 			applyEvent(event)
 		}
 	}()
+	diagnosticService.Start(ctx)
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 

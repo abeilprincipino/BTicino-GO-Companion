@@ -38,6 +38,17 @@ type Control struct {
 }
 type VoicemailStatus struct{ Enabled bool }
 
+// DiagnosticSnapshot contains device metadata reported by OpenWebNet.
+type DiagnosticSnapshot struct {
+	IP           string `json:"ip,omitempty"`
+	Netmask      string `json:"netmask,omitempty"`
+	MAC          string `json:"mac,omitempty"`
+	Firmware     string `json:"firmware,omitempty"`
+	Hardware     string `json:"hardware,omitempty"`
+	Kernel       string `json:"kernel,omitempty"`
+	Distribution string `json:"distribution,omitempty"`
+}
+
 func NewControl(entrypoints []config.Entrypoint, trace *Trace) *Control {
 	addresses := make(map[core.EntrypointID]string, len(entrypoints))
 	for _, entrypoint := range entrypoints {
@@ -125,6 +136,36 @@ func (c *Control) VoicemailStatus(ctx context.Context) (VoicemailStatus, error) 
 		return VoicemailStatus{}, fmt.Errorf("%w: %s", ErrUnexpectedReply, frame)
 	}
 	return VoicemailStatus{Enabled: enabled}, nil
+}
+func (c *Control) DiagnosticSnapshot(ctx context.Context) (DiagnosticSnapshot, error) {
+	var snapshot DiagnosticSnapshot
+	err := c.exec(ctx, func(reader *frameReader) error {
+		for _, query := range []struct {
+			command string
+			parse   func(string) (string, bool)
+			set     func(string)
+		}{
+			{FrameDiagIPCmd, ParseDiagnosticIP, func(value string) { snapshot.IP = value }},
+			{FrameDiagNetmaskCmd, ParseDiagnosticNetmask, func(value string) { snapshot.Netmask = value }},
+			{FrameDiagMACCmd, ParseDiagnosticMAC, func(value string) { snapshot.MAC = value }},
+			{FrameDiagFirmwareCmd, ParseDiagnosticFirmware, func(value string) { snapshot.Firmware = value }},
+			{FrameDiagHardwareCmd, ParseDiagnosticHardware, func(value string) { snapshot.Hardware = value }},
+			{FrameDiagKernelCmd, ParseDiagnosticKernel, func(value string) { snapshot.Kernel = value }},
+			{FrameDiagDistributionCmd, ParseDiagnosticDistribution, func(value string) { snapshot.Distribution = value }},
+		} {
+			frame, err := c.sendStatus(reader, query.command)
+			if err != nil {
+				return fmt.Errorf("read diagnostic %s: %w", query.command, err)
+			}
+			value, ok := query.parse(frame)
+			if !ok {
+				return fmt.Errorf("read diagnostic %s: %w", query.command, ErrUnexpectedReply)
+			}
+			query.set(value)
+		}
+		return nil
+	})
+	return snapshot, err
 }
 func (c *Control) command(ctx context.Context, frame string, accepted ...string) error {
 	return c.exec(ctx, func(reader *frameReader) error { return c.send(reader, frame, accepted...) })

@@ -76,6 +76,24 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 	}
 }
 
+func TestStatusIncludesRuntimeMetrics(t *testing.T) {
+	server, _ := testServer(t, nil)
+	cookie := configuredSession(t, server)
+
+	response := request(t, server, http.MethodGet, "/webui/api/status", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	if _, ok := payload["uptime_seconds"].(float64); !ok {
+		t.Fatalf("uptime_seconds missing or invalid: %#v", payload["uptime_seconds"])
+	}
+	if _, ok := payload["free_ram_kb"].(float64); !ok {
+		t.Fatalf("free_ram_kb missing or invalid: %#v", payload["free_ram_kb"])
+	}
+}
+
 func TestPasswordChangeRotatesSecretAndInvalidatesEverySession(t *testing.T) {
 	t.Parallel()
 

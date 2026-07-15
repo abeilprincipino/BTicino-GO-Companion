@@ -108,6 +108,7 @@ function switchPage(pageId) {
     if (toggle) toggle.classList.add('active');
   }
   if (pageId === 'about') renderAbout();
+  if (pageId === 'diagnostics') renderDiagnostics();
   if (pageId === 'configHa') loadConfig().then(renderHomeAssistantConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
   if (pageId === 'configEntrypoints') loadConfig().then(renderEntrypointsConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
   if (pageId === 'adminUser') renderAdminUser();
@@ -132,6 +133,7 @@ function buildNav() {
       ]
     },
     { id: 'about', label: 'About' },
+    { id: 'diagnostics', label: 'Diagnostics' },
     {
       label: 'Admin',
       children: [
@@ -684,6 +686,31 @@ function renderStatusData(status) {
     badge.className = 'badge badge-info';
   }
   badge.textContent = label;
+}
+
+function renderDiagnostics() {
+  apiGet('/webui/api/status').then(function(status) {
+    var diagnostic = status.diagnostics || {};
+    var own = diagnostic.openwebnet || {};
+    var local = diagnostic.local || {};
+    var fields = {
+      diagIP: own.ip,
+      diagNetmask: own.netmask,
+      diagMAC: own.mac,
+      diagFirmware: own.firmware,
+      diagHardware: own.hardware,
+      diagKernel: own.kernel,
+      diagDistribution: own.distribution,
+      diagInterface: local.interface,
+      diagWiFi: formatPercent(local.wifi_strength),
+      diagRefreshed: diagnostic.refreshed_at || '-',
+      diagError: diagnostic.refresh_error || 'None'
+    };
+    Object.keys(fields).forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = fields[id] || '-';
+    });
+  }).catch(function(err) { handleApiError(err, 'Failed to load diagnostics'); });
 }
 
 function formatDuration(seconds) {
