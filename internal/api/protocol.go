@@ -11,6 +11,8 @@ type Message struct {
 	Type    string          `json:"type"`
 	ID      string          `json:"id,omitempty"`
 	Action  string          `json:"action,omitempty"`
+	OK      *bool           `json:"ok,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 

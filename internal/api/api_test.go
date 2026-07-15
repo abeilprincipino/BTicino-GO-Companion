@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -190,7 +191,7 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 		t.Fatal(err)
 	}
 
-	return NewServer(auth.NewStore(store), store, core.NewProjector(), nil), store
+	return NewServer(auth.NewStore(store), store, core.NewProjector(), nil, slog.New(slog.DiscardHandler)), store
 }
 
 type failingConn struct{}

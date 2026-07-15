@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logging"
 	"bticino-go-companion/web"
 	"context"
 	"crypto/subtle"
@@ -93,7 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webui/api/restart", s.requireReady(s.handleRestart))
 	mux.Handle("/", s.staticHandler())
 
-	return mux
+	return logging.HTTP(s.logger, mux)
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -411,11 +412,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: true})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: true})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func (s *Server) staticHandler() http.Handler {

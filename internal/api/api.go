@@ -4,9 +4,11 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/logging"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -36,10 +38,15 @@ type Server struct {
 	snapshot    SnapshotControl
 	runtime     RuntimeControl
 	update      UpdateControl
+	logger      *slog.Logger
 }
 
-func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, commands CommandHandler) *Server {
-	return &Server{auth: authStore, config: configStore, state: state, commands: commands}
+func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, commands CommandHandler, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &Server{auth: authStore, config: configStore, state: state, commands: commands, logger: logger}
 }
 
 func (s *Server) SetEntrypoints(v EntrypointControl) { s.entrypoints = v }
@@ -89,7 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v3/ws", s.websocket)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
-	return mux
+	return logging.HTTP(s.logger, mux)
 }
 
 func (s *Server) handle(mux *http.ServeMux, method, path string, handler http.HandlerFunc) {

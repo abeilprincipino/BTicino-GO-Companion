@@ -43,7 +43,12 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	client := &client{conn: conn}
 
 	s.clients.add(client)
-	defer func() { s.clients.remove(client); _ = conn.Close() }()
+	s.logger.InfoContext(r.Context(), "websocket connected", "remote_addr", r.RemoteAddr)
+	defer func() {
+		s.clients.remove(client)
+		_ = conn.Close()
+		s.logger.InfoContext(r.Context(), "websocket disconnected", "remote_addr", r.RemoteAddr)
+	}()
 
 	if client.write(Message{Type: "state", Payload: mustJSON(s.currentState())}) != nil {
 		return
@@ -74,6 +79,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 
 		message, err := ParseMessage(data)
 		if err != nil {
+			s.logger.WarnContext(r.Context(), "invalid websocket message", "remote_addr", r.RemoteAddr)
 			if client.write(Message{Type: "error", Payload: mustJSON(map[string]string{"code": "invalid_message", "message": "message is invalid"})}) != nil {
 				return
 			}
@@ -105,6 +111,9 @@ func (s *Server) handleMessage(client *client, request *http.Request, message Me
 		}
 
 		payload, err := s.commands.HandleCommand(request, Command{ID: message.ID, Action: message.Action, Payload: message.Payload})
+		if err != nil {
+			s.logger.WarnContext(request.Context(), "websocket command failed", "command_id", message.ID, "action", message.Action, "error", err)
+		}
 		_ = client.write(commandResult(message.ID, payload, err))
 	}
 }
@@ -204,10 +213,12 @@ func readClientFrame(conn net.Conn) ([]byte, ws.OpCode, error) {
 
 func commandResult(id string, payload any, err error) Message {
 	if err != nil {
-		return Message{Type: "command_result", ID: id, Payload: mustJSON(map[string]any{"ok": false, "error": map[string]string{"code": "command_failed", "message": err.Error()}})}
+		ok := false
+		return Message{Type: "command_result", ID: id, OK: &ok, Error: mustJSON(map[string]string{"code": "command_failed", "message": err.Error()})}
 	}
 
-	return Message{Type: "command_result", ID: id, Payload: mustJSON(map[string]any{"ok": true, "payload": payload})}
+	ok := true
+	return Message{Type: "command_result", ID: id, OK: &ok, Payload: mustJSON(payload)}
 }
 
 func mustJSON(value any) json.RawMessage {
