@@ -6,6 +6,8 @@ import (
 )
 
 func TestBuildOfferUsesIngestPortsAndDevAddr(t *testing.T) {
+	t.Parallel()
+
 	offer := BuildOffer("192.0.2.10", "21")
 
 	for _, line := range []string{
@@ -20,6 +22,8 @@ func TestBuildOfferUsesIngestPortsAndDevAddr(t *testing.T) {
 }
 
 func TestBuildAnswerUsesIngestPorts(t *testing.T) {
+	t.Parallel()
+
 	answer := BuildAnswer("0.0.0.0")
 
 	for _, line := range []string{

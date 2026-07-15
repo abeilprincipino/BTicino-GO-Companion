@@ -3,6 +3,8 @@ package openwebnet
 import "testing"
 
 func TestFrameBuilders(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		got  string
@@ -17,6 +19,8 @@ func TestFrameBuilders(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			if test.got != test.want {
 				t.Fatalf("got %q, want %q", test.got, test.want)
 			}
@@ -25,30 +29,40 @@ func TestFrameBuilders(t *testing.T) {
 }
 
 func TestFramePredicatesAndExtractors(t *testing.T) {
+	t.Parallel()
+
 	if !IsRingStart(" *8*1#1#4#10*21## ") || !IsViewRequest("*8*1#5#4#21*12##") {
 		t.Fatal("expected ring and view frames to be recognized")
 	}
+
 	if !IsStreamStartVideo("*7*300#127#0#0#1#5007#1*##") || !IsStreamStartAudio("*7*300#127#0#0#1#5000#2*##") {
 		t.Fatal("expected stream frames to be recognized")
 	}
+
 	if IsStreamStartAudio("*7*300#127#0#0#1#5007#0*##") {
 		t.Fatal("video stream must not be classified as audio")
 	}
+
 	if where, ok := ParseReceiveVideoWhere("*7*0*4001##"); !ok || where != "4001" {
 		t.Fatalf("unexpected receive-video parse: where=%q ok=%t", where, ok)
 	}
+
 	if IsReceiveVideo(FrameStop) {
 		t.Fatal("stream stop must not be classified as receive-video")
 	}
+
 	if address := ExtractAddress("*8*1#5#4#21*12##"); address != "21" {
 		t.Fatalf("got address %q, want %q", address, "21")
 	}
+
 	if address, ok := ParseRingIdentityAddress("*8*9#1#4*22#2##"); !ok || address != "22" {
 		t.Fatalf("unexpected ring identity parse: address=%q ok=%t", address, ok)
 	}
 }
 
 func TestParseDiagnosticFrames(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		parse func(string) (string, bool)
@@ -63,6 +77,8 @@ func TestParseDiagnosticFrames(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, ok := test.parse(test.frame)
 			if !ok || got != test.want {
 				t.Fatalf("got %q, %t; want %q, true", got, ok, test.want)
@@ -76,10 +92,13 @@ func TestParseDiagnosticFrames(t *testing.T) {
 }
 
 func TestParseVoicemailStatus(t *testing.T) {
+	t.Parallel()
+
 	enabled, welcomeEnabled, ok := ParseVoicemailStatus("*#8**40*1*0*0153*1*25##")
 	if !ok || !enabled || welcomeEnabled {
 		t.Fatalf("unexpected voicemail status: enabled=%t welcome=%t ok=%t", enabled, welcomeEnabled, ok)
 	}
+
 	if _, _, ok := ParseVoicemailStatus("*#8**40*2*0##"); ok {
 		t.Fatal("invalid voicemail status must be rejected")
 	}

@@ -1,11 +1,10 @@
 package media
 
 import (
+	"bticino-go-companion/internal/core"
 	"context"
 	"errors"
 	"fmt"
-
-	"bticino-go-companion/internal/core"
 )
 
 var (
@@ -47,32 +46,38 @@ func (s *SnapshotService) Capture(ctx context.Context, entrypointID core.Entrypo
 	if s == nil || s.media == nil || s.gstreamer == nil || entrypointID == "" {
 		return nil, ErrSnapshotUnavailable
 	}
+
 	capture, err := s.gstreamer.StartSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
+
 	if capture == nil {
 		return nil, ErrSnapshotUnavailable
 	}
-	defer capture.Close()
+	defer capture.Close() //nolint:errcheck // best-effort cleanup
 
 	source, ok := s.media.ActiveSource(entrypointID, MediaKindVideo)
 	if !ok {
 		if s.openwebnet == nil {
 			return nil, ErrSnapshotNoVideo
 		}
+
 		if err := s.openwebnet.StartVideo(ctx, entrypointID); err != nil {
 			return nil, err
 		}
+
 		source, ok = s.media.ActiveSource(entrypointID, MediaKindVideo)
 		if !ok {
 			return nil, ErrSnapshotNoVideo
 		}
 	}
+
 	sessionID := SessionID(fmt.Sprintf("snapshot:%s", entrypointID))
 	if err := s.media.RegisterSessionConsumer(source, sessionID, capture); err != nil {
 		return nil, err
 	}
 	defer s.media.UnregisterSessionConsumer(source, sessionID)
+
 	return capture.Wait(ctx)
 }

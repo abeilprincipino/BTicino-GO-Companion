@@ -29,6 +29,7 @@ func NewRTSPConsumer(distributor *Distributor, source Source, sessionID SessionI
 	if writer == nil {
 		return nil, ErrNilConsumer
 	}
+
 	consumer := &RTSPConsumer{
 		distributor: distributor,
 		source:      source,
@@ -38,29 +39,36 @@ func NewRTSPConsumer(distributor *Distributor, source Source, sessionID SessionI
 	if distributor == nil {
 		return nil, ErrSourceNotRegistered
 	}
+
 	if err := distributor.RegisterSessionConsumer(source, sessionID, consumer); err != nil {
 		return nil, err
 	}
+
 	return consumer, nil
 }
 
 func (c *RTSPConsumer) Consume(packet Packet) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.closed {
 		return
 	}
+
 	_ = c.writer.WriteRTP(packet.RTP)
 }
 
 func (c *RTSPConsumer) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.closed {
 		return ErrRTSPConsumerClosed
 	}
+
 	c.closed = true
 	c.distributor.UnregisterSessionConsumer(c.source, c.sessionID)
+
 	return nil
 }
 
@@ -77,6 +85,7 @@ func (w *RTSPPacketWriter) WriteRTP(packet *rtp.Packet) error {
 	if w == nil || w.session == nil || w.media == nil || packet == nil {
 		return ErrInvalidBackchannelPacket
 	}
+
 	return w.session.WritePacketRTP(w.media, packet)
 }
 
@@ -89,8 +98,9 @@ func NewRTSPBackchannel(writer RTPWriter) *RTSPBackchannel {
 }
 
 func (b *RTSPBackchannel) WriteRTP(packet *rtp.Packet) error {
-	if packet == nil || b == nil || b.writer == nil {
+	if b == nil || packet == nil || b.writer == nil {
 		return ErrInvalidBackchannelPacket
 	}
+
 	return b.writer.WriteRTP(packet)
 }

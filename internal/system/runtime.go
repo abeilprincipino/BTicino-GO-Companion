@@ -35,6 +35,7 @@ func NewRuntimeControl(services ServiceOperator, rebooter Rebooter, allowedServi
 	for _, service := range allowedServices {
 		allowed[service] = struct{}{}
 	}
+
 	return &RuntimeControl{services: services, rebooter: rebooter, allowed: allowed}
 }
 
@@ -42,9 +43,11 @@ func (r *RuntimeControl) Status(ctx context.Context, service string) (ServiceSta
 	if !r.isAllowed(service) {
 		return ServiceStatus{}, ErrServiceNotAllowed
 	}
+
 	if r.services == nil {
 		return ServiceStatus{}, ErrRuntimeUnavailable
 	}
+
 	return r.services.Status(ctx, service)
 }
 
@@ -52,16 +55,27 @@ func (r *RuntimeControl) Restart(ctx context.Context, service string) error {
 	if !r.isAllowed(service) {
 		return ErrServiceNotAllowed
 	}
+
 	if r.services == nil {
 		return ErrRuntimeUnavailable
 	}
+
 	return r.services.Restart(ctx, service)
+}
+
+func (r *RuntimeControl) RestartService(ctx context.Context, service string) error {
+	return r.Restart(ctx, service)
+}
+
+func (r *RuntimeControl) ServiceStatus(ctx context.Context, service string) (ServiceStatus, error) {
+	return r.Status(ctx, service)
 }
 
 func (r *RuntimeControl) Reboot(ctx context.Context) error {
 	if r.rebooter == nil {
 		return ErrRuntimeUnavailable
 	}
+
 	return r.rebooter.Reboot(ctx)
 }
 

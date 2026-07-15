@@ -1,6 +1,9 @@
 package api
 
 import (
+	"bticino-go-companion/internal/auth"
+	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/core"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,66 +16,85 @@ import (
 	"testing"
 	"time"
 
-	"bticino-go-companion/internal/auth"
-	"bticino-go-companion/internal/config"
-	"bticino-go-companion/internal/core"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 )
 
 func TestServer_EnvelopesAndBearer(t *testing.T) {
+	t.Parallel()
+
 	server, store := newTestServer(t)
+
 	tests := []struct {
 		name, method, path string
 		status             int
 		ok                 bool
-	}{{"health", "GET", "/api/v3/health", 200, true}, {"method", "POST", "/api/v3/health", 405, false}, {"missing", "GET", "/api/v3/missing", 404, false}, {"state unauthorized", "GET", "/api/v3/state", 401, false}}
+	}{
+		{"health", "GET", "/api/v3/health", 200, true},
+		{"method", "POST", "/api/v3/health", 405, false},
+		{"missing", "GET", "/api/v3/missing", 404, false},
+		{"state unauthorized", "GET", "/api/v3/state", 401, false},
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(test.method, test.path, nil)
+			t.Parallel()
+
+			request := httptest.NewRequestWithContext(context.Background(), test.method, test.path, nil)
 			response := httptest.NewRecorder()
 			server.Handler().ServeHTTP(response, request)
+
 			var body struct {
 				OK    bool            `json:"ok"`
 				Error json.RawMessage `json:"error"`
 			}
+
 			if response.Code != test.status {
 				t.Fatalf("status = %d, want %d", response.Code, test.status)
 			}
+
 			if json.Unmarshal(response.Body.Bytes(), &body) != nil || body.OK != test.ok || (!test.ok && len(body.Error) == 0) {
 				t.Fatalf("invalid envelope %s", response.Body.String())
 			}
 		})
 	}
+
 	token, err := auth.NewStore(store).RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest("GET", "/api/v3/state", nil)
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/state", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != 200 {
 		t.Fatalf("authorized state = %d", response.Code)
 	}
 }
 
 func TestServer_Pair(t *testing.T) {
+	t.Parallel()
+
 	server, store := newTestServer(t)
-	challengeRequest := httptest.NewRequest("POST", "/api/v3/pair/challenge", nil)
+	challengeRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/challenge", nil)
 	challengeRequest.RemoteAddr = "192.0.2.1:1234"
 	challengeResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(challengeResponse, challengeRequest)
+
 	var challenge struct {
 		ChallengeID string `json:"challenge_id"`
 	}
 	if challengeResponse.Code != 201 || json.Unmarshal(challengeResponse.Body.Bytes(), &challenge) != nil {
 		t.Fatalf("challenge response = %s", challengeResponse.Body.String())
 	}
-	request := httptest.NewRequest("POST", "/api/v3/pair/claim", strings.NewReader(`{"challenge_id":"`+challenge.ChallengeID+`","claim_code":"`+store.Snapshot().Auth.ClaimCode+`"}`))
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/claim", strings.NewReader(`{"challenge_id":"`+challenge.ChallengeID+`","claim_code":"`+store.Snapshot().Auth.ClaimCode+`"}`))
 	request.RemoteAddr = "192.0.2.1:1234"
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	var claim struct {
 		AccessToken string `json:"access_token"`
 	}
@@ -82,6 +104,8 @@ func TestServer_Pair(t *testing.T) {
 }
 
 func TestParseMessage(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		message string
 		wantErr bool
@@ -94,58 +118,78 @@ func TestParseMessage(t *testing.T) {
 }
 
 func TestServer_WebSocket(t *testing.T) {
+	t.Parallel()
+
 	server, store := newTestServer(t)
+
 	token, err := auth.NewStore(store).RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
+
 	connection, _, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	defer connection.Close() //nolint:errcheck // test cleanup
+
 	assertMessage(t, connection, "state", "")
+
 	if wsutil.WriteClientText(connection, []byte(`{"type":"ping","id":"ping-1"}`)) != nil {
 		t.Fatal("write ping")
 	}
+
 	assertMessage(t, connection, "pong", "ping-1")
+
 	if wsutil.WriteClientText(connection, []byte(`{"type":"command","id":"state-1","action":"state.get"}`)) != nil {
 		t.Fatal("write command")
 	}
+
 	assertMessage(t, connection, "command_result", "state-1")
 }
 
 func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
+	t.Parallel()
+
 	server, _ := newTestServer(t)
 	server.clients.add(&client{conn: failingConn{}})
 	server.BroadcastState()
+
 	if len(server.clients.all()) != 0 {
 		t.Fatal("failed client remained registered")
 	}
 }
+
 func assertMessage(t *testing.T, connection net.Conn, expectedType, expectedID string) {
 	t.Helper()
+
 	data, _, err := wsutil.ReadServerData(connection)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var message Message
 	if json.Unmarshal(data, &message) != nil || message.Type != expectedType || message.ID != expectedID {
 		t.Fatalf("message = %s", data)
 	}
 }
+
 func newTestServer(t *testing.T) (*Server, *config.Store) {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if _, err := config.Create(path, config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"}); err != nil {
 		t.Fatal(err)
 	}
+
 	store, err := config.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return NewServer(auth.NewStore(store), store, core.NewProjector(), nil), store
 }
 

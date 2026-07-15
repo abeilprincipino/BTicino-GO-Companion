@@ -27,6 +27,7 @@ func (Parser) Parse(datagram []byte) (Message, error) {
 	if systemEnd < 0 {
 		return Message{}, ErrInvalidDatagram
 	}
+
 	systemEnd += 8
 	system := string(datagram[8:systemEnd])
 
@@ -34,6 +35,7 @@ func (Parser) Parse(datagram []byte) (Message, error) {
 	if system == "REGISTRATION" {
 		systemOffset = 16
 	}
+
 	searchStart := systemEnd + systemOffset
 	if searchStart > len(datagram) {
 		return Message{}, ErrInvalidDatagram
@@ -50,6 +52,7 @@ func (Parser) Parse(datagram []byte) (Message, error) {
 	if system == "LCM_SELF_TEST" {
 		messageOffset = 0
 	}
+
 	messageStart := systemEnd + messageOffset
 	if messageStart > len(datagram) || messageStart > messageEnd {
 		return Message{}, ErrInvalidDatagram

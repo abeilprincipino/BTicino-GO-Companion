@@ -1,12 +1,11 @@
 package system
 
 import (
+	"bticino-go-companion/internal/config"
 	"fmt"
 	"net"
 	"os"
 	"strings"
-
-	"bticino-go-companion/internal/config"
 )
 
 func DetectMetadata() (config.Metadata, error) {
@@ -14,10 +13,12 @@ func DetectMetadata() (config.Metadata, error) {
 	if err != nil {
 		return config.Metadata{}, err
 	}
+
 	mac, err := detectMAC()
 	if err != nil {
 		return config.Metadata{}, err
 	}
+
 	return config.Metadata{Model: model, MAC: mac}, nil
 }
 
@@ -31,6 +32,7 @@ func detectModel() (string, error) {
 		if err != nil {
 			continue
 		}
+
 		upper := strings.ToUpper(string(data))
 		switch {
 		case strings.Contains(upper, "C300X"):
@@ -39,6 +41,7 @@ func detectModel() (string, error) {
 			return "C100X", nil
 		}
 	}
+
 	return "", fmt.Errorf("detect model: %w", config.ErrMissingMetadata)
 }
 
@@ -47,11 +50,14 @@ func detectMAC() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list network interfaces: %w", err)
 	}
+
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || len(iface.HardwareAddr) == 0 {
 			continue
 		}
+
 		return iface.HardwareAddr.String(), nil
 	}
+
 	return "", fmt.Errorf("detect mac: %w", config.ErrMissingMetadata)
 }

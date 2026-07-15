@@ -50,6 +50,7 @@ func BuildAVAddStreamVideo(ip string, port int, highRes bool) string {
 	if highRes {
 		quality = "0"
 	}
+
 	return fmt.Sprintf("*7*300#%s#%d#%s*##", encodeIPHashForm(ip), port, quality)
 }
 
@@ -82,10 +83,12 @@ func ParseRingIdentityAddress(frame string) (string, bool) {
 	if len(matches) < 2 {
 		return "", false
 	}
+
 	address := strings.TrimSpace(matches[1])
 	if address == "" {
 		return "", false
 	}
+
 	return address, true
 }
 
@@ -125,10 +128,12 @@ func ParseReceiveVideoWhere(frame string) (string, bool) {
 	if trimmed == FrameStop || !strings.HasPrefix(trimmed, "*7*0*") || !strings.HasSuffix(trimmed, "##") {
 		return "", false
 	}
+
 	where := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "*7*0*"), "##"))
 	if where == "" {
 		return "", false
 	}
+
 	return where, true
 }
 
@@ -141,11 +146,12 @@ func IsStreamProbe(frame string) bool {
 	return strings.TrimSpace(frame) == FrameStreamProbe
 }
 
-func ParseVoicemailStatus(frame string) (enabled bool, welcomeMessageEnabled bool, ok bool) {
+func ParseVoicemailStatus(frame string) (enabled, welcomeMessageEnabled, ok bool) {
 	matches := voicemailStatusFrameRegexp.FindStringSubmatch(strings.TrimSpace(frame))
 	if len(matches) < 3 {
 		return false, false, false
 	}
+
 	return matches[1] == "1", matches[2] == "1", true
 }
 
@@ -158,6 +164,7 @@ func ExtractAddress(frame string) string {
 	if address, ok := ParseRingIdentityAddress(frame); ok {
 		return address
 	}
+
 	if IsViewRequest(frame) {
 		if address := extractViewRequestAddress(frame); address != "" {
 			return address
@@ -165,10 +172,12 @@ func ExtractAddress(frame string) string {
 	}
 
 	trimmed := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(frame), "*"), "##")
+
 	parts := strings.Split(trimmed, "*")
 	if len(parts) < 3 {
 		return ""
 	}
+
 	return strings.TrimSpace(parts[2])
 }
 
@@ -177,19 +186,24 @@ func ParseDiagnosticReply(frame string) (code string, values []string, ok bool) 
 	if !strings.HasPrefix(trimmed, "*#13**") || !strings.HasSuffix(trimmed, "##") {
 		return "", nil, false
 	}
+
 	body := strings.TrimSuffix(strings.TrimPrefix(trimmed, "*#13**"), "##")
 	if body == "" {
 		return "", nil, false
 	}
+
 	parts := strings.Split(body, "*")
+
 	code = strings.TrimSpace(parts[0])
 	if code == "" {
 		return "", nil, false
 	}
+
 	values = make([]string, 0, len(parts)-1)
 	for _, part := range parts[1:] {
 		values = append(values, strings.TrimSpace(part))
 	}
+
 	return code, values, true
 }
 
@@ -220,13 +234,16 @@ func ParseDiagnosticMAC(frame string) (string, bool) {
 	}
 
 	var parts [6]string
+
 	for index, raw := range values {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value < 0 || value > 255 {
 			return "", false
 		}
+
 		parts[index] = fmt.Sprintf("%02x", value)
 	}
+
 	return strings.Join(parts[:], ":"), true
 }
 
@@ -239,33 +256,42 @@ func parseStreamStartChannel(frame string) (string, bool) {
 	if !strings.HasPrefix(trimmed, "*7*300#") || !strings.HasSuffix(trimmed, "*##") {
 		return "", false
 	}
+
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(trimmed, "*7*300#"), "*##"), "#")
 	if len(parts) < 2 {
 		return "", false
 	}
+
 	channel := strings.TrimSpace(parts[len(parts)-1])
+
 	return channel, channel != ""
 }
 
 func extractViewRequestAddress(frame string) string {
 	trimmed := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(frame), "*"), "##")
+
 	parts := strings.Split(trimmed, "*")
 	if len(parts) < 2 {
 		return ""
 	}
+
 	segment := strings.TrimSpace(parts[1])
+
 	index := strings.LastIndex(segment, "#")
 	if index < 0 || index+1 >= len(segment) {
 		return ""
 	}
+
 	return strings.TrimSpace(segment[index+1:])
 }
 
-func parseDiagnosticDotString(frame string, expectedCode string) (string, bool) {
+func parseDiagnosticDotString(frame, expectedCode string) (string, bool) {
 	code, values, ok := ParseDiagnosticReply(frame)
 	if !ok || code != expectedCode || len(values) == 0 {
 		return "", false
 	}
+
 	value := strings.TrimSpace(strings.Trim(strings.Join(values, "."), "."))
+
 	return value, value != ""
 }

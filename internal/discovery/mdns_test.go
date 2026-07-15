@@ -15,10 +15,12 @@ type recordingRegistrar struct {
 
 func (r *recordingRegistrar) Register(request RegistrationRequest) (Registration, error) {
 	r.called = true
+
 	r.request = request
 	if r.err != nil {
 		return nil, r.err
 	}
+
 	return registrationStub{}, nil
 }
 
@@ -27,9 +29,12 @@ type registrationStub struct{}
 func (registrationStub) Shutdown() {}
 
 func TestServiceAdvertiseUsesDeviceIDAsMDNSHost(t *testing.T) {
+	t.Parallel()
+
 	registrar := &recordingRegistrar{}
 	service := NewService(registrar)
 	interfaces := []net.Interface{{Name: "eth0"}}
+
 	registration, err := service.Advertise(Advertisement{
 		DeviceID:   "c300x-aabbccddeeff",
 		Name:       "BTicino Companion",
@@ -41,6 +46,7 @@ func TestServiceAdvertiseUsesDeviceIDAsMDNSHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advertise: %v", err)
 	}
+
 	if registration == nil {
 		t.Fatal("expected registration")
 	}
@@ -49,12 +55,15 @@ func TestServiceAdvertiseUsesDeviceIDAsMDNSHost(t *testing.T) {
 	if request.Instance != "c300x-aabbccddeeff" {
 		t.Fatalf("instance = %q", request.Instance)
 	}
+
 	if request.Hostname != "c300x-aabbccddeeff" || request.Domain != "local." {
 		t.Fatalf("SRV target inputs = host %q domain %q; want c300x-aabbccddeeff.local.", request.Hostname, request.Domain)
 	}
+
 	if request.Service != ServiceType || request.Port != 8080 {
 		t.Fatalf("unexpected service request: %+v", request)
 	}
+
 	if len(request.Interfaces) != 1 || request.Interfaces[0].Name != interfaces[0].Name {
 		t.Fatalf("interfaces = %+v, want %+v", request.Interfaces, interfaces)
 	}
@@ -73,6 +82,8 @@ func TestServiceAdvertiseUsesDeviceIDAsMDNSHost(t *testing.T) {
 }
 
 func TestServiceAdvertiseRejectsInvalidDeviceIDWithoutRegistration(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		deviceID string
@@ -87,11 +98,15 @@ func TestServiceAdvertiseRejectsInvalidDeviceIDWithoutRegistration(t *testing.T)
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			registrar := &recordingRegistrar{}
+
 			_, err := NewService(registrar).Advertise(Advertisement{DeviceID: test.deviceID, Port: 8080})
 			if !errors.Is(err, ErrInvalidDeviceID) {
 				t.Fatalf("got error %v, want ErrInvalidDeviceID", err)
 			}
+
 			if registrar.called {
 				t.Fatalf("registrar called with %+v", registrar.request)
 			}
@@ -100,11 +115,15 @@ func TestServiceAdvertiseRejectsInvalidDeviceIDWithoutRegistration(t *testing.T)
 }
 
 func TestServiceAdvertiseRejectsInvalidPort(t *testing.T) {
+	t.Parallel()
+
 	registrar := &recordingRegistrar{}
+
 	_, err := NewService(registrar).Advertise(Advertisement{DeviceID: "c300x-aabb", Port: 0})
 	if err == nil {
 		t.Fatal("expected invalid port error")
 	}
+
 	if registrar.called {
 		t.Fatalf("registrar called with %+v", registrar.request)
 	}

@@ -1,17 +1,19 @@
 package auth
 
 import (
+	"bticino-go-companion/internal/config"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"bticino-go-companion/internal/config"
 )
 
 func TestStore_ClaimLifecycle(t *testing.T) {
+	t.Parallel()
+
 	store, backend := newTestStore(t)
 	code := backend.Snapshot().Auth.ClaimCode
+
 	challenge, err := store.CreateChallenge("192.0.2.1")
 	if err != nil {
 		t.Fatalf("create challenge: %v", err)
@@ -21,21 +23,27 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
+
 	if len(token) != bearerTokenBytes*2 {
 		t.Fatalf("token length = %d, want %d", len(token), bearerTokenBytes*2)
 	}
+
 	if !store.ValidateBearer(token) {
 		t.Fatal("issued bearer token was not valid")
 	}
+
 	if _, err := store.Claim("192.0.2.1", challenge.ID, code); !errors.Is(err, ErrChallengeNotFound) {
 		t.Fatalf("replayed claim error = %v, want ErrChallengeNotFound", err)
 	}
+
 	if got := backend.Snapshot().Auth.ClaimCode; got == code {
 		t.Fatal("successful claim did not replace repair code")
 	}
 }
 
 func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		source  string
@@ -48,12 +56,17 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			store, backend := newTestStore(t)
+
 			challenge, err := store.CreateChallenge("192.0.2.1")
 			if err != nil {
 				t.Fatalf("create challenge: %v", err)
 			}
+
 			store.now = func() time.Time { return testNow.Add(tt.advance) }
+
 			_, err = store.Claim(tt.source, challenge.ID, backend.Snapshot().Auth.ClaimCode)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("claim error = %v, want %v", err, tt.wantErr)
@@ -63,6 +76,8 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 }
 
 func TestStore_ClaimRateLimit(t *testing.T) {
+	t.Parallel()
+
 	store, backend := newTestStore(t)
 	code := backend.Snapshot().Auth.ClaimCode
 
@@ -71,30 +86,38 @@ func TestStore_ClaimRateLimit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create challenge %d: %v", attempt, err)
 		}
+
 		if _, err := store.Claim("192.0.2.1", challenge.ID, "00000000"); !errors.Is(err, ErrInvalidClaimCode) {
 			t.Fatalf("attempt %d error = %v, want ErrInvalidClaimCode", attempt, err)
 		}
 	}
+
 	challenge, err := store.CreateChallenge("192.0.2.1")
 	if err != nil {
 		t.Fatalf("create limited challenge: %v", err)
 	}
+
 	if _, err := store.Claim("192.0.2.1", challenge.ID, code); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("limited claim error = %v, want ErrRateLimited", err)
 	}
 
 	store.now = func() time.Time { return testNow.Add(rateWindow) }
+
 	challenge, err = store.CreateChallenge("192.0.2.1")
 	if err != nil {
 		t.Fatalf("create reset challenge: %v", err)
 	}
+
 	if _, err := store.Claim("192.0.2.1", challenge.ID, code); err != nil {
 		t.Fatalf("claim after rate window: %v", err)
 	}
 }
 
 func TestStore_ValidateBearer(t *testing.T) {
+	t.Parallel()
+
 	store, _ := newTestStore(t)
+
 	token, err := store.RotateBearer()
 	if err != nil {
 		t.Fatalf("rotate bearer: %v", err)
@@ -112,6 +135,8 @@ func TestStore_ValidateBearer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := store.ValidateBearer(tt.token); got != tt.want {
 				t.Fatalf("ValidateBearer(%q) = %t, want %t", tt.token, got, tt.want)
 			}
@@ -120,61 +145,81 @@ func TestStore_ValidateBearer(t *testing.T) {
 }
 
 func TestStore_RotateAndRevokeBearer(t *testing.T) {
+	t.Parallel()
+
 	store, _ := newTestStore(t)
+
 	first, err := store.RotateBearer()
 	if err != nil {
 		t.Fatalf("rotate first bearer: %v", err)
 	}
+
 	second, err := store.RotateBearer()
 	if err != nil {
 		t.Fatalf("rotate second bearer: %v", err)
 	}
+
 	if store.ValidateBearer(first) {
 		t.Fatal("rotated bearer remains valid")
 	}
+
 	if !store.ValidateBearer(second) {
 		t.Fatal("new bearer is not valid")
 	}
+
 	if err := store.RevokeBearer(); err != nil {
 		t.Fatalf("revoke bearer: %v", err)
 	}
+
 	if store.ValidateBearer(second) {
 		t.Fatal("revoked bearer remains valid")
 	}
 }
 
 func TestStore_RepairCodeIssueAndReset(t *testing.T) {
+	t.Parallel()
+
 	store, backend := newTestStore(t)
+
 	token, err := store.RotateBearer()
 	if err != nil {
 		t.Fatalf("rotate bearer: %v", err)
 	}
+
 	issued, err := store.IssueRepairCode()
 	if err != nil {
 		t.Fatalf("issue repair code: %v", err)
 	}
+
 	if len(issued) != claimCodeBytes*2 {
 		t.Fatalf("issued repair code length = %d, want %d", len(issued), claimCodeBytes*2)
 	}
+
 	if !store.ValidateBearer(token) {
 		t.Fatal("issuing repair code revoked bearer")
 	}
+
 	reset, err := store.ResetRepairCode()
 	if err != nil {
 		t.Fatalf("reset repair code: %v", err)
 	}
+
 	if len(reset) != claimCodeBytes*2 {
 		t.Fatalf("reset repair code length = %d, want %d", len(reset), claimCodeBytes*2)
 	}
+
 	if store.ValidateBearer(token) {
 		t.Fatal("reset repair code did not revoke bearer")
 	}
+
 	if got := backend.Snapshot().Auth.ClaimCode; got != reset {
 		t.Fatalf("stored repair code = %q, want %q", got, reset)
 	}
 }
 
 func TestStore_RejectsInvalidSourceIP(t *testing.T) {
+	t.Parallel()
+
 	store, _ := newTestStore(t)
 	if _, err := store.CreateChallenge("not-an-ip"); !errors.Is(err, ErrInvalidSourceIP) {
 		t.Fatalf("create challenge error = %v, want ErrInvalidSourceIP", err)
@@ -183,16 +228,20 @@ func TestStore_RejectsInvalidSourceIP(t *testing.T) {
 
 func newTestStore(t *testing.T) (*Store, *config.Store) {
 	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if _, err := config.Create(path, config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"}); err != nil {
 		t.Fatalf("create config: %v", err)
 	}
+
 	backend, err := config.Open(path)
 	if err != nil {
 		t.Fatalf("open config store: %v", err)
 	}
+
 	store := NewStore(backend)
 	store.now = func() time.Time { return testNow }
+
 	return store, backend
 }
 

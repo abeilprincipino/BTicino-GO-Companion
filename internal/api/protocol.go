@@ -25,6 +25,7 @@ func ParseMessage(data []byte) (Message, error) {
 	if json.Unmarshal(data, &message) != nil {
 		return Message{}, ErrInvalidMessage
 	}
+
 	switch message.Type {
 	case "ping":
 		if message.ID == "" || message.Action != "" || len(message.Payload) != 0 {
@@ -34,9 +35,11 @@ func ParseMessage(data []byte) (Message, error) {
 		if message.ID == "" || message.Action == "" {
 			return Message{}, ErrInvalidMessage
 		}
+
 		if len(message.Payload) == 0 {
 			message.Payload = json.RawMessage("{}")
 		}
+
 		var payload map[string]any
 		if json.Unmarshal(message.Payload, &payload) != nil {
 			return Message{}, ErrInvalidMessage
@@ -44,5 +47,6 @@ func ParseMessage(data []byte) (Message, error) {
 	default:
 		return Message{}, ErrInvalidMessage
 	}
+
 	return message, nil
 }

@@ -12,17 +12,21 @@ const (
 
 func BuildOffer(host, devAddr string) string {
 	lines := sessionLines(host, "3748", "462")
+
 	devAddr = strings.TrimSpace(devAddr)
 	if devAddr != "" {
 		lines = append(lines, "a=DEVADDR:"+devAddr)
 	}
+
 	lines = append(lines, mediaLines()...)
+
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
 func BuildAnswer(host string) string {
 	lines := sessionLines(host, "3747", "461")
 	lines = append(lines, mediaLines()...)
+
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
@@ -31,6 +35,7 @@ func sessionLines(host, sessionID, sessionVersion string) []string {
 	if host == "" || host == "0.0.0.0" {
 		host = "127.0.0.1"
 	}
+
 	return []string{
 		"v=0",
 		fmt.Sprintf("o=companion %s %s IN IP4 %s", sessionID, sessionVersion, host),

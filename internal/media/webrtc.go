@@ -14,6 +14,8 @@ var (
 	ErrSessionNotFound = errors.New("media: WebRTC session not found")
 )
 
+const sessionTypeOffer = "offer"
+
 type SessionDescription struct {
 	Type string
 	SDP  string
@@ -64,7 +66,12 @@ type webRTCSession struct {
 	peer   WebRTCPeer
 }
 
-func NewWebRTCService(distributor *Distributor, factory WebRTCPeerFactory, backchannel Backchannel, candidates CandidateSink) *WebRTCService {
+func NewWebRTCService(
+	distributor *Distributor,
+	factory WebRTCPeerFactory,
+	backchannel Backchannel,
+	candidates CandidateSink,
+) *WebRTCService {
 	return &WebRTCService{
 		distributor: distributor,
 		factory:     factory,
@@ -75,12 +82,13 @@ func NewWebRTCService(distributor *Distributor, factory WebRTCPeerFactory, backc
 }
 
 func (s *WebRTCService) Offer(source Source, sessionID SessionID, offer SessionDescription) (SessionDescription, error) {
-	if sessionID == "" || offer.Type != "offer" || offer.SDP == "" || s.distributor == nil || s.factory == nil {
+	if sessionID == "" || offer.Type != sessionTypeOffer || offer.SDP == "" || s.distributor == nil || s.factory == nil {
 		return SessionDescription{}, ErrInvalidOffer
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.sessions[sessionID]; ok {
 		return SessionDescription{}, ErrSessionExists
 	}
@@ -89,31 +97,38 @@ func (s *WebRTCService) Offer(source Source, sessionID SessionID, offer SessionD
 	if err != nil {
 		return SessionDescription{}, err
 	}
+
 	writer, err := peer.AddTrack(source)
 	if err != nil {
 		_ = peer.Close()
 		return SessionDescription{}, err
 	}
+
 	if err := peer.SetRemoteDescription(offer); err != nil {
 		_ = peer.Close()
 		return SessionDescription{}, err
 	}
+
 	answer, err := peer.CreateAnswer()
 	if err != nil {
 		_ = peer.Close()
 		return SessionDescription{}, err
 	}
+
 	if err := peer.SetLocalDescription(answer); err != nil {
 		_ = peer.Close()
 		return SessionDescription{}, err
 	}
+
 	if err := s.distributor.RegisterSessionConsumer(source, sessionID, ConsumerFunc(func(packet Packet) {
 		_ = writer.WriteRTP(packet.RTP)
 	})); err != nil {
 		_ = peer.Close()
 		return SessionDescription{}, err
 	}
+
 	s.sessions[sessionID] = webRTCSession{source: source, peer: peer}
+
 	return answer, nil
 }
 
@@ -121,23 +136,29 @@ func (s *WebRTCService) AddCandidate(sessionID SessionID, candidate ICECandidate
 	s.mu.Lock()
 	session, ok := s.sessions[sessionID]
 	s.mu.Unlock()
+
 	if !ok {
 		return ErrSessionNotFound
 	}
+
 	return session.peer.AddICECandidate(candidate)
 }
 
 func (s *WebRTCService) Close(sessionID SessionID) error {
 	s.mu.Lock()
+
 	session, ok := s.sessions[sessionID]
 	if ok {
 		delete(s.sessions, sessionID)
 	}
 	s.mu.Unlock()
+
 	if !ok {
 		return ErrSessionNotFound
 	}
+
 	s.distributor.UnregisterSessionConsumer(session.source, sessionID)
+
 	return session.peer.Close()
 }
 
@@ -150,11 +171,13 @@ func (f PionPeerFactory) NewPeer(_ Source, sessionID SessionID, backchannel Back
 	if err != nil {
 		return nil, err
 	}
+
 	p := &pionPeer{peer: peer, backchannel: backchannel}
 	peer.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil || candidates == nil {
 			return
 		}
+
 		value := candidate.ToJSON()
 		candidates.SendCandidate(sessionID, ICECandidate{
 			Candidate:        value.Candidate,
@@ -164,6 +187,7 @@ func (f PionPeerFactory) NewPeer(_ Source, sessionID SessionID, backchannel Back
 		})
 	})
 	peer.OnTrack(p.onTrack)
+
 	return p, nil
 }
 
@@ -175,17 +199,21 @@ type pionPeer struct {
 func (p *pionPeer) AddTrack(source Source) (RTPWriter, error) {
 	capability := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000}
 	trackID := "video"
+
 	if source.MediaKind == MediaKindAudio || source.MediaKind == MediaKindAudioOpus {
 		capability = webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}
 		trackID = "audio"
 	}
+
 	track, err := webrtc.NewTrackLocalStaticRTP(capability, trackID, string(source.EntrypointID))
 	if err != nil {
 		return nil, err
 	}
+
 	if _, err := p.peer.AddTrack(track); err != nil {
 		return nil, err
 	}
+
 	return pionTrackWriter{track: track}, nil
 }
 
@@ -198,6 +226,7 @@ func (p *pionPeer) CreateAnswer() (SessionDescription, error) {
 	if err != nil {
 		return SessionDescription{}, err
 	}
+
 	return SessionDescription{Type: answer.Type.String(), SDP: answer.SDP}, nil
 }
 
@@ -222,11 +251,13 @@ func (p *pionPeer) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 	if p.backchannel == nil || track.Kind() != webrtc.RTPCodecTypeAudio {
 		return
 	}
+
 	for {
 		packet, _, err := track.ReadRTP()
 		if err != nil {
 			return
 		}
+
 		if p.backchannel.WriteRTP(packet) != nil {
 			return
 		}
@@ -241,5 +272,6 @@ func (w pionTrackWriter) WriteRTP(packet *rtp.Packet) error {
 	if packet == nil {
 		return ErrInvalidBackchannelPacket
 	}
+
 	return w.track.WriteRTP(packet)
 }

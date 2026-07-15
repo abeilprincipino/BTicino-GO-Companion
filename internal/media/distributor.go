@@ -1,10 +1,10 @@
 package media
 
 import (
+	"bticino-go-companion/internal/core"
 	"errors"
 	"sync"
 
-	"bticino-go-companion/internal/core"
 	"github.com/pion/rtp"
 )
 
@@ -87,7 +87,9 @@ func (d *Distributor) RegisterSource(source Source) error {
 	if d.sources == nil {
 		d.sources = map[sourceKey]Source{}
 	}
+
 	d.sources[source.key()] = source
+
 	return nil
 }
 
@@ -99,7 +101,9 @@ func (d *Distributor) UnregisterSource(source Source) bool {
 	if !ok || registered != source {
 		return false
 	}
+
 	delete(d.sources, source.key())
+
 	return true
 }
 
@@ -108,6 +112,7 @@ func (d *Distributor) ActiveSource(entrypointID core.EntrypointID, mediaKind Med
 	defer d.mu.RUnlock()
 
 	source, ok := d.sources[sourceKey{entrypointID: entrypointID, mediaKind: mediaKind}]
+
 	return source, ok
 }
 
@@ -115,6 +120,7 @@ func (d *Distributor) RegisterConsumer(id string, consumer Consumer) error {
 	if id == "" {
 		return ErrInvalidConsumerID
 	}
+
 	if consumer == nil {
 		return ErrNilConsumer
 	}
@@ -125,7 +131,9 @@ func (d *Distributor) RegisterConsumer(id string, consumer Consumer) error {
 	if d.consumers == nil {
 		d.consumers = map[string]Consumer{}
 	}
+
 	d.consumers[id] = consumer
+
 	return nil
 }
 
@@ -136,7 +144,9 @@ func (d *Distributor) UnregisterConsumer(id string) bool {
 	if _, ok := d.consumers[id]; !ok {
 		return false
 	}
+
 	delete(d.consumers, id)
+
 	return true
 }
 
@@ -144,6 +154,7 @@ func (d *Distributor) RegisterSessionConsumer(source Source, sessionID SessionID
 	if sessionID == "" {
 		return ErrInvalidConsumerID
 	}
+
 	if consumer == nil {
 		return ErrNilConsumer
 	}
@@ -154,10 +165,13 @@ func (d *Distributor) RegisterSessionConsumer(source Source, sessionID SessionID
 	if registered, ok := d.sources[source.key()]; !ok || registered != source {
 		return ErrSourceNotRegistered
 	}
+
 	if d.sessions == nil {
 		d.sessions = map[sessionKey]Consumer{}
 	}
+
 	d.sessions[sessionKey{source: source, session: sessionID}] = consumer
+
 	return nil
 }
 
@@ -169,7 +183,9 @@ func (d *Distributor) UnregisterSessionConsumer(source Source, sessionID Session
 	if _, ok := d.sessions[key]; !ok {
 		return false
 	}
+
 	delete(d.sessions, key)
+
 	return true
 }
 
@@ -179,6 +195,7 @@ func (d *Distributor) Distribute(source Source, packet *rtp.Packet) bool {
 	}
 
 	d.mu.RLock()
+
 	registered, ok := d.sources[source.key()]
 	if !ok || registered != source || packet.SSRC != source.SSRC {
 		d.mu.RUnlock()
@@ -189,11 +206,13 @@ func (d *Distributor) Distribute(source Source, packet *rtp.Packet) bool {
 	for _, consumer := range d.consumers {
 		consumers = append(consumers, consumer)
 	}
+
 	for key, consumer := range d.sessions {
 		if key.source == source {
 			consumers = append(consumers, consumer)
 		}
 	}
+
 	d.mu.RUnlock()
 
 	for _, consumer := range consumers {
@@ -202,6 +221,7 @@ func (d *Distributor) Distribute(source Source, packet *rtp.Packet) bool {
 			RTP:    packet.Clone(),
 		})
 	}
+
 	return true
 }
 

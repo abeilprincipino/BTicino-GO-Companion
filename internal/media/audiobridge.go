@@ -47,7 +47,13 @@ type AudioBridge struct {
 	done        chan struct{}
 }
 
-func NewAudioBridge(media AudioMedia, gstreamer GStreamerAudio, intercom Source, opus Source, backchannel Backchannel, sessionID SessionID) *AudioBridge {
+func NewAudioBridge(
+	media AudioMedia,
+	gstreamer GStreamerAudio,
+	intercom, opus Source,
+	backchannel Backchannel,
+	sessionID SessionID,
+) *AudioBridge {
 	return &AudioBridge{
 		media:       media,
 		gstreamer:   gstreamer,
@@ -65,32 +71,42 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if b.pipeline != nil {
 		return ErrAudioBridgeStarted
 	}
+
 	pipeline, err := b.gstreamer.StartAudioBridge(ctx)
 	if err != nil {
 		return err
 	}
+
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
 	}
+
 	if err := b.media.RegisterSource(b.opus); err != nil {
 		_ = pipeline.Close()
 		return err
 	}
+
 	if err := b.media.RegisterSessionConsumer(b.intercom, b.sessionID, ConsumerFunc(func(packet Packet) {
 		_ = pipeline.WriteIntercomSpeex(packet.RTP)
 	})); err != nil {
 		b.media.UnregisterSource(b.opus)
+
 		_ = pipeline.Close()
+
 		return err
 	}
+
 	runCtx, cancel := context.WithCancel(context.Background())
 	b.pipeline = pipeline
 	b.cancel = cancel
+
 	b.done = make(chan struct{})
 	go b.forward(runCtx, pipeline, b.done)
+
 	return nil
 }
 
@@ -102,9 +118,11 @@ func (b *AudioBridge) WriteBackchannelOpus(packet *rtp.Packet) error {
 	b.mu.Lock()
 	pipeline := b.pipeline
 	b.mu.Unlock()
+
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
 	}
+
 	return pipeline.WriteBackchannelOpus(packet)
 }
 
@@ -112,12 +130,15 @@ func (b *AudioBridge) Stop() error {
 	if b == nil {
 		return nil
 	}
+
 	b.mu.Lock()
+
 	pipeline := b.pipeline
 	if pipeline == nil {
 		b.mu.Unlock()
 		return nil
 	}
+
 	b.pipeline = nil
 	cancel := b.cancel
 	done := b.done
@@ -128,14 +149,19 @@ func (b *AudioBridge) Stop() error {
 	b.media.UnregisterSessionConsumer(b.intercom, b.sessionID)
 	b.media.UnregisterSource(b.opus)
 	cancel()
+
 	err := pipeline.Close()
+
 	<-done
+
 	return err
 }
 
 func (b *AudioBridge) forward(ctx context.Context, pipeline AudioPipeline, done chan struct{}) {
 	defer close(done)
+
 	opusOut := pipeline.ReadOpusOut()
+
 	speexOut := pipeline.ReadSpeexOut()
 	for opusOut != nil || speexOut != nil {
 		select {
@@ -146,6 +172,7 @@ func (b *AudioBridge) forward(ctx context.Context, pipeline AudioPipeline, done 
 				opusOut = nil
 				continue
 			}
+
 			if packet != nil {
 				b.media.Distribute(b.opus, packet)
 			}
@@ -154,6 +181,7 @@ func (b *AudioBridge) forward(ctx context.Context, pipeline AudioPipeline, done 
 				speexOut = nil
 				continue
 			}
+
 			if packet != nil && b.backchannel != nil {
 				_ = b.backchannel.WriteRTP(packet)
 			}

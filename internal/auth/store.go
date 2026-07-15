@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"crypto/rand"
+	"bticino-go-companion/internal/config"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
@@ -9,8 +9,6 @@ import (
 	"net/netip"
 	"sync"
 	"time"
-
-	"bticino-go-companion/internal/config"
 )
 
 const (
@@ -71,22 +69,26 @@ func (s *Store) CreateChallenge(sourceIP string) (Challenge, error) {
 	if err != nil {
 		return Challenge{}, err
 	}
+
 	if s.config == nil {
 		return Challenge{}, ErrStoreUnavailable
 	}
 
-	id, err := randomHex(challengeBytes)
+	id, err := config.RandomHex(challengeBytes)
 	if err != nil {
 		return Challenge{}, fmt.Errorf("generate challenge: %w", err)
 	}
+
 	now := s.now()
 	expiresAt := now.Add(challengeLifetime)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.removeExpiredChallenges(now)
 	s.removeExpiredAttempts(now)
 	s.challenges[id] = challenge{sourceIP: sourceIP, expiresAt: expiresAt}
+
 	return Challenge{ID: id, ExpiresAt: expiresAt}, nil
 }
 
@@ -95,6 +97,7 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
@@ -102,7 +105,9 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.removeExpiredAttempts(now)
+
 	if !s.allowAttempt(sourceIP, now) {
 		return "", ErrRateLimited
 	}
@@ -111,33 +116,41 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 	if !ok {
 		return "", ErrChallengeNotFound
 	}
+
 	if !challenge.expiresAt.After(now) {
 		delete(s.challenges, challengeID)
 		return "", ErrChallengeExpired
 	}
+
 	if challenge.sourceIP != sourceIP {
 		return "", ErrChallengeSourceMismatch
 	}
 
-	token, err := randomHex(bearerTokenBytes)
+	token, err := config.RandomHex(bearerTokenBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
-	nextRepairCode, err := randomHex(claimCodeBytes)
+
+	nextRepairCode, err := config.RandomHex(claimCodeBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate repair code: %w", err)
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		if !constantTimeHexEqual(repairCode, cfg.Auth.ClaimCode, claimCodeBytes) {
 			return ErrInvalidClaimCode
 		}
+
 		cfg.Auth.BearerToken = token
 		cfg.Auth.ClaimCode = nextRepairCode
+
 		return nil
 	}); err != nil {
 		return "", err
 	}
+
 	delete(s.challenges, challengeID)
+
 	return token, nil
 }
 
@@ -145,6 +158,7 @@ func (s *Store) ValidateBearer(token string) bool {
 	if s.config == nil {
 		return false
 	}
+
 	return constantTimeHexEqual(token, s.config.Snapshot().Auth.BearerToken, bearerTokenBytes)
 }
 
@@ -152,16 +166,19 @@ func (s *Store) RotateBearer() (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-	token, err := randomHex(bearerTokenBytes)
+
+	token, err := config.RandomHex(bearerTokenBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		cfg.Auth.BearerToken = token
 		return nil
 	}); err != nil {
 		return "", err
 	}
+
 	return token, nil
 }
 
@@ -169,6 +186,7 @@ func (s *Store) RevokeBearer() error {
 	if s.config == nil {
 		return ErrStoreUnavailable
 	}
+
 	return s.config.Update(func(cfg *config.Config) error {
 		cfg.Auth.BearerToken = ""
 		return nil
@@ -187,19 +205,23 @@ func (s *Store) replaceRepairCode(revokeBearer bool) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-	repairCode, err := randomHex(claimCodeBytes)
+
+	repairCode, err := config.RandomHex(claimCodeBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate repair code: %w", err)
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		cfg.Auth.ClaimCode = repairCode
 		if revokeBearer {
 			cfg.Auth.BearerToken = ""
 		}
+
 		return nil
 	}); err != nil {
 		return "", err
 	}
+
 	return repairCode, nil
 }
 
@@ -208,12 +230,15 @@ func (s *Store) allowAttempt(sourceIP string, now time.Time) bool {
 	if now.Sub(attempt.windowStart) >= rateWindow {
 		attempt = attempts{windowStart: now}
 	}
+
 	if attempt.count >= maxAttempts {
 		s.attempts[sourceIP] = attempt
 		return false
 	}
+
 	attempt.count++
 	s.attempts[sourceIP] = attempt
+
 	return true
 }
 
@@ -238,12 +263,14 @@ func canonicalIP(sourceIP string) (string, error) {
 	if err != nil {
 		return "", ErrInvalidSourceIP
 	}
+
 	return ip.Unmap().String(), nil
 }
 
 func constantTimeHexEqual(left, right string, size int) bool {
 	leftBytes, leftValid := decodeHex(left, size)
 	rightBytes, rightValid := decodeHex(right, size)
+
 	return subtle.ConstantTimeCompare(leftBytes, rightBytes) == 1 && leftValid && rightValid
 }
 
@@ -252,14 +279,8 @@ func decodeHex(value string, size int) ([]byte, bool) {
 	if len(value) != size*2 {
 		return decoded, false
 	}
-	_, err := hex.Decode(decoded, []byte(value))
-	return decoded, err == nil
-}
 
-func randomHex(size int) (string, error) {
-	bytes := make([]byte, size)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(bytes), nil
+	_, err := hex.Decode(decoded, []byte(value))
+
+	return decoded, err == nil
 }

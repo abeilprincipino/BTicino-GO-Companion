@@ -52,6 +52,7 @@ func NewService(registrar Registrar) *Service {
 	if registrar == nil {
 		registrar = zeroconfRegistrar{}
 	}
+
 	return &Service{registrar: registrar}
 }
 
@@ -60,6 +61,7 @@ func (s *Service) Advertise(advertisement Advertisement) (Registration, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return s.registrar.Register(request)
 }
 
@@ -67,6 +69,7 @@ func registrationRequest(advertisement Advertisement) (RegistrationRequest, erro
 	if err := validateHostname(advertisement.DeviceID); err != nil {
 		return RegistrationRequest{}, err
 	}
+
 	if advertisement.Port < 1 || advertisement.Port > 65535 {
 		return RegistrationRequest{}, fmt.Errorf("invalid mDNS port %d", advertisement.Port)
 	}
@@ -97,16 +100,20 @@ func validateHostname(hostname string) error {
 	if len(hostname) == 0 || len(hostname) > 63 {
 		return fmt.Errorf("%w: %q", ErrInvalidDeviceID, hostname)
 	}
+
 	for index, character := range hostname {
 		isLetter := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
+
 		isDigit := character >= '0' && character <= '9'
 		if !isLetter && !isDigit && character != '-' {
 			return fmt.Errorf("%w: %q", ErrInvalidDeviceID, hostname)
 		}
+
 		if character == '-' && (index == 0 || index == len(hostname)-1) {
 			return fmt.Errorf("%w: %q", ErrInvalidDeviceID, hostname)
 		}
 	}
+
 	return nil
 }
 
@@ -126,5 +133,6 @@ func (zeroconfRegistrar) Register(request RegistrationRequest) (Registration, er
 	if err != nil {
 		return nil, err
 	}
+
 	return server, nil
 }
