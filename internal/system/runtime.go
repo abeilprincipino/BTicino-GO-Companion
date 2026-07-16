@@ -71,6 +71,10 @@ func (r *RuntimeControl) Reboot(ctx context.Context) error {
 	return r.rebooter.Reboot(ctx)
 }
 
+func (r *RuntimeControl) RebootAvailable() bool {
+	return r != nil && r.rebooter != nil
+}
+
 func (r *RuntimeControl) isAllowed(service string) bool {
 	_, ok := r.allowed[service]
 	return ok

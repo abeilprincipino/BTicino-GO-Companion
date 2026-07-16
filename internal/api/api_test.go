@@ -4,6 +4,8 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/system"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +16,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -239,6 +242,102 @@ func TestServer_UnlockEntrypoint(t *testing.T) {
 	}
 }
 
+func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	var logs bytes.Buffer
+	server.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	runtime := &runtimeRecorder{rebootErr: errors.New("shutdown failed"), rebooted: make(chan struct{})}
+	server.SetRuntime(runtime)
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/reboot", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reboot response = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-runtime.rebooted:
+	case <-time.After(time.Second):
+		t.Fatal("reboot was not called")
+	}
+	if strings.Count(logs.String(), "reboot system") != 1 {
+		t.Fatalf("reboot logs = %q", logs.String())
+	}
+}
+
+func TestServer_StateRebootRequiresAvailableRuntime(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	server.SetRuntime(&runtimeRecorder{})
+	if server.currentPayload().SystemControl.RebootEnabled {
+		t.Fatal("reboot should not be enabled without an available adapter")
+	}
+}
+
+func TestServer_SystemRebootRespectsConfig(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	server.SetRuntime(&runtimeRecorder{available: true})
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.System.RebootEnabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/reboot", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("reboot response = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestServer_DiagnosticSourceRequiresBearerAndDirectlyControlsSession(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	source := &diagnosticSourceRecorder{}
+	server.SetDiagnosticSource(source)
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unauthorized := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/diagnostics/source/start", nil)
+	unauthorizedResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized || source.starts != 0 {
+		t.Fatalf("unauthorized response = %d, starts = %d", unauthorizedResponse.Code, source.starts)
+	}
+
+	for _, path := range []string{"/api/v3/diagnostics/source/start", "/api/v3/diagnostics/source/stop"} {
+		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s response = %d", path, response.Code)
+		}
+	}
+	if source.starts != 1 || source.stops != 1 || !source.startDetached {
+		t.Fatalf("source calls = start %d, stop %d, start detached = %t", source.starts, source.stops, source.startDetached)
+	}
+}
+
 func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
 	t.Parallel()
 
@@ -289,6 +388,43 @@ type unlockRecorder struct {
 
 func (r *unlockRecorder) Unlock(_ context.Context, id core.EntrypointID) error {
 	r.entrypoint = id
+	return nil
+}
+
+type diagnosticSourceRecorder struct {
+	starts        int
+	stops         int
+	startDetached bool
+}
+
+type runtimeRecorder struct {
+	available bool
+	rebootErr error
+	rebooted  chan struct{}
+	once      sync.Once
+}
+
+func (r *runtimeRecorder) Reboot(context.Context) error {
+	if r.rebooted != nil {
+		r.once.Do(func() { close(r.rebooted) })
+	}
+	return r.rebootErr
+}
+
+func (r *runtimeRecorder) RebootAvailable() bool               { return r.available || r.rebooted != nil }
+func (*runtimeRecorder) Restart(context.Context, string) error { return nil }
+func (*runtimeRecorder) Status(context.Context, string) (system.ServiceStatus, error) {
+	return system.ServiceStatus{}, nil
+}
+
+func (r *diagnosticSourceRecorder) Start(ctx context.Context) error {
+	r.starts++
+	r.startDetached = ctx.Done() == nil
+	return nil
+}
+
+func (r *diagnosticSourceRecorder) Close(context.Context) error {
+	r.stops++
 	return nil
 }
 

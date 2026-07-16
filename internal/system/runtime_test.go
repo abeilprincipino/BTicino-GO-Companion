@@ -53,6 +53,9 @@ func TestRuntimeControl_RebootIsInjected(t *testing.T) {
 	if !rebooter.called {
 		t.Fatal("rebooter was not called")
 	}
+	if !control.RebootAvailable() {
+		t.Fatal("RebootAvailable() = false")
+	}
 }
 
 func TestRuntimeControl_UnavailableDependencies(t *testing.T) {
@@ -69,6 +72,9 @@ func TestRuntimeControl_UnavailableDependencies(t *testing.T) {
 
 	if err := control.Reboot(context.Background()); !errors.Is(err, ErrRuntimeUnavailable) {
 		t.Fatalf("Reboot() error = %v", err)
+	}
+	if control.RebootAvailable() {
+		t.Fatal("RebootAvailable() = true")
 	}
 }
 

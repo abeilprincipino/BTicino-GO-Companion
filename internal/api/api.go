@@ -21,7 +21,11 @@ import (
 const maxJSONBody = 64 << 10
 
 type (
-	StateProvider interface{ Snapshot() core.State }
+	StateProvider           interface{ Snapshot() core.State }
+	DiagnosticSourceControl interface {
+		Start(context.Context) error
+		Close(context.Context) error
+	}
 )
 
 type Server struct {
@@ -40,7 +44,8 @@ type Server struct {
 		Snapshot() diagnostics.Snapshot
 		Refresh(context.Context)
 	}
-	logger *slog.Logger
+	diagnosticSource DiagnosticSourceControl
+	logger           *slog.Logger
 }
 
 func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, logger *slog.Logger) *Server {
@@ -65,6 +70,8 @@ func (s *Server) SetDiagnostics(v interface {
 	s.diagnostics = v
 }
 
+func (s *Server) SetDiagnosticSource(v DiagnosticSourceControl) { s.diagnosticSource = v }
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.handle(mux, "GET", "/api/v3/health", s.health)
@@ -78,10 +85,13 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "GET", "/api/v3/state", s.stateSnapshot)
 	s.handleProtected(mux, "GET", "/api/v3/diagnostics", s.diagnosticsSnapshot)
 	mux.HandleFunc("POST /api/v3/diagnostics", s.requireBearer(s.diagnosticsRefresh))
+	s.handleProtected(mux, "POST", "/api/v3/diagnostics/source/start", s.diagnosticSourceStart)
+	s.handleProtected(mux, "POST", "/api/v3/diagnostics/source/stop", s.diagnosticSourceStop)
 	s.handleProtected(mux, "GET", "/api/v3/system/update/status", s.systemUpdateStatus)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/check", s.systemUpdateCheck)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/stage", s.systemUpdateStage)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/install", s.systemUpdateInstall)
+	s.handleProtected(mux, "POST", "/api/v3/system/reboot", s.systemReboot)
 
 	s.handleProtected(mux, "POST", "/api/v3/entrypoints/{id}/unlock", s.unlockEntrypoint)
 	s.handleProtected(mux, "POST", "/api/v3/audio/mute", s.muteAudio)
@@ -202,6 +212,32 @@ func (s *Server) diagnosticsRefresh(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusAccepted, map[string]any{"diagnostics": s.currentDiagnostics()})
 }
 
+func (s *Server) diagnosticSourceStart(w http.ResponseWriter, r *http.Request) {
+	if s.diagnosticSource == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "diagnostic source is unavailable")
+		return
+	}
+	if err := s.diagnosticSource.Start(context.WithoutCancel(r.Context())); err != nil {
+		s.logger.ErrorContext(r.Context(), "diagnostic media source start failed", "error", err)
+		writeCommandError(w, err)
+		return
+	}
+	writeOK(w, http.StatusOK, nil)
+}
+
+func (s *Server) diagnosticSourceStop(w http.ResponseWriter, r *http.Request) {
+	if s.diagnosticSource == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "diagnostic source is unavailable")
+		return
+	}
+	if err := s.diagnosticSource.Close(r.Context()); err != nil {
+		s.logger.ErrorContext(r.Context(), "diagnostic media source stop failed", "error", err)
+		writeCommandError(w, err)
+		return
+	}
+	writeOK(w, http.StatusOK, nil)
+}
+
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 }
@@ -247,7 +283,7 @@ func (s *Server) currentPayload() StateDTO {
 		for _, entrypoint := range cfg.Companion.Entrypoints {
 			dto.Entrypoints = append(dto.Entrypoints, entrypointDTO(entrypoint, s.entrypoints != nil))
 		}
-		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil
+		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil && s.runtime.RebootAvailable()
 		dto.SystemControl.Services = make(map[string]SystemServiceDTO, len(cfg.System.Services))
 		for name, service := range cfg.System.Services {
 			dto.SystemControl.Services[name] = SystemServiceDTO{Enabled: service.Enabled, Exposed: service.Exposed && s.runtime != nil}

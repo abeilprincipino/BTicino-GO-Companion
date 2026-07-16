@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/system"
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -195,17 +196,21 @@ func (s *Server) webrtcClose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) systemReboot(w http.ResponseWriter, r *http.Request) {
-	if s.runtime == nil {
+	if s.runtime == nil || !s.runtime.RebootAvailable() {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "runtime control is unavailable")
 		return
 	}
-
-	if err := s.runtime.Reboot(r.Context()); err != nil {
-		writeCommandError(w, err)
+	if s.config == nil || !s.config.Snapshot().System.RebootEnabled {
+		writeError(w, http.StatusConflict, "reboot_disabled", "reboot control is disabled")
 		return
 	}
 
 	writeOK(w, http.StatusOK, nil)
+	go func() {
+		if err := s.runtime.Reboot(context.WithoutCancel(r.Context())); err != nil {
+			s.logger.Error("reboot system", "error", err)
+		}
+	}()
 }
 
 func (s *Server) systemServiceRestart(w http.ResponseWriter, r *http.Request) {

@@ -34,15 +34,18 @@ func TestOpenConfigCreatesThenReusesConfig(t *testing.T) {
 		t.Fatalf("device id = %q", store.Snapshot().Companion.DeviceID)
 	}
 
-	_, created, err = openConfig(path, detect)
+	store, created, err = openConfig(path, detect)
 	if err != nil {
 		t.Fatalf("reuse config: %v", err)
 	}
 	if created {
 		t.Fatal("created = true, want false")
 	}
-	if detectCalls != 1 {
-		t.Fatalf("metadata detection calls = %d, want 1", detectCalls)
+	if detectCalls != 2 {
+		t.Fatalf("metadata detection calls = %d, want 2", detectCalls)
+	}
+	if store.Snapshot().Companion.DeviceID != "c300x-001122334455" {
+		t.Fatalf("reopened device id = %q", store.Snapshot().Companion.DeviceID)
 	}
 }
 
@@ -54,6 +57,23 @@ func TestOpenConfigReturnsMetadataFailure(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("open config succeeded")
+	}
+}
+
+func TestNewDiagnosticSourceRejectsUnsupportedModel(t *testing.T) {
+	t.Parallel()
+
+	source, closeSource, err := newDiagnosticSource(config.Config{Companion: config.Companion{
+		Model: "C200X",
+		Entrypoints: []config.Entrypoint{{
+			ID: "main",
+			Capabilities: config.Capabilities{
+				Stream: true,
+			},
+		}},
+	}}, slog.New(slog.DiscardHandler))
+	if err == nil || source != nil || closeSource != nil {
+		t.Fatalf("newDiagnosticSource() = source %v, close %v, error %v", source, closeSource != nil, err)
 	}
 }
 

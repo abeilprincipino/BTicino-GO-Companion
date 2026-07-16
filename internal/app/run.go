@@ -9,6 +9,7 @@ import (
 	"bticino-go-companion/internal/discovery"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
+	"bticino-go-companion/internal/signaling"
 	"bticino-go-companion/internal/system"
 	"bticino-go-companion/internal/webui"
 	"context"
@@ -60,6 +61,13 @@ func run(
 	projector := core.NewProjector()
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
+	diagnosticSource, closeDiagnosticSource, err := newDiagnosticSource(configStore.Snapshot(), logger)
+	if err != nil {
+		return err
+	}
+	if closeDiagnosticSource != nil {
+		defer closeDiagnosticSource()
+	}
 
 	allowedServices := []string{}
 
@@ -69,7 +77,7 @@ func run(
 		}
 	}
 
-	rt := system.NewRuntimeControl(nil, nil, allowedServices)
+	rt := system.NewRuntimeControl(nil, system.NewRebootAdapter(nil), allowedServices)
 
 	build := system.CurrentBuildInfo()
 	updatePolicy := func() system.UpdatePolicy {
@@ -101,6 +109,7 @@ func run(
 	server.SetUpdate(updater)
 	diagnosticService := diagnostics.New(openWebNetControl, configStore.Snapshot().Companion.Model, server.BroadcastState)
 	server.SetDiagnostics(diagnosticService)
+	server.SetDiagnosticSource(diagnosticSource)
 
 	apiListener, err := net.Listen("tcp", apiAddr)
 	if err != nil {
@@ -176,6 +185,63 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
+func newDiagnosticSource(cfg config.Config, logger *slog.Logger) (*media.SourceSession, func(), error) {
+	var entrypoint config.Entrypoint
+	for _, candidate := range cfg.Companion.Entrypoints {
+		if candidate.Capabilities.Stream {
+			entrypoint = candidate
+			break
+		}
+	}
+	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve diagnostic media source: %w", err)
+	}
+	if entrypoint.ID == "" {
+		return nil, nil, nil
+	}
+	logger.Info("diagnostic media source configuration resolved",
+		"component", "media.source",
+		"model", sourceConfig.Model,
+		"entrypoint_id", entrypoint.ID,
+		"dev_addr", sourceConfig.DevAddr,
+		"high_res_video", sourceConfig.HighResVideo,
+		"target", sourceConfig.Target,
+	)
+
+	var source *media.SourceSession
+	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{
+		Target: sourceConfig.Target,
+		Domain: signaling.DiscoverFlexisipDomain(),
+		Logger: logger,
+		RemoteDialogEnded: func() {
+			source.RemoteDialogEnded()
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("create diagnostic sip dialer: %w", err)
+	}
+	source = media.NewSourceSession(
+		logger,
+		sourceConfig,
+		core.EntrypointID(entrypoint.ID),
+		signaling.NewManager("127.0.0.1", dialer, nil),
+		openwebnet.NewAVClient(logger),
+		media.NewVideoRTPReceiver(logger, nil),
+		media.NewAudioRTPReceiver(logger, nil),
+	)
+	return source, func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := source.Close(closeCtx); err != nil {
+			logger.Warn("close diagnostic source", "error", err)
+		}
+		if err := dialer.Close(); err != nil {
+			logger.Warn("close diagnostic sip dialer", "error", err)
+		}
+	}, nil
+}
+
 func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func(), logger *slog.Logger) {
 	delay := 20 * time.Second
 	backoff := 2 * time.Minute
@@ -211,8 +277,16 @@ func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*c
 		path = config.DefaultPath
 	}
 
+	metadata, err := detectMetadata()
+	if err != nil {
+		return nil, false, fmt.Errorf("detect device metadata: %w", err)
+	}
+
 	store, err := config.Open(path)
 	if err == nil {
+		if err := store.ApplyMetadata(metadata); err != nil {
+			return nil, false, fmt.Errorf("apply device metadata: %w", err)
+		}
 		return store, false, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -226,6 +300,9 @@ func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*c
 	store, err = config.Open(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("open created config: %w", err)
+	}
+	if err := store.ApplyMetadata(metadata); err != nil {
+		return nil, false, fmt.Errorf("apply device metadata: %w", err)
 	}
 
 	return store, true, nil
@@ -268,20 +345,9 @@ func shutdown(servers ...*http.Server) error {
 	var errs []error
 	for _, server := range servers {
 		if err := server.Shutdown(ctx); err != nil {
-	metadata, err := detectMetadata()
-	if err != nil {
-		return nil, false, fmt.Errorf("detect device metadata: %w", err)
-	}
-
 			errs = append(errs, err)
-		}
-		if err := store.ApplyMetadata(metadata); err != nil {
-			return nil, false, fmt.Errorf("apply device metadata: %w", err)
 		}
 	}
 
 	return errors.Join(errs...)
 }
-	if err := store.ApplyMetadata(metadata); err != nil {
-		return nil, false, fmt.Errorf("apply device metadata: %w", err)
-	}
