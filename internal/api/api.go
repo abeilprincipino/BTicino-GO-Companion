@@ -21,17 +21,16 @@ import (
 const maxJSONBody = 64 << 10
 
 type (
-	StateProvider  interface{ Snapshot() core.State }
-	CommandHandler interface {
-		HandleCommand(*http.Request, Command) (any, error)
-	}
+	StateProvider interface{ Snapshot() core.State }
 )
 
 type Server struct {
 	auth        *auth.Store
 	config      *config.Store
 	state       StateProvider
-	commands    CommandHandler
+	entrypoints EntrypointControl
+	audio       AudioControl
+	voicemail   VoicemailControl
 	clients     clientSet
 	webrtc      WebRTCControl
 	snapshot    SnapshotControl
@@ -44,18 +43,21 @@ type Server struct {
 	logger *slog.Logger
 }
 
-func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, commands CommandHandler, logger *slog.Logger) *Server {
+func NewServer(authStore *auth.Store, configStore *config.Store, state StateProvider, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	return &Server{auth: authStore, config: configStore, state: state, commands: commands, logger: logger}
+	return &Server{auth: authStore, config: configStore, state: state, logger: logger}
 }
 
-func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
-func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
-func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
-func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
+func (s *Server) SetEntrypoints(v EntrypointControl) { s.entrypoints = v }
+func (s *Server) SetAudio(v AudioControl)            { s.audio = v }
+func (s *Server) SetVoicemail(v VoicemailControl)    { s.voicemail = v }
+func (s *Server) SetWebRTC(v WebRTCControl)          { s.webrtc = v }
+func (s *Server) SetSnapshot(v SnapshotControl)      { s.snapshot = v }
+func (s *Server) SetRuntime(v RuntimeControl)        { s.runtime = v }
+func (s *Server) SetUpdate(v UpdateControl)          { s.update = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
@@ -76,18 +78,16 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "GET", "/api/v3/state", s.stateSnapshot)
 	s.handleProtected(mux, "GET", "/api/v3/diagnostics", s.diagnosticsSnapshot)
 	mux.HandleFunc("POST /api/v3/diagnostics", s.requireBearer(s.diagnosticsRefresh))
-	s.handleProtected(mux, "GET", "/api/v3/entrypoints", s.handleEntrypoints)
-	s.handleProtected(mux, "GET", "/api/v3/capabilities", s.handleCapabilities)
 	s.handleProtected(mux, "GET", "/api/v3/system/update/status", s.systemUpdateStatus)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/check", s.systemUpdateCheck)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/stage", s.systemUpdateStage)
+	s.handleProtected(mux, "POST", "/api/v3/system/update/install", s.systemUpdateInstall)
 
-	// Call control is not exposed until it controls the physical intercom.
-	s.handleProtected(mux, "POST", "/api/v3/control/entrypoints/{id}/unlock", s.entrypointCommand("unlock"))
-	s.handleProtected(mux, "POST", "/api/v3/control/audio/mute", s.command("audio.mute"))
-	s.handleProtected(mux, "POST", "/api/v3/control/audio/unmute", s.command("audio.unmute"))
-	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/enable", s.command("voicemail.enable"))
-	s.handleProtected(mux, "POST", "/api/v3/control/voicemail/disable", s.command("voicemail.disable"))
+	s.handleProtected(mux, "POST", "/api/v3/entrypoints/{id}/unlock", s.unlockEntrypoint)
+	s.handleProtected(mux, "POST", "/api/v3/audio/mute", s.muteAudio)
+	s.handleProtected(mux, "POST", "/api/v3/audio/unmute", s.unmuteAudio)
+	s.handleProtected(mux, "POST", "/api/v3/voicemail/enable", s.enableVoicemail)
+	s.handleProtected(mux, "POST", "/api/v3/voicemail/disable", s.disableVoicemail)
 	s.handleProtected(mux, "GET", "/api/v3/ws", s.websocket)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
@@ -202,29 +202,6 @@ func (s *Server) diagnosticsRefresh(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusAccepted, map[string]any{"diagnostics": s.currentDiagnostics()})
 }
 
-func (s *Server) handleEntrypoints(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "configuration is unavailable")
-		return
-	}
-
-	writeOK(w, http.StatusOK, map[string]any{"entrypoints": s.config.Snapshot().Companion.Entrypoints})
-}
-
-func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	if s.config == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "configuration is unavailable")
-		return
-	}
-
-	caps := make([]config.Capabilities, 0, len(s.config.Snapshot().Companion.Entrypoints))
-	for _, ep := range s.config.Snapshot().Companion.Entrypoints {
-		caps = append(caps, ep.Capabilities)
-	}
-
-	writeOK(w, http.StatusOK, map[string]any{"capabilities": caps})
-}
-
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 }
@@ -260,35 +237,30 @@ func (s *Server) currentDiagnostics() diagnostics.Snapshot {
 	return s.diagnostics.Snapshot()
 }
 
-func (s *Server) currentPayload() map[string]any {
-	state := s.currentState()
-	payload := map[string]any{}
-	data, _ := json.Marshal(state)
-	_ = json.Unmarshal(data, &payload)
+func (s *Server) currentPayload() StateDTO {
 	diagnostic := s.currentDiagnostics()
-	payload["diagnostics"] = diagnostic
-	model := ""
+	dto := StateDTO{State: s.currentState(), Diagnostics: diagnostic}
 	if s.config != nil {
-		model = s.config.Snapshot().Companion.Model
-	}
-	payload["device"] = map[string]any{
-		"model":    model,
-		"firmware": diagnostic.OpenWebNet.Firmware,
-		"hardware": diagnostic.OpenWebNet.Hardware,
-	}
-	systemControl := map[string]any{}
-	if s.config != nil {
-		cfg := s.config.Snapshot().System
-		systemControl["reboot_enabled"] = cfg.RebootEnabled
-		systemControl["services"] = cfg.Services
-	}
-	if s.update != nil {
-		if update, err := s.update.Status(context.Background()); err == nil {
-			systemControl["update"] = update
+		cfg := s.config.Snapshot()
+		dto.Device.Model = cfg.Companion.Model
+		dto.Entrypoints = make([]EntrypointDTO, 0, len(cfg.Companion.Entrypoints))
+		for _, entrypoint := range cfg.Companion.Entrypoints {
+			dto.Entrypoints = append(dto.Entrypoints, entrypointDTO(entrypoint, s.entrypoints != nil))
+		}
+		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil
+		dto.SystemControl.Services = make(map[string]SystemServiceDTO, len(cfg.System.Services))
+		for name, service := range cfg.System.Services {
+			dto.SystemControl.Services[name] = SystemServiceDTO{Enabled: service.Enabled, Exposed: service.Exposed && s.runtime != nil}
 		}
 	}
-	payload["system_control"] = systemControl
-	return payload
+	dto.Device.Firmware = diagnostic.OpenWebNet.Firmware
+	dto.Device.Hardware = diagnostic.OpenWebNet.Hardware
+	if s.update != nil {
+		if update, err := s.update.Status(context.Background()); err == nil {
+			dto.SystemControl.Update = &update
+		}
+	}
+	return dto
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {

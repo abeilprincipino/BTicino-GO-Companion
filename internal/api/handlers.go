@@ -1,60 +1,114 @@
 package api
 
 import (
+	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/system"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 )
 
-func (s *Server) command(action string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.commands == nil {
-			writeError(w, http.StatusServiceUnavailable, "unavailable", "command handler is unavailable")
-			return
-		}
+var (
+	ErrEntrypointNotFound = errors.New("entrypoint not found")
+	ErrCapabilityDisabled = errors.New("entrypoint capability is disabled")
+)
 
-		payload, err := readBody(r)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "failed to read request body")
-			return
-		}
-
-		result, err := s.commands.HandleCommand(r, Command{Action: action, Payload: payload})
-		if err != nil {
-			writeCommandError(w, err)
-			return
-		}
-
-		writeOK(w, http.StatusOK, map[string]any{"result": result})
-	}
-}
-
-func (s *Server) entrypointCommand(verb string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.command("entrypoints."+r.PathValue("id")+"."+verb)(w, r)
-	}
-}
-
-func readBody(r *http.Request) (json.RawMessage, error) {
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody+1))
+func (s *Server) unlockEntrypoint(w http.ResponseWriter, r *http.Request) {
+	entrypoint, err := s.entrypoint(r.PathValue("id"))
 	if err != nil {
-		return nil, err
+		writeEntrypointError(w, err)
+		return
 	}
-
-	if len(data) > maxJSONBody {
-		return nil, errors.New("request body is too large")
+	if !entrypoint.Capabilities.Unlock {
+		writeEntrypointError(w, ErrCapabilityDisabled)
+		return
 	}
-
-	if len(data) == 0 {
-		return json.RawMessage("{}"), nil
+	if s.entrypoints == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "unlock control is unavailable")
+		return
 	}
+	if err := s.entrypoints.Unlock(r.Context(), core.EntrypointID(entrypoint.ID)); err != nil {
+		s.logger.ErrorContext(r.Context(), "entrypoint unlock failed", "entrypoint_id", entrypoint.ID, "error", err)
+		writeCommandError(w, err)
+		return
+	}
+	s.logger.InfoContext(r.Context(), "entrypoint unlocked", "entrypoint_id", entrypoint.ID)
+	s.BroadcastState()
+	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
 
-	return json.RawMessage(data), nil
+func (s *Server) muteAudio(w http.ResponseWriter, r *http.Request) {
+	if s.audio == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "audio control is unavailable")
+		return
+	}
+	if err := s.audio.Mute(r.Context()); err != nil {
+		writeCommandError(w, err)
+		return
+	}
+	s.BroadcastState()
+	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
+
+func (s *Server) unmuteAudio(w http.ResponseWriter, r *http.Request) {
+	if s.audio == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "audio control is unavailable")
+		return
+	}
+	if err := s.audio.Unmute(r.Context()); err != nil {
+		writeCommandError(w, err)
+		return
+	}
+	s.BroadcastState()
+	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
+
+func (s *Server) enableVoicemail(w http.ResponseWriter, r *http.Request) { s.setVoicemail(w, r, true) }
+func (s *Server) disableVoicemail(w http.ResponseWriter, r *http.Request) {
+	s.setVoicemail(w, r, false)
+}
+
+func (s *Server) setVoicemail(w http.ResponseWriter, r *http.Request, enabled bool) {
+	if s.voicemail == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "voicemail control is unavailable")
+		return
+	}
+	var err error
+	if enabled {
+		err = s.voicemail.Enable(r.Context())
+	} else {
+		err = s.voicemail.Disable(r.Context())
+	}
+	if err != nil {
+		writeCommandError(w, err)
+		return
+	}
+	s.BroadcastState()
+	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
+
+func (s *Server) entrypoint(id string) (config.Entrypoint, error) {
+	if s.config != nil {
+		for _, entrypoint := range s.config.Snapshot().Companion.Entrypoints {
+			if entrypoint.ID == id {
+				return entrypoint, nil
+			}
+		}
+	}
+	return config.Entrypoint{}, ErrEntrypointNotFound
+}
+
+func writeEntrypointError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrEntrypointNotFound):
+		writeError(w, http.StatusNotFound, "entrypoint_not_found", "entrypoint is not configured")
+	case errors.Is(err, ErrCapabilityDisabled):
+		writeError(w, http.StatusConflict, "capability_disabled", "entrypoint unlock is disabled")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error", "entrypoint request failed")
+	}
 }
 
 func writeCommandError(w http.ResponseWriter, err error) {
@@ -62,9 +116,6 @@ func writeCommandError(w http.ResponseWriter, err error) {
 	code := "command_failed"
 
 	switch {
-	case errors.Is(err, ErrNotImplemented):
-		status = http.StatusNotImplemented
-		code = "not_implemented"
 	case errors.Is(err, system.ErrRuntimeUnavailable), errors.Is(err, system.ErrUpdateUnavailable), errors.Is(err, system.ErrServiceNotAllowed), errors.Is(err, media.ErrSnapshotUnavailable), errors.Is(err, media.ErrSnapshotNoVideo):
 		status = http.StatusServiceUnavailable
 		code = "unavailable"
@@ -223,6 +274,21 @@ func (s *Server) systemUpdateStage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status, err := s.update.Stage(r.Context())
+	if err != nil {
+		writeCommandError(w, err)
+		return
+	}
+
+	writeOK(w, http.StatusOK, map[string]any{"status": status})
+}
+
+func (s *Server) systemUpdateInstall(w http.ResponseWriter, r *http.Request) {
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "update control is unavailable")
+		return
+	}
+
+	status, err := s.update.Install(r.Context())
 	if err != nil {
 		writeCommandError(w, err)
 		return

@@ -88,22 +88,13 @@ func run(
 	webrtc := media.NewWebRTCService(nil, nil, nil, nil)
 	snapshot := media.NewSnapshotService(nil, nil, nil)
 
-	commands := api.NewProjectorCommands(
-		projector,
-		openWebNetControl,
-		openWebNetControl,
-		openWebNetControl,
-		rt,
-		updater,
-		webrtc,
-		snapshot,
-	)
-	commands.SetUpdatePolicy(updatePolicy)
-
 	authStore := auth.NewStore(configStore)
 	mdns := discovery.NewService(nil)
 
-	server := api.NewServer(authStore, configStore, projector, commands, logger)
+	server := api.NewServer(authStore, configStore, projector, logger)
+	server.SetEntrypoints(openWebNetControl)
+	server.SetAudio(openWebNetControl)
+	server.SetVoicemail(openWebNetControl)
 	server.SetWebRTC(webrtc)
 	server.SetSnapshot(snapshot)
 	server.SetRuntime(rt)

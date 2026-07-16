@@ -142,7 +142,7 @@ func TestParseMessage(t *testing.T) {
 	for _, test := range []struct {
 		message string
 		wantErr bool
-	}{{`{"type":"ping","id":"ping-1"}`, false}, {`{"type":"command","id":"state-1","action":"state.get"}`, false}, {`{"type":"command","id":"state-1","action":"state.get","payload":[]}`, true}, {`{"type":"state"}`, true}} {
+	}{{`{"type":"ping","id":"ping-1"}`, false}, {`{"type":"command","id":"state-1","action":"state.get"}`, true}, {`{"type":"state"}`, true}} {
 		_, err := ParseMessage([]byte(test.message))
 		if (err != nil) != test.wantErr {
 			t.Fatalf("ParseMessage(%s) = %v", test.message, err)
@@ -177,11 +177,66 @@ func TestServer_WebSocket(t *testing.T) {
 
 	assertMessage(t, connection, "pong", "ping-1")
 
-	if wsutil.WriteClientText(connection, []byte(`{"type":"command","id":"state-1","action":"state.get"}`)) != nil {
-		t.Fatal("write command")
+}
+
+func TestServer_StateIncludesPublicEntrypoints(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	token, err := auth.NewStore(store).RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/state", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	var body struct {
+		State struct {
+			Entrypoints []struct {
+				ID           string `json:"id"`
+				Label        string `json:"label"`
+				DevAddr      string `json:"devaddr"`
+				Capabilities struct {
+					Unlock bool `json:"unlock"`
+				} `json:"capabilities"`
+			} `json:"entrypoints"`
+		} `json:"state"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil {
+		t.Fatalf("state response = %s", response.Body.String())
+	}
+	if len(body.State.Entrypoints) != 1 || body.State.Entrypoints[0].ID != "main" || !body.State.Entrypoints[0].Capabilities.Unlock || body.State.Entrypoints[0].DevAddr != "" {
+		t.Fatalf("entrypoints = %#v", body.State.Entrypoints)
+	}
+}
+
+func TestServer_UnlockEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	control := &unlockRecorder{}
+	server.SetEntrypoints(control)
+	token, err := auth.NewStore(store).RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/entrypoints/main/unlock", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || control.entrypoint != "main" {
+		t.Fatalf("unlock response = %d, entrypoint = %q", response.Code, control.entrypoint)
 	}
 
-	assertMessage(t, connection, "command_result", "state-1")
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/entrypoints/missing/unlock", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown entrypoint response = %d", response.Code)
+	}
 }
 
 func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
@@ -223,10 +278,19 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 		t.Fatal(err)
 	}
 
-	return NewServer(auth.NewStore(store), store, core.NewProjector(), nil, slog.New(slog.DiscardHandler)), store
+	return NewServer(auth.NewStore(store), store, core.NewProjector(), slog.New(slog.DiscardHandler)), store
 }
 
 type failingConn struct{}
+
+type unlockRecorder struct {
+	entrypoint core.EntrypointID
+}
+
+func (r *unlockRecorder) Unlock(_ context.Context, id core.EntrypointID) error {
+	r.entrypoint = id
+	return nil
+}
 
 func (failingConn) Read([]byte) (int, error)         { return 0, io.EOF }
 func (failingConn) Write([]byte) (int, error)        { return 0, errors.New("write failed") }

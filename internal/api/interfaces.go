@@ -9,8 +9,6 @@ import (
 
 type EntrypointControl interface {
 	Unlock(ctx context.Context, id core.EntrypointID) error
-	Stream(ctx context.Context, id core.EntrypointID) error
-	Snapshot(ctx context.Context, id core.EntrypointID) ([]byte, error)
 }
 
 type AudioControl interface {
