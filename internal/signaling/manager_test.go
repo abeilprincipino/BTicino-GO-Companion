@@ -1,4 +1,4 @@
-package sip
+package signaling
 
 import (
 	"bticino-go-companion/internal/core"
@@ -53,7 +53,7 @@ func TestManager_AnswerMovesIncomingToActiveWithSDP(t *testing.T) {
 		t.Fatalf("responses = %#v, want trailing 200 OK", dialog.responses)
 	}
 
-	if !strings.Contains(dialog.responses[1].body, "m=audio 5000 RTP/SAVP 110") || !strings.Contains(dialog.responses[1].body, "m=video 5007 RTP/SAVP 96") {
+	if !strings.Contains(dialog.responses[1].body, "m=audio 65000 RTP/SAVP 110") || !strings.Contains(dialog.responses[1].body, "m=video 65002 RTP/SAVP 96") {
 		t.Fatalf("answer SDP has wrong ports: %s", dialog.responses[1].body)
 	}
 

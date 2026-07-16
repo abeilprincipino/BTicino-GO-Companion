@@ -1,4 +1,4 @@
-package sip
+package signaling
 
 import (
 	"bticino-go-companion/internal/core"

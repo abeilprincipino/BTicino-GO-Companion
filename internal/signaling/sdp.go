@@ -1,4 +1,4 @@
-package sip
+package signaling
 
 import (
 	"fmt"
@@ -6,8 +6,10 @@ import (
 )
 
 const (
-	AudioIngestPort = 5000
-	VideoIngestPort = 5007
+	// SIP requires media sections, but the intercom sends the usable clear RTP
+	// through separate OpenWebNet AV requests to ports 5000 and 5007.
+	AudioSDPPort = 65000
+	VideoSDPPort = 65002
 )
 
 func BuildOffer(host, devAddr string) string {
@@ -47,10 +49,10 @@ func sessionLines(host, sessionID, sessionVersion string) []string {
 
 func mediaLines() []string {
 	return []string{
-		fmt.Sprintf("m=audio %d RTP/SAVP 110", AudioIngestPort),
+		fmt.Sprintf("m=audio %d RTP/SAVP 110", AudioSDPPort),
 		"a=rtpmap:110 speex/8000",
 		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:dummykey",
-		fmt.Sprintf("m=video %d RTP/SAVP 96", VideoIngestPort),
+		fmt.Sprintf("m=video %d RTP/SAVP 96", VideoSDPPort),
 		"a=rtpmap:96 H264/90000",
 		"a=fmtp:96 profile-level-id=42801F",
 		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:dummykey",
