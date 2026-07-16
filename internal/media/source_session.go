@@ -36,9 +36,8 @@ type SourceReceiver interface {
 type SourceSession struct {
 	mu           sync.Mutex
 	logger       *slog.Logger
-	profile      Profile
+	sourceConfig SourceConfig
 	entrypointID core.EntrypointID
-	devAddr      string
 	sip          SourceSIP
 	av           SourceAV
 	video        SourceReceiver
@@ -46,11 +45,11 @@ type SourceSession struct {
 	started      bool
 }
 
-func NewSourceSession(logger *slog.Logger, profile Profile, entrypointID core.EntrypointID, devAddr string, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
+func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypointID core.EntrypointID, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &SourceSession{logger: logger.With("component", "media.session", "model", profile.Model, "entrypoint_id", entrypointID), profile: profile, entrypointID: entrypointID, devAddr: devAddr, sip: sip, av: av, video: video, audio: audio}
+	return &SourceSession{logger: logger.With("component", "media.session", "model", sourceConfig.Model, "entrypoint_id", entrypointID), sourceConfig: sourceConfig, entrypointID: entrypointID, sip: sip, av: av, video: video, audio: audio}
 }
 
 func (s *SourceSession) Start(ctx context.Context) error {
@@ -59,12 +58,10 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	if s.started {
 		return ErrSourceSessionStarted
 	}
-	if s.profile.Model == "" || s.entrypointID == "" || s.devAddr == "" || s.sip == nil || s.av == nil || s.video == nil || s.audio == nil {
+	if s.sourceConfig.Model == "" || s.sourceConfig.DevAddr == "" || s.entrypointID == "" || s.sip == nil || s.av == nil || s.video == nil || s.audio == nil {
 		return errors.New("media: incomplete source session")
 	}
-	if expected, err := ResolveProfile(s.profile.Model); err != nil || expected != s.profile {
-		return ErrUnsupportedModel
-	}
+	s.logger.InfoContext(ctx, "source session starting", "dev_addr", s.sourceConfig.DevAddr, "high_res_video", s.sourceConfig.HighResVideo)
 	if err := s.video.Start(ctx); err != nil {
 		return fmt.Errorf("start video receiver: %w", err)
 	}
@@ -72,11 +69,11 @@ func (s *SourceSession) Start(ctx context.Context) error {
 		_ = s.video.Close()
 		return fmt.Errorf("start audio receiver: %w", err)
 	}
-	if err := s.sip.StartStream(ctx, s.devAddr); err != nil {
+	if err := s.sip.StartStream(ctx, s.sourceConfig.DevAddr); err != nil {
 		s.closeReceivers()
 		return fmt.Errorf("start outgoing sip: %w", err)
 	}
-	if err := s.av.Start(ctx, s.profile.HighResVideo, s.video, s.audio); err != nil {
+	if err := s.av.Start(ctx, s.sourceConfig.HighResVideo, s.video, s.audio); err != nil {
 		s.closeReceivers()
 		if closeErr := s.sip.Hangup(ctx); closeErr != nil {
 			s.logger.WarnContext(ctx, "sip cleanup after av failure failed", "error", closeErr)
@@ -95,6 +92,7 @@ func (s *SourceSession) Close(ctx context.Context) error {
 	if !s.started {
 		return nil
 	}
+	s.logger.InfoContext(ctx, "source session stopping")
 	s.started = false
 	s.closeReceivers()
 	if err := s.sip.Hangup(ctx); err != nil {
@@ -102,6 +100,20 @@ func (s *SourceSession) Close(ctx context.Context) error {
 	}
 	s.logger.InfoContext(ctx, "source session stopped")
 	return nil
+}
+
+// RemoteDialogEnded releases local media after the peer terminates the SIP dialog.
+// It deliberately does not send BYE because the peer has already done so.
+func (s *SourceSession) RemoteDialogEnded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started {
+		return
+	}
+
+	s.started = false
+	s.logger.Info("source session stopped by remote sip dialog")
+	s.closeReceivers()
 }
 
 func (s *SourceSession) closeReceivers() {

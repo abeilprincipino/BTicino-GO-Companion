@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -16,57 +18,41 @@ import (
 const streamAnswerTimeout = 8 * time.Second
 
 var (
-	ErrUnsupportedStreamModel              = errors.New("sip: unsupported stream model")
-	ErrStreamTargetUnset                   = errors.New("sip: stream target not configured")
-	_                         StreamDialer = (*streamDialer)(nil)
+	ErrStreamTargetUnset              = errors.New("sip: stream target not configured")
+	_                    StreamDialer = (*streamDialer)(nil)
 )
 
 // StreamDialerConfig contains the outbound SIP settings required for a stream.
 // Registration and inbound SIP handling are deliberately outside this dialer.
 type StreamDialerConfig struct {
-	Model     string
-	Target    string
-	Domain    string
-	From      string
-	AuthUser  string
-	AuthPass  string
-	Transport string
-	Listen    string
-}
-
-// StreamProfile contains SIP behavior verified for a supported intercom model.
-type StreamProfile struct {
-	Model         string
-	DefaultTarget string
-}
-
-func ResolveStreamProfile(model string) (StreamProfile, error) {
-	switch strings.ToUpper(strings.TrimSpace(model)) {
-	case "C300X":
-		return StreamProfile{Model: "C300X", DefaultTarget: "c300x@127.0.0.1"}, nil
-	case "C100X":
-		return StreamProfile{Model: "C100X", DefaultTarget: "c100x@127.0.0.1"}, nil
-	default:
-		return StreamProfile{}, ErrUnsupportedStreamModel
-	}
+	Target            string
+	Domain            string
+	From              string
+	AuthUser          string
+	AuthPass          string
+	Transport         string
+	Listen            string
+	Logger            *slog.Logger
+	RemoteDialogEnded func()
 }
 
 type streamDialer struct {
-	ua        *sipgo.UserAgent
-	out       *sipgo.DialogClientCache
-	target    inviteTarget
-	authUser  string
-	authPass  string
-	transport string
+	ua                *sipgo.UserAgent
+	server            *sipgo.Server
+	out               *sipgo.DialogClientCache
+	target            inviteTarget
+	authUser          string
+	authPass          string
+	transport         string
+	logger            *slog.Logger
+	remoteDialogEnded func()
+	listenerCancel    context.CancelFunc
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
-	profile, err := ResolveStreamProfile(cfg.Model)
-	if err != nil {
-		return nil, err
-	}
-
-	target, err := resolveInviteTarget(firstNonEmpty(cfg.Target, profile.DefaultTarget), cfg.Domain)
+	target, err := resolveInviteTarget(cfg.Target, cfg.Domain)
 	if err != nil {
 		return nil, err
 	}
@@ -94,23 +80,69 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 		_ = ua.Close()
 		return nil, fmt.Errorf("create sip client: %w", err)
 	}
+	server, err := sipgo.NewServer(ua)
+	if err != nil {
+		_ = ua.Close()
+		return nil, fmt.Errorf("create sip server: %w", err)
+	}
 
 	contact := sip.ContactHeader{Address: sip.Uri{User: fromUser, Host: fromHost, Port: fromPort}}
-	return &streamDialer{
-		ua:        ua,
-		out:       sipgo.NewDialogClientCache(client, contact),
-		target:    target,
-		authUser:  firstNonEmpty(cfg.AuthUser, fromUser),
-		authPass:  strings.TrimSpace(cfg.AuthPass),
-		transport: normalizeTransport(cfg.Transport),
-	}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	listenerCtx, listenerCancel := context.WithCancel(context.Background())
+	dialer := &streamDialer{
+		ua:                ua,
+		server:            server,
+		out:               sipgo.NewDialogClientCache(client, contact),
+		target:            target,
+		authUser:          firstNonEmpty(cfg.AuthUser, fromUser),
+		authPass:          strings.TrimSpace(cfg.AuthPass),
+		transport:         normalizeTransport(cfg.Transport),
+		logger:            logger.With("component", "media.sip", "target", target.URI.User+"@"+target.URI.Host, "domain", strings.TrimSpace(cfg.Domain), "transport", normalizeTransport(cfg.Transport)),
+		remoteDialogEnded: cfg.RemoteDialogEnded,
+		listenerCancel:    listenerCancel,
+	}
+	server.OnBye(dialer.onBye)
+
+	listenAddr := strings.TrimSpace(cfg.Listen)
+	if listenAddr == "" {
+		listenAddr = net.JoinHostPort(fromHost, strconv.Itoa(fromPort))
+	}
+	go dialer.listen(listenerCtx, listenAddr)
+
+	return dialer, nil
 }
 
 func (d *streamDialer) Close() error {
-	return d.ua.Close()
+	d.closeOnce.Do(func() {
+		d.listenerCancel()
+		d.closeErr = errors.Join(d.server.Close(), d.ua.Close())
+	})
+	return d.closeErr
+}
+
+func (d *streamDialer) listen(ctx context.Context, addr string) {
+	if err := d.server.ListenAndServe(ctx, d.transport, addr); err != nil && ctx.Err() == nil {
+		d.logger.Warn("sip listener stopped", "error", err)
+	}
+}
+
+func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
+	if err := d.out.ReadBye(req, tx); err != nil {
+		d.logger.Warn("remote sip bye rejected", "error", err)
+		return
+	}
+
+	d.logger.Info("remote sip stream ended")
+	if d.remoteDialogEnded != nil {
+		d.remoteDialogEnded()
+	}
 }
 
 func (d *streamDialer) StartStream(ctx context.Context, _ string, offer string) (OutgoingDialog, error) {
+	d.logger.InfoContext(ctx, "sip stream dial starting")
 	req := sip.NewRequest(sip.INVITE, d.target.URI)
 	req.SetTransport(strings.ToUpper(d.transport))
 	if d.target.destination != "" {
@@ -135,16 +167,22 @@ func (d *streamDialer) StartStream(ctx context.Context, _ string, offer string) 
 		return nil, fmt.Errorf("ack invite: %w", err)
 	}
 
-	return outgoingDialog{dialog: dialog}, nil
+	d.logger.InfoContext(ctx, "sip stream established")
+	return outgoingDialog{dialog: dialog, logger: d.logger}, nil
 }
 
 type outgoingDialog struct {
 	dialog *sipgo.DialogClientSession
+	logger *slog.Logger
 }
 
 func (d outgoingDialog) Bye(ctx context.Context) error {
+	d.logger.InfoContext(ctx, "sip stream bye starting")
 	err := d.dialog.Bye(ctx)
 	_ = d.dialog.Close()
+	if err == nil {
+		d.logger.InfoContext(ctx, "sip stream bye completed")
+	}
 	return err
 }
 

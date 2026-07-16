@@ -1,7 +1,11 @@
 package media
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -66,4 +70,85 @@ func TestRTPReceiverRejectsUnexpectedPayloadType(t *testing.T) {
 	if metadata.PacketCount != 0 || metadata.InvalidCount != 1 || receiver.RecentlyFlowing(time.Second) {
 		t.Fatalf("metadata = %#v", metadata)
 	}
+}
+
+func TestRTPReceiverLogsStructuredBindAndFirstPacketFacts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs bytes.Buffer
+	received := make(chan struct{}, 1)
+	receiver := NewRTPReceiver(RTPReceiverConfig{
+		Address:     "127.0.0.1:0",
+		Codec:       "H264",
+		PayloadType: VideoPayloadType,
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		Packet:      func(*rtp.Packet) { received <- struct{}{} },
+	})
+	if err := receiver.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+
+	packet := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: VideoPayloadType, SSRC: 42}, Payload: []byte{1, 2, 3}}
+	data, err := packet.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("udp", receiver.Metadata().LocalAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("receiver did not receive RTP")
+	}
+
+	entries := decodeLogEntries(t, logs.Bytes())
+	if !hasLogEntry(entries, "rtp receiver bound", map[string]any{"component": "media.rtp", "codec": "H264", "payload_type": float64(VideoPayloadType)}) {
+		t.Fatalf("missing structured bind log: %#v", entries)
+	}
+	if !hasLogEntry(entries, "rtp receiver received first valid packet", map[string]any{"ssrc": float64(42), "local_addr": receiver.Metadata().LocalAddr}) {
+		t.Fatalf("missing structured first-packet log: %#v", entries)
+	}
+}
+
+func decodeLogEntries(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var entries []map[string]any
+	for {
+		var entry map[string]any
+		if err := decoder.Decode(&entry); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatal(err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func hasLogEntry(entries []map[string]any, message string, want map[string]any) bool {
+	for _, entry := range entries {
+		if entry["msg"] != message {
+			continue
+		}
+		matches := true
+		for key, value := range want {
+			if entry[key] != value {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
 }

@@ -11,7 +11,7 @@ func TestSourceSessionStartsSIPThenAVOnlyOnceAndClosesEverything(t *testing.T) {
 	sip := &fakeSourceSIP{}
 	av := &fakeSourceAV{}
 	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
-	session := NewSourceSession(nil, Profile{Model: "C300X", HighResVideo: true}, "main", "20", sip, av, video, audio)
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20", HighResVideo: true}, "main", sip, av, video, audio)
 	if err := session.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -33,17 +33,42 @@ func TestSourceSessionCleansUpSIPAndReceiversWhenAVFails(t *testing.T) {
 	sip := &fakeSourceSIP{}
 	av := &fakeSourceAV{err: errors.New("nack")}
 	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
-	session := NewSourceSession(nil, Profile{Model: "C100X"}, "main", "20", sip, av, video, audio)
+	session := NewSourceSession(nil, SourceConfig{Model: "C100X", DevAddr: "20"}, "main", sip, av, video, audio)
 	err := session.Start(context.Background())
 	if err == nil || sip.hangups != 1 || video.closes != 1 || audio.closes != 1 {
 		t.Fatalf("start error=%v sip=%#v video=%#v audio=%#v", err, sip, video, audio)
 	}
 }
 
-func TestSourceSessionRejectsMismatchedModelProfile(t *testing.T) {
-	session := NewSourceSession(nil, Profile{Model: "C100X", HighResVideo: true}, "main", "20", &fakeSourceSIP{}, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
-	if err := session.Start(context.Background()); !errors.Is(err, ErrUnsupportedModel) {
-		t.Fatalf("start error = %v, want unsupported model", err)
+func TestSourceSessionRejectsIncompleteSourceConfig(t *testing.T) {
+	session := NewSourceSession(nil, SourceConfig{Model: "C100X"}, "main", &fakeSourceSIP{}, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	if err := session.Start(context.Background()); err == nil {
+		t.Fatal("start succeeded with incomplete source config")
+	}
+}
+
+func TestSourceSession_RemoteDialogEndedClosesReceiversWithoutSendingBYE(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, &fakeSourceAV{}, video, audio)
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	session.RemoteDialogEnded()
+	session.RemoteDialogEnded()
+
+	if session.started {
+		t.Fatal("session remains started after remote dialog ends")
+	}
+	if sip.hangups != 0 || video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("remote cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close after remote dialog ended: %v", err)
+	}
+	if sip.hangups != 0 {
+		t.Fatalf("BYE count = %d, want 0", sip.hangups)
 	}
 }
 

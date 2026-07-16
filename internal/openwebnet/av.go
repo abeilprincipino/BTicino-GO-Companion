@@ -57,6 +57,11 @@ func (c *AVClient) Start(ctx context.Context, highRes bool, video, audio media.F
 	if video == nil || audio == nil {
 		return errors.New("openwebnet av flow probes are required")
 	}
+	resolution := "low"
+	if highRes {
+		resolution = "high"
+	}
+	c.logger.InfoContext(ctx, "av activation starting", "video_resolution", resolution)
 	if err := c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", 5007, highRes), video); err != nil {
 		return err
 	}
@@ -74,10 +79,12 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 	var lastErr error
 	for attempt := 1; attempt <= c.attempts; attempt++ {
 		if attempt > 1 {
+			c.logger.DebugContext(ctx, "av stream retrying", "stream", kind, "attempt", attempt, "retry_delay", c.retryDelay)
 			if err := wait(ctx, c.retryDelay); err != nil {
-				return err
+				return fmt.Errorf("wait to retry %s stream: %w", kind, err)
 			}
 		}
+		c.logger.DebugContext(ctx, "av stream request", "stream", kind, "attempt", attempt)
 		ack, err := c.exchange(ctx, frame)
 		if err != nil {
 			lastErr = err
@@ -86,7 +93,7 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 		}
 		if ack || probe.RecentlyFlowing(c.flowWindow) {
 			if c.waitForFlow(ctx, probe) {
-				c.logger.InfoContext(ctx, "av stream started", "stream", kind, "attempt", attempt)
+				c.logger.InfoContext(ctx, "av stream flowing", "stream", kind, "attempt", attempt)
 				return nil
 			}
 			lastErr = ErrAVFlowTimeout
