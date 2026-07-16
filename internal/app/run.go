@@ -22,6 +22,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/pion/rtp"
 )
 
 func Run(ctx context.Context, configPath string, logger *slog.Logger, setLogLevel func(string) error) error {
@@ -61,13 +63,21 @@ func run(
 	projector := core.NewProjector()
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
-	diagnosticSource, closeDiagnosticSource, err := newDiagnosticSource(configStore.Snapshot(), logger)
+	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, packet func(*rtp.Packet)) (media.RTSPSource, func(), error) {
+		source, closeSource, err := newSource(configStore.Snapshot(), logger, entrypoint, packet)
+		return source, closeSource, err
+	})
 	if err != nil {
+		return fmt.Errorf("create rtsp server: %w", err)
+	}
+	if err := rtspServer.Start(ctx); err != nil {
 		return err
 	}
-	if closeDiagnosticSource != nil {
-		defer closeDiagnosticSource()
-	}
+	defer func() {
+		if err := rtspServer.Close(); err != nil {
+			logger.Warn("close rtsp server", "error", err)
+		}
+	}()
 
 	allowedServices := []string{}
 
@@ -109,7 +119,6 @@ func run(
 	server.SetUpdate(updater)
 	diagnosticService := diagnostics.New(openWebNetControl, configStore.Snapshot().Companion.Model, server.BroadcastState)
 	server.SetDiagnostics(diagnosticService)
-	server.SetDiagnosticSource(diagnosticSource)
 
 	apiListener, err := net.Listen("tcp", apiAddr)
 	if err != nil {
@@ -185,22 +194,12 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
-func newDiagnosticSource(cfg config.Config, logger *slog.Logger) (*media.SourceSession, func(), error) {
-	var entrypoint config.Entrypoint
-	for _, candidate := range cfg.Companion.Entrypoints {
-		if candidate.Capabilities.Stream {
-			entrypoint = candidate
-			break
-		}
-	}
+func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket func(*rtp.Packet)) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve diagnostic media source: %w", err)
+		return nil, nil, fmt.Errorf("resolve media source: %w", err)
 	}
-	if entrypoint.ID == "" {
-		return nil, nil, nil
-	}
-	logger.Info("diagnostic media source configuration resolved",
+	logger.Info("media source configuration resolved",
 		"component", "media.source",
 		"model", sourceConfig.Model,
 		"entrypoint_id", entrypoint.ID,
@@ -219,7 +218,7 @@ func newDiagnosticSource(cfg config.Config, logger *slog.Logger) (*media.SourceS
 		},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("create diagnostic sip dialer: %w", err)
+		return nil, nil, fmt.Errorf("create sip dialer: %w", err)
 	}
 	source = media.NewSourceSession(
 		logger,
@@ -227,14 +226,14 @@ func newDiagnosticSource(cfg config.Config, logger *slog.Logger) (*media.SourceS
 		core.EntrypointID(entrypoint.ID),
 		signaling.NewManager("127.0.0.1", dialer, nil),
 		openwebnet.NewAVClient(logger),
-		media.NewVideoRTPReceiver(logger, nil),
+		media.NewVideoRTPReceiver(logger, videoPacket),
 		media.NewAudioRTPReceiver(logger, nil),
 	)
 	return source, func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := source.Close(closeCtx); err != nil {
-			logger.Warn("close diagnostic source", "error", err)
+			logger.Warn("close media source", "error", err)
 		}
 		if err := dialer.Close(); err != nil {
 			logger.Warn("close diagnostic sip dialer", "error", err)

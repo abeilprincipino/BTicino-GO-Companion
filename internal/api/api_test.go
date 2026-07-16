@@ -5,7 +5,6 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/system"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -246,8 +245,8 @@ func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newTestServer(t)
-	var logs bytes.Buffer
-	server.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	logs := &signalWriter{written: make(chan struct{})}
+	server.logger = slog.New(slog.NewTextHandler(logs, nil))
 	runtime := &runtimeRecorder{rebootErr: errors.New("shutdown failed"), rebooted: make(chan struct{})}
 	server.SetRuntime(runtime)
 	token, err := server.auth.RotateBearer()
@@ -266,6 +265,11 @@ func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	case <-runtime.rebooted:
 	case <-time.After(time.Second):
 		t.Fatal("reboot was not called")
+	}
+	select {
+	case <-logs.written:
+	case <-time.After(time.Second):
+		t.Fatal("reboot error was not logged")
 	}
 	if strings.Count(logs.String(), "reboot system") != 1 {
 		t.Fatalf("reboot logs = %q", logs.String())
@@ -303,38 +307,6 @@ func TestServer_SystemRebootRespectsConfig(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("reboot response = %d: %s", response.Code, response.Body.String())
-	}
-}
-
-func TestServer_DiagnosticSourceRequiresBearerAndDirectlyControlsSession(t *testing.T) {
-	t.Parallel()
-
-	server, _ := newTestServer(t)
-	source := &diagnosticSourceRecorder{}
-	server.SetDiagnosticSource(source)
-	token, err := server.auth.RotateBearer()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	unauthorized := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/diagnostics/source/start", nil)
-	unauthorizedResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unauthorizedResponse, unauthorized)
-	if unauthorizedResponse.Code != http.StatusUnauthorized || source.starts != 0 {
-		t.Fatalf("unauthorized response = %d, starts = %d", unauthorizedResponse.Code, source.starts)
-	}
-
-	for _, path := range []string{"/api/v3/diagnostics/source/start", "/api/v3/diagnostics/source/stop"} {
-		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, nil)
-		request.Header.Set("Authorization", "Bearer "+token)
-		response := httptest.NewRecorder()
-		server.Handler().ServeHTTP(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("%s response = %d", path, response.Code)
-		}
-	}
-	if source.starts != 1 || source.stops != 1 || !source.startDetached {
-		t.Fatalf("source calls = start %d, stop %d, start detached = %t", source.starts, source.stops, source.startDetached)
 	}
 }
 
@@ -391,17 +363,32 @@ func (r *unlockRecorder) Unlock(_ context.Context, id core.EntrypointID) error {
 	return nil
 }
 
-type diagnosticSourceRecorder struct {
-	starts        int
-	stops         int
-	startDetached bool
-}
-
 type runtimeRecorder struct {
 	available bool
 	rebootErr error
 	rebooted  chan struct{}
 	once      sync.Once
+}
+
+type signalWriter struct {
+	mu      sync.Mutex
+	value   strings.Builder
+	written chan struct{}
+	once    sync.Once
+}
+
+func (w *signalWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.value.Write(data)
+	w.once.Do(func() { close(w.written) })
+	return n, err
+}
+
+func (w *signalWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.value.String()
 }
 
 func (r *runtimeRecorder) Reboot(context.Context) error {
@@ -415,17 +402,6 @@ func (r *runtimeRecorder) RebootAvailable() bool               { return r.availa
 func (*runtimeRecorder) Restart(context.Context, string) error { return nil }
 func (*runtimeRecorder) Status(context.Context, string) (system.ServiceStatus, error) {
 	return system.ServiceStatus{}, nil
-}
-
-func (r *diagnosticSourceRecorder) Start(ctx context.Context) error {
-	r.starts++
-	r.startDetached = ctx.Done() == nil
-	return nil
-}
-
-func (r *diagnosticSourceRecorder) Close(context.Context) error {
-	r.stops++
-	return nil
 }
 
 func (failingConn) Read([]byte) (int, error)         { return 0, io.EOF }

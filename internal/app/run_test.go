@@ -60,23 +60,6 @@ func TestOpenConfigReturnsMetadataFailure(t *testing.T) {
 	}
 }
 
-func TestNewDiagnosticSourceRejectsUnsupportedModel(t *testing.T) {
-	t.Parallel()
-
-	source, closeSource, err := newDiagnosticSource(config.Config{Companion: config.Companion{
-		Model: "C200X",
-		Entrypoints: []config.Entrypoint{{
-			ID: "main",
-			Capabilities: config.Capabilities{
-				Stream: true,
-			},
-		}},
-	}}, slog.New(slog.DiscardHandler))
-	if err == nil || source != nil || closeSource != nil {
-		t.Fatalf("newDiagnosticSource() = source %v, close %v, error %v", source, closeSource != nil, err)
-	}
-}
-
 func TestServeRunsAPIAndWebUI(t *testing.T) {
 	t.Parallel()
 

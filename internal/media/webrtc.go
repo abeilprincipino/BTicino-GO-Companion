@@ -47,6 +47,10 @@ type WebRTCPeer interface {
 	Close() error
 }
 
+type RTPWriter interface {
+	WriteRTP(*rtp.Packet) error
+}
+
 type WebRTCPeerFactory interface {
 	NewPeer(Source, SessionID, Backchannel, CandidateSink) (WebRTCPeer, error)
 }

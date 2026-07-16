@@ -54,48 +54,6 @@ func TestDistributor_RegisterSessionConsumerScopesPackets(t *testing.T) {
 	}
 }
 
-func TestRTSPConsumer_Close(t *testing.T) {
-	t.Parallel()
-
-	distributor := NewDistributor()
-
-	source := testSource()
-	if err := distributor.RegisterSource(source); err != nil {
-		t.Fatal(err)
-	}
-
-	writer := &recordingWriter{}
-
-	consumer, err := NewRTSPConsumer(distributor, source, "rtsp-1", writer)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !distributor.Distribute(source, testRTPPacket(source.SSRC)) {
-		t.Fatal("Distribute() = false, want true")
-	}
-
-	if writer.calls != 1 {
-		t.Fatalf("writer calls = %d, want 1", writer.calls)
-	}
-
-	if err := consumer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := consumer.Close(); !errors.Is(err, ErrRTSPConsumerClosed) {
-		t.Fatalf("Close() error = %v, want %v", err, ErrRTSPConsumerClosed)
-	}
-
-	if !distributor.Distribute(source, testRTPPacket(source.SSRC)) {
-		t.Fatal("Distribute() = false, want true")
-	}
-
-	if writer.calls != 1 {
-		t.Fatalf("writer calls after close = %d, want 1", writer.calls)
-	}
-}
-
 func TestWebRTCService_OfferCandidateAndClose(t *testing.T) {
 	t.Parallel()
 
