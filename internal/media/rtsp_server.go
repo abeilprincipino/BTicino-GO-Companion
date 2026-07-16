@@ -29,8 +29,8 @@ type RTSPSource interface {
 	Close(context.Context) error
 }
 
-// RTSPSourceFactory creates the selected entrypoint's source and forwards H.264 RTP to packet.
-type RTSPSourceFactory func(config.Entrypoint, func(*rtp.Packet)) (RTSPSource, func(), error)
+// RTSPSourceFactory creates the selected entrypoint's source and forwards its video and audio RTP.
+type RTSPSourceFactory func(config.Entrypoint, func(*rtp.Packet), func(*rtp.Packet)) (RTSPSource, func(), error)
 
 type rtspRoute struct {
 	entrypoint config.Entrypoint
@@ -54,6 +54,7 @@ type RTSPServer struct {
 
 	stream  *gortsplib.ServerStream
 	video   *description.Media
+	audio   *description.Media
 	source  RTSPSource
 	cleanup func()
 	active  rtspRoute
@@ -121,7 +122,7 @@ func (s *RTSPServer) Start(ctx context.Context) error {
 func (s *RTSPServer) Close() error {
 	s.mu.Lock()
 	server, stream := s.server, s.stream
-	s.server, s.stream, s.video = nil, nil, nil
+	s.server, s.stream, s.video, s.audio = nil, nil, nil, nil
 	s.readers = make(map[*gortsplib.ServerSession]rtspReader)
 	source, cleanup := s.takeSourceLocked()
 	s.mu.Unlock()
@@ -218,10 +219,11 @@ func (s *RTSPServer) ensureStreamLocked() error {
 		return fmt.Errorf("rtsp server is not started")
 	}
 	s.video = &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{&format.H264{PayloadTyp: VideoPayloadType, PacketizationMode: 1}}}
-	s.stream = &gortsplib.ServerStream{Server: s.server, Desc: &description.Session{Medias: []*description.Media{s.video}}}
+	s.audio = &description.Media{Type: description.MediaTypeAudio, Formats: []format.Format{&format.Opus{PayloadTyp: audioBridgeOpusPT, ChannelCount: 1}}}
+	s.stream = &gortsplib.ServerStream{Server: s.server, Desc: &description.Session{Medias: []*description.Media{s.video, s.audio}}}
 	if err := s.stream.Initialize(); err != nil {
-		s.stream, s.video = nil, nil
-		return fmt.Errorf("initialize h264 rtsp stream: %w", err)
+		s.stream, s.video, s.audio = nil, nil, nil
+		return fmt.Errorf("initialize rtsp stream: %w", err)
 	}
 	return nil
 }
@@ -230,7 +232,7 @@ func (s *RTSPServer) startSourceLocked(route rtspRoute) error {
 	if s.source != nil {
 		return nil
 	}
-	source, cleanup, err := s.sourceFactory(route.entrypoint, s.writeVideoRTP)
+	source, cleanup, err := s.sourceFactory(route.entrypoint, s.writeVideoRTP, s.writeAudioRTP)
 	if err != nil {
 		return fmt.Errorf("create source: %w", err)
 	}
@@ -255,13 +257,21 @@ func (s *RTSPServer) takeSourceLocked() (RTSPSource, func()) {
 }
 
 func (s *RTSPServer) writeVideoRTP(packet *rtp.Packet) {
+	s.writeRTP(s.video, packet)
+}
+
+func (s *RTSPServer) writeAudioRTP(packet *rtp.Packet) {
+	s.writeRTP(s.audio, packet)
+}
+
+func (s *RTSPServer) writeRTP(media *description.Media, packet *rtp.Packet) {
 	if packet == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stream != nil {
-		s.stream.WritePacketRTP(s.video, packet)
+	if s.stream != nil && media != nil {
+		s.stream.WritePacketRTP(media, packet)
 	}
 }
 

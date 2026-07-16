@@ -12,35 +12,22 @@ import (
 func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 	t.Parallel()
 
-	distributor := NewDistributor()
-	intercom := testSource()
-	intercom.MediaKind = MediaKindAudio
-	intercom.SSRC = 4001
-	opus := intercom
-	opus.MediaKind = MediaKindAudioOpus
-	opus.SSRC = 4002
-	opus.Generation = "audio-bridge"
-
-	if err := distributor.RegisterSource(intercom); err != nil {
-		t.Fatal(err)
-	}
-
 	pipeline := &fakeAudioPipeline{
 		opusOut:  make(chan *rtp.Packet, 1),
 		speexOut: make(chan *rtp.Packet, 1),
 	}
 	backchannel := &recordingBackchannel{written: make(chan struct{}, 1)}
+	opus := make(chan *rtp.Packet, 1)
 
-	bridge := NewAudioBridge(distributor, fakeGStreamerAudio{pipeline: pipeline}, intercom, opus, backchannel, "audio-bridge")
+	bridge := NewAudioBridge(fakeGStreamerAudio{pipeline: pipeline}, func(packet *rtp.Packet) { opus <- packet }, backchannel)
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	defer bridge.Stop() //nolint:errcheck // test cleanup
 
-	if !distributor.Distribute(intercom, testRTPPacket(intercom.SSRC)) {
-		t.Fatal("Distribute() = false, want true")
+	if err := bridge.WriteIntercomSpeex(testRTPPacket(4001)); err != nil {
+		t.Fatal(err)
 	}
-
 	if pipeline.intercomCalls != 1 {
 		t.Fatalf("intercom calls = %d, want 1", pipeline.intercomCalls)
 	}
@@ -53,18 +40,9 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 		t.Fatalf("backchannel calls = %d, want 1", pipeline.backchannelCalls)
 	}
 
-	received := make(chan Packet, 1)
-
-	if err := distributor.RegisterConsumer("opus", ConsumerFunc(func(packet Packet) {
-		received <- packet
-	})); err != nil {
-		t.Fatal(err)
-	}
-
-	pipeline.opusOut <- testRTPPacket(opus.SSRC)
-
-	if packet := <-received; packet.Source != opus {
-		t.Fatalf("opus source = %#v, want %#v", packet.Source, opus)
+	pipeline.opusOut <- testRTPPacket(4002)
+	if packet := <-opus; packet.SSRC != 4002 {
+		t.Fatalf("opus packet SSRC = %d, want 4002", packet.SSRC)
 	}
 
 	pipeline.speexOut <- testRTPPacket(5002)
@@ -79,7 +57,7 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 func TestAudioBridge_StartRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	bridge := NewAudioBridge(nil, nil, Source{}, Source{}, nil, "")
+	bridge := NewAudioBridge(nil, nil, nil)
 	if err := bridge.Start(context.Background()); !errors.Is(err, ErrAudioBridgeUnavailable) {
 		t.Fatalf("Start() error = %v, want %v", err, ErrAudioBridgeUnavailable)
 	}

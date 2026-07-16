@@ -18,8 +18,8 @@ func TestRTSPServerUsesConfiguredEntrypointRouteAndDevAddr(t *testing.T) {
 	server := testRTSPServer(t, []config.Entrypoint{
 		{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}},
 		{ID: "gate2", DevAddr: "21", Capabilities: config.Capabilities{Stream: true}},
-	}, func(entrypoint config.Entrypoint, packet func(*rtp.Packet)) (RTSPSource, func(), error) {
-		if packet == nil {
+	}, func(entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (RTSPSource, func(), error) {
+		if videoPacket == nil || audioPacket == nil {
 			t.Fatal("source packet callback is nil")
 		}
 		started = entrypoint
@@ -48,7 +48,7 @@ func TestRTSPServerRejectsDifferentEntrypointWhileSourceActive(t *testing.T) {
 	server := testRTSPServer(t, []config.Entrypoint{
 		{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}},
 		{ID: "gate2", DevAddr: "21", Capabilities: config.Capabilities{Stream: true}},
-	}, func(config.Entrypoint, func(*rtp.Packet)) (RTSPSource, func(), error) {
+	}, func(config.Entrypoint, func(*rtp.Packet), func(*rtp.Packet)) (RTSPSource, func(), error) {
 		return source, nil, nil
 	})
 

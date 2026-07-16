@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,9 +64,8 @@ func run(
 	projector := core.NewProjector()
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
-	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, packet func(*rtp.Packet)) (media.RTSPSource, func(), error) {
-		source, closeSource, err := newSource(configStore.Snapshot(), logger, entrypoint, packet)
-		return source, closeSource, err
+	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (media.RTSPSource, func(), error) {
+		return newBridgeSource(configStore.Snapshot(), logger, entrypoint, videoPacket, audioPacket)
 	})
 	if err != nil {
 		return fmt.Errorf("create rtsp server: %w", err)
@@ -194,7 +194,45 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket func(*rtp.Packet)) (*media.SourceSession, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (media.RTSPSource, func(), error) {
+	var bridge *media.AudioBridge
+	source, closeSource, err := newSource(cfg, logger, entrypoint, videoPacket, func(packet *rtp.Packet) {
+		if err := bridge.WriteIntercomSpeex(packet); err != nil {
+			logger.Warn("bridge intercom speex", "error", err)
+		}
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), audioPacket, nil)
+	return &bridgeSource{source: source, bridge: bridge}, closeSource, nil
+}
+
+type bridgeSource struct {
+	source *media.SourceSession
+	bridge *media.AudioBridge
+}
+
+func (s *bridgeSource) Start(ctx context.Context) error {
+	if err := s.bridge.Start(ctx); err != nil {
+		return fmt.Errorf("start audio bridge: %w", err)
+	}
+	if err := s.source.Start(ctx); err != nil {
+		_ = s.bridge.Stop()
+		return err
+	}
+	return nil
+}
+
+func (s *bridgeSource) Close(ctx context.Context) error {
+	err := s.source.Close(ctx)
+	if bridgeErr := s.bridge.Stop(); bridgeErr != nil && err == nil {
+		err = bridgeErr
+	}
+	return err
+}
+
+func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -227,7 +265,7 @@ func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypo
 		signaling.NewManager("127.0.0.1", dialer, nil),
 		openwebnet.NewAVClient(logger),
 		media.NewVideoRTPReceiver(logger, videoPacket),
-		media.NewAudioRTPReceiver(logger, nil),
+		media.NewAudioRTPReceiver(logger, audioPacket),
 	)
 	return source, func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
