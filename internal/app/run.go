@@ -74,7 +74,7 @@ func run(
 	build := system.CurrentBuildInfo()
 	updatePolicy := func() system.UpdatePolicy {
 		cfg := configStore.Snapshot().System
-		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: cfg.UpdateDataDir}
+		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: system.CompanionDataDir}
 	}
 	var updateSource system.ReleaseSource
 	if strings.TrimSpace(build.ReleaseRepo) != "" {
@@ -219,11 +219,6 @@ func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*c
 		return nil, false, fmt.Errorf("open config: %w", err)
 	}
 
-	metadata, err := detectMetadata()
-	if err != nil {
-		return nil, false, fmt.Errorf("detect device metadata: %w", err)
-	}
-
 	if _, err := config.Create(path, metadata); err != nil && !errors.Is(err, config.ErrConfigExists) {
 		return nil, false, fmt.Errorf("create config: %w", err)
 	}
@@ -273,9 +268,20 @@ func shutdown(servers ...*http.Server) error {
 	var errs []error
 	for _, server := range servers {
 		if err := server.Shutdown(ctx); err != nil {
+	metadata, err := detectMetadata()
+	if err != nil {
+		return nil, false, fmt.Errorf("detect device metadata: %w", err)
+	}
+
 			errs = append(errs, err)
+		}
+		if err := store.ApplyMetadata(metadata); err != nil {
+			return nil, false, fmt.Errorf("apply device metadata: %w", err)
 		}
 	}
 
 	return errors.Join(errs...)
 }
+	if err := store.ApplyMetadata(metadata); err != nil {
+		return nil, false, fmt.Errorf("apply device metadata: %w", err)
+	}

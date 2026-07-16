@@ -16,7 +16,10 @@ import (
 
 var ErrUpdateUnavailable = errors.New("system: update control is unavailable")
 
-const companionAssetName = "companion"
+const (
+	companionAssetName = "companion"
+	CompanionDataDir   = "/home/bticino/cfg/extra/companion"
+)
 
 var (
 	BuildVersion     = "dev"

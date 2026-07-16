@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -28,8 +30,11 @@ func TestCreateAndLoad(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	if loaded.Companion.DeviceID != created.Companion.DeviceID || loaded.Auth.ClaimCode != created.Auth.ClaimCode {
+	if loaded.Auth.ClaimCode != created.Auth.ClaimCode {
 		t.Fatalf("loaded config differs: got %#v want %#v", loaded, created)
+	}
+	if loaded.Companion.DeviceID != "" || loaded.Companion.Model != "" {
+		t.Fatalf("loaded runtime metadata = %#v, want empty", loaded.Companion)
 	}
 
 	info, err := os.Stat(path)
@@ -42,6 +47,93 @@ func TestCreateAndLoad(t *testing.T) {
 	}
 }
 
+func TestCreateWritesCompleteConfigYAML(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var document map[string]any
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode yaml: %v", err)
+	}
+
+	for _, path := range []string{
+		"companion.name",
+		"companion.log_level",
+		"companion.entrypoints",
+		"companion.entrypoints.0.id",
+		"companion.entrypoints.0.label",
+		"companion.entrypoints.0.devaddr",
+		"companion.entrypoints.0.capabilities.stream",
+		"companion.entrypoints.0.capabilities.unlock",
+		"companion.entrypoints.0.capabilities.ring",
+		"auth.claim_code",
+		"auth.bearer_token",
+		"webui.admin_username",
+		"webui.admin_password_hash",
+		"webui.session_secret",
+		"system.reboot_enabled",
+		"system.update_enabled",
+		"system.update_exposed",
+		"system.services.dropbear.enabled",
+		"system.services.dropbear.exposed",
+		"homekit.enabled",
+		"homekit.pin",
+	} {
+		if _, ok := yamlPath(document, path); !ok {
+			t.Errorf("missing YAML key path %q", path)
+		}
+	}
+
+	for _, path := range []string{"auth.bearer_token", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
+		if value, _ := yamlPath(document, path); value != "" {
+			t.Errorf("YAML value at %q = %#v, want empty string", path, value)
+		}
+	}
+	for _, path := range []string{"system.update_exposed", "homekit.enabled"} {
+		if value, _ := yamlPath(document, path); value != false {
+			t.Errorf("YAML value at %q = %#v, want false", path, value)
+		}
+	}
+
+	for _, path := range []string{"companion.device_id", "companion.model", "media", "sip"} {
+		if _, ok := yamlPath(document, path); ok {
+			t.Errorf("runtime YAML key path %q must not be persisted", path)
+		}
+	}
+}
+
+func yamlPath(document map[string]any, path string) (any, bool) {
+	var value any = document
+	for _, component := range strings.Split(path, ".") {
+		switch current := value.(type) {
+		case map[string]any:
+			var ok bool
+			value, ok = current[component]
+			if !ok {
+				return nil, false
+			}
+		case []any:
+			if component != "0" || len(current) == 0 {
+				return nil, false
+			}
+			value = current[0]
+		default:
+			return nil, false
+		}
+	}
+
+	return value, true
+}
+
 func TestCreateRejectsMissingMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -51,32 +143,30 @@ func TestCreateRejectsMissingMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsUnknownField(t *testing.T) {
+func TestLoadRejectsLegacyCompanionMetadata(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
-		t.Fatalf("create config: %v", err)
-	}
+	for _, field := range []string{"model", "device_id"} {
+		t.Run(field, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+				t.Fatalf("create config: %v", err)
+			}
 
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatalf("open config: %v", err)
-	}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			data = []byte(strings.Replace(string(data), "companion:\n", "companion:\n    "+field+": legacy\n", 1))
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
 
-	if _, err := file.WriteString("unknown: true\n"); err != nil {
-		_ = file.Close()
-
-		t.Fatalf("append config: %v", err)
-	}
-
-	if err := file.Close(); err != nil {
-		t.Fatalf("close config: %v", err)
-	}
-
-	_, err = Load(path)
-	if err == nil || !strings.Contains(err.Error(), "field unknown") {
-		t.Fatalf("load error = %v, want unknown field", err)
+			_, err = Load(path)
+			if err == nil || !strings.Contains(err.Error(), "field "+field) {
+				t.Fatalf("load error = %v, want unknown companion.%s field", err, field)
+			}
+		})
 	}
 }
 

@@ -39,8 +39,8 @@ type Config struct {
 type Companion struct {
 	Name        string       `yaml:"name"`
 	LogLevel    string       `yaml:"log_level"`
-	DeviceID    string       `yaml:"device_id"`
-	Model       string       `yaml:"model"`
+	DeviceID    string       `yaml:"-"`
+	Model       string       `yaml:"-"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
 }
 
@@ -72,7 +72,6 @@ type System struct {
 	RebootEnabled bool               `yaml:"reboot_enabled"`
 	UpdateEnabled bool               `yaml:"update_enabled"`
 	UpdateExposed bool               `yaml:"update_exposed"`
-	UpdateDataDir string             `yaml:"update_data_dir"`
 	Services      map[string]Service `yaml:"services"`
 }
 
@@ -84,6 +83,22 @@ type Service struct {
 type HomeKit struct {
 	Enabled bool   `yaml:"enabled"`
 	PIN     string `yaml:"pin"`
+}
+
+// persistedConfig defines the on-disk boundary. Device metadata is refreshed at
+// startup and must never be written to config.yaml.
+type persistedConfig struct {
+	Companion persistedCompanion `yaml:"companion"`
+	Auth      Auth               `yaml:"auth"`
+	WebUI     WebUI              `yaml:"webui"`
+	System    System             `yaml:"system"`
+	HomeKit   HomeKit            `yaml:"homekit"`
+}
+
+type persistedCompanion struct {
+	Name        string       `yaml:"name"`
+	LogLevel    string       `yaml:"log_level"`
+	Entrypoints []Entrypoint `yaml:"entrypoints"`
 }
 
 type Metadata struct {
@@ -138,14 +153,10 @@ func Default(metadata Metadata) (Config, error) {
 		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
 	}
 
-	deviceID := strings.ToLower(strings.ReplaceAll(metadata.Model, " ", "-")) + "-" + strings.ReplaceAll(strings.ToLower(metadata.MAC), ":", "")
-
-	return Config{
+	cfg := Config{
 		Companion: Companion{
 			Name:     "BTicino Companion",
 			LogLevel: defaultLogLevel,
-			DeviceID: deviceID,
-			Model:    metadata.Model,
 			Entrypoints: []Entrypoint{{
 				ID:      defaultEntrypoint,
 				Label:   "Main Gate",
@@ -157,17 +168,45 @@ func Default(metadata Metadata) (Config, error) {
 				},
 			}},
 		},
-		Auth:    Auth{ClaimCode: claimCode},
-		HomeKit: HomeKit{PIN: homeKitPIN},
+		Auth: Auth{
+			ClaimCode:   claimCode,
+			BearerToken: "",
+		},
+		WebUI: WebUI{
+			AdminUsername:     "",
+			AdminPasswordHash: "",
+			SessionSecret:     "",
+		},
 		System: System{
 			RebootEnabled: true,
 			UpdateEnabled: true,
-			UpdateDataDir: "/home/bticino/cfg/extra/companion",
+			UpdateExposed: false,
 			Services: map[string]Service{
 				"dropbear": {Enabled: true, Exposed: true},
 			},
 		},
-	}, nil
+		HomeKit: HomeKit{
+			Enabled: false,
+			PIN:     homeKitPIN,
+		},
+	}
+	if err := ApplyMetadata(&cfg, metadata); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
+}
+
+// ApplyMetadata adds intercom facts discovered at runtime without persisting them.
+func ApplyMetadata(cfg *Config, metadata Metadata) error {
+	if err := validateMetadata(metadata); err != nil {
+		return err
+	}
+
+	cfg.Companion.Model = metadata.Model
+	cfg.Companion.DeviceID = strings.ToLower(strings.ReplaceAll(metadata.Model, " ", "-")) + "-" + strings.ReplaceAll(strings.ToLower(metadata.MAC), ":", "")
+
+	return nil
 }
 
 func Load(path string) (Config, error) {
@@ -177,13 +216,24 @@ func Load(path string) (Config, error) {
 	}
 	defer file.Close() //nolint:errcheck // close error not meaningful for read-only handle
 
-	var cfg Config
+	var persisted persistedConfig
 
 	decoder := yaml.NewDecoder(file)
 	decoder.KnownFields(true)
 
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decoder.Decode(&persisted); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	cfg := Config{
+		Companion: Companion{
+			Name:        persisted.Companion.Name,
+			LogLevel:    persisted.Companion.LogLevel,
+			Entrypoints: persisted.Companion.Entrypoints,
+		},
+		Auth:    persisted.Auth,
+		WebUI:   persisted.WebUI,
+		System:  persisted.System,
+		HomeKit: persisted.HomeKit,
 	}
 	if err := ensureSingleDocument(decoder); err != nil {
 		return Config{}, err
@@ -225,6 +275,14 @@ func (s *Store) Update(update func(*Config) error) error {
 	return nil
 }
 
+// ApplyMetadata adds intercom facts to the in-memory configuration only.
+func (s *Store) ApplyMetadata(metadata Metadata) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return ApplyMetadata(&s.cfg, metadata)
+}
+
 func Validate(cfg Config) error {
 	if strings.TrimSpace(cfg.Companion.Name) == "" {
 		return errors.New("companion name is required")
@@ -232,10 +290,6 @@ func Validate(cfg Config) error {
 
 	if cfg.Companion.LogLevel != "debug" && cfg.Companion.LogLevel != "info" && cfg.Companion.LogLevel != "warn" && cfg.Companion.LogLevel != "error" {
 		return fmt.Errorf("invalid log level %q", cfg.Companion.LogLevel)
-	}
-
-	if strings.TrimSpace(cfg.Companion.DeviceID) == "" || strings.TrimSpace(cfg.Companion.Model) == "" {
-		return ErrMissingMetadata
 	}
 
 	if !ValidClaimCode(cfg.Auth.ClaimCode) {
@@ -284,7 +338,17 @@ func saveNew(path string, cfg Config) error {
 }
 
 func save(path string, cfg Config, exclusive bool) error {
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(persistedConfig{
+		Companion: persistedCompanion{
+			Name:        cfg.Companion.Name,
+			LogLevel:    cfg.Companion.LogLevel,
+			Entrypoints: cfg.Companion.Entrypoints,
+		},
+		Auth:    cfg.Auth,
+		WebUI:   cfg.WebUI,
+		System:  cfg.System,
+		HomeKit: cfg.HomeKit,
+	})
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
