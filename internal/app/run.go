@@ -66,6 +66,7 @@ func run(
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
 	initialConfig := configStore.Snapshot()
+	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
 	if len(initialConfig.Companion.Entrypoints) == 0 {
 		return errors.New("create sip runtime: no entrypoints configured")
 	}
@@ -83,7 +84,7 @@ func run(
 		}
 	}()
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events)
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events, snapshots)
 	})
 	if err != nil {
 		return fmt.Errorf("create rtsp server: %w", err)
@@ -125,7 +126,6 @@ func run(
 	if err != nil {
 		return fmt.Errorf("create WebRTC service: %w", err)
 	}
-	snapshot := media.NewSnapshotService(nil, nil, nil)
 
 	authStore := auth.NewStore(configStore)
 	authStore.SetLogger(logger)
@@ -136,7 +136,8 @@ func run(
 	server.SetAudio(openWebNetControl)
 	server.SetVoicemail(openWebNetControl)
 	server.SetWebRTC(webrtc)
-	server.SetSnapshot(snapshot)
+	server.SetSnapshot(snapshots)
+	snapshots.SetOnCaptured(server.BroadcastState)
 	server.SetRuntime(rt)
 	server.SetUpdate(updater)
 	diagnosticService := diagnostics.New(openWebNetControl, configStore.Snapshot().Companion.Model, server.BroadcastState)
@@ -175,6 +176,18 @@ func run(
 		server.BroadcastState()
 		server.BroadcastEvent(map[string]any{"type": event.Type()})
 	}
+	rtspServer.Coordinator().SetStateObserver(func(snapshot media.StreamSnapshot) {
+		streamID := core.StreamID(fmt.Sprintf("media-%d", snapshot.LeaseID))
+		switch {
+		case snapshot.Owner == media.StreamOwnerCompanion:
+			applyEvent(core.PreviewStarted{StreamID: streamID, EntrypointID: core.EntrypointID(snapshot.EntrypointID)})
+		case snapshot.Owner == media.StreamOwnerIdle:
+			preview := projector.Snapshot().PreviewStream
+			if preview != nil && strings.HasPrefix(string(preview.StreamID), "media-") {
+				applyEvent(core.PreviewStopped{StreamID: preview.StreamID})
+			}
+		}
+	})
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
 		switch {
@@ -226,24 +239,38 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
 	backchannel, err := media.NewUDPBackchannel("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
 	}
 
+	attempt := snapshots.Arm(entrypoint.ID)
 	var bridge *media.AudioBridge
-	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, events.VideoRTP, func(packet *rtp.Packet) {
+	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, func(packet *rtp.Packet) {
+		if attempt != nil {
+			attempt.Consume(packet)
+		}
+		if events.VideoRTP != nil {
+			events.VideoRTP(packet)
+		}
+	}, func(packet *rtp.Packet) {
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
 			logger.Warn("bridge intercom speex", "error", err)
 		}
 	}, events.RemoteBYE)
 	if err != nil {
+		if attempt != nil {
+			attempt.Close()
+		}
 		_ = backchannel.Close()
 		return nil, nil, err
 	}
 	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, backchannel, logger, events.Failed)
 	return &bridgeSource{source: source, bridge: bridge}, func() {
+		if attempt != nil {
+			attempt.Close()
+		}
 		closeSource()
 		if err := backchannel.Close(); err != nil {
 			logger.Warn("close udp backchannel", "error", err)

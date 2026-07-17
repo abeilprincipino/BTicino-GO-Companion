@@ -57,6 +57,7 @@ func (t TrackState) Flowing(now time.Time, timeout time.Duration) bool {
 }
 
 type StreamSnapshot struct {
+	LeaseID      uint64
 	Owner        StreamOwner
 	EntrypointID string
 	DevAddr      string
@@ -86,6 +87,7 @@ type ManagedSourceBackchannel interface {
 }
 
 type ManagedSourceFactory func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error)
+type StreamStateObserver func(StreamSnapshot)
 
 // StreamCoordinator is the sole owner of the intercom's single media source.
 // OpenWebNet frames describe requested tracks; RTP metadata proves actual flow.
@@ -102,7 +104,19 @@ type StreamCoordinator struct {
 	cleanup        func()
 	starting       bool
 	stopping       bool
+	observer       StreamStateObserver
 	logger         *slog.Logger
+}
+
+// SetStateObserver receives source transitions after their coordinator state is committed.
+func (c *StreamCoordinator) SetStateObserver(observer StreamStateObserver) {
+	c.mu.Lock()
+	c.observer = observer
+	snapshot := c.snapshot
+	c.mu.Unlock()
+	if observer != nil {
+		observer(snapshot)
+	}
 }
 
 func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *StreamCoordinator {
@@ -128,7 +142,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	c.leaseID = c.nextID
 	c.controlLeaseID = 0
 	c.starting = true
-	c.snapshot = StreamSnapshot{Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
+	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
 	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "dev_addr", entrypoint.DevAddr, "health", StreamHealthStarting)
@@ -186,10 +200,17 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 		return nil, err
 	}
 	c.mu.Lock()
+	var snapshot StreamSnapshot
+	var observer StreamStateObserver
 	if c.leaseID == lease.id {
 		c.starting = false
+		snapshot = c.snapshot
+		observer = c.observer
 	}
 	c.mu.Unlock()
+	if observer != nil {
+		observer(snapshot)
+	}
 	go c.watch(ctx, lease)
 	return lease, nil
 }
@@ -290,13 +311,18 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		cleanup()
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.leaseID == lease.id {
 		c.leaseID = 0
 		c.controlLeaseID = 0
 		c.starting = false
 		c.stopping = false
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
+	}
+	snapshot := c.snapshot
+	observer := c.observer
+	c.mu.Unlock()
+	if observer != nil {
+		observer(snapshot)
 	}
 	if closeErr != nil {
 		c.logger.Error("stream teardown failed", "lease_id", lease.id, "reason", reason, "error", fmt.Errorf("close managed source: %w", closeErr))

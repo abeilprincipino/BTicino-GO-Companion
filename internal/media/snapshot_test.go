@@ -1,130 +1,101 @@
 package media
 
 import (
-	"bticino-go-companion/internal/core"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
-func TestSnapshotService_CaptureUsesActiveDistributorVideo(t *testing.T) {
-	t.Parallel()
+func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
+	image := []byte{0xff, 0xd8, 1, 2, 3, 0xff, 0xd9}
+	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
+		return &fakeSnapshotProcess{}, os.WriteFile(output, append([]byte("noise"), image...), 0o600)
+	}))
+	captured := make(chan struct{}, 1)
+	manager.SetOnCaptured(func() { captured <- struct{}{} })
 
-	distributor := NewDistributor()
-
-	source := testSource()
-	if err := distributor.RegisterSource(source); err != nil {
-		t.Fatal(err)
+	attempt := manager.Arm("front-door")
+	if attempt == nil {
+		t.Fatal("Arm() = nil")
 	}
+	attempt.Consume(testRTPPacket(1))
 
-	capture := &fakeSnapshotCapture{image: []byte("jpeg")}
-	capture.wait = func() {
-		distributor.Distribute(source, testRTPPacket(source.SSRC))
+	got := waitForSnapshot(t, manager, "front-door")
+	if string(got) != string(image) {
+		t.Fatalf("Latest() = %v, want %v", got, image)
 	}
-	openwebnet := &fakeOpenWebNetVideo{}
-	service := NewSnapshotService(distributor, fakeGStreamerSnapshot{capture: capture}, openwebnet)
-
-	image, err := service.Capture(context.Background(), source.EntrypointID)
-	if err != nil {
-		t.Fatal(err)
+	select {
+	case <-captured:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot capture callback was not invoked")
 	}
-
-	if string(image) != "jpeg" {
-		t.Fatalf("Capture() = %q, want jpeg", image)
-	}
-
-	if openwebnet.calls != 0 {
-		t.Fatalf("OpenWebNet calls = %d, want 0", openwebnet.calls)
-	}
-
-	if !capture.closed {
-		t.Fatal("capture was not closed")
-	}
-
-	if capture.packets != 1 {
-		t.Fatalf("capture packets = %d, want 1", capture.packets)
+	if path, ok := manager.path("front-door"); !ok || filepath.Base(path) != "front-door.jpg" {
+		t.Fatalf("path() = %q, %v", path, ok)
 	}
 }
 
-func TestSnapshotService_CaptureRequestsOpenWebNetVideoWhenIdle(t *testing.T) {
-	t.Parallel()
+func TestSnapshotManagerDoesNotPublishCancelledGeneration(t *testing.T) {
+	started := make(chan struct{})
+	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(ctx context.Context, output string) (snapshotProcess, error) {
+		close(started)
+		go func() {
+			<-ctx.Done()
+			_ = os.WriteFile(output, []byte{0xff, 0xd8, 1, 0xff, 0xd9}, 0o600)
+		}()
+		return &fakeSnapshotProcess{}, nil
+	}))
 
-	distributor := NewDistributor()
-	entrypointID := core.EntrypointID("front-door")
-	source := testSource()
-	capture := &fakeSnapshotCapture{image: []byte("jpeg")}
-	openwebnet := &fakeOpenWebNetVideo{start: func(context.Context, core.EntrypointID) error {
-		return distributor.RegisterSource(source)
-	}}
-
-	service := NewSnapshotService(distributor, fakeGStreamerSnapshot{capture: capture}, openwebnet)
-	if _, err := service.Capture(context.Background(), entrypointID); err != nil {
-		t.Fatal(err)
-	}
-
-	if openwebnet.calls != 1 {
-		t.Fatalf("OpenWebNet calls = %d, want 1", openwebnet.calls)
-	}
-
-	if openwebnet.entrypointID != entrypointID {
-		t.Fatalf("OpenWebNet entrypoint = %q, want %q", openwebnet.entrypointID, entrypointID)
+	attempt := manager.Arm("front-door")
+	<-started
+	attempt.Close()
+	time.Sleep(2 * snapshotPollInterval)
+	if _, err := manager.Latest("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Fatalf("Latest() error = %v, want %v", err, ErrSnapshotNotFound)
 	}
 }
 
-func TestSnapshotService_CaptureRequiresDistributorVideoAfterOpenWebNetRequest(t *testing.T) {
-	t.Parallel()
-
-	service := NewSnapshotService(NewDistributor(), fakeGStreamerSnapshot{capture: &fakeSnapshotCapture{}}, &fakeOpenWebNetVideo{})
-	if _, err := service.Capture(context.Background(), "front-door"); !errors.Is(err, ErrSnapshotNoVideo) {
-		t.Fatalf("Capture() error = %v, want %v", err, ErrSnapshotNoVideo)
+func TestFirstJPEGExtractsOneCompleteFrame(t *testing.T) {
+	image, ok := firstJPEG([]byte{1, 0xff, 0xd8, 2, 0xff, 0xd9, 3, 0xff, 0xd8, 4, 0xff, 0xd9})
+	if !ok || string(image) != string([]byte{0xff, 0xd8, 2, 0xff, 0xd9}) {
+		t.Fatalf("firstJPEG() = %v, %v", image, ok)
 	}
 }
 
-type fakeGStreamerSnapshot struct {
-	capture SnapshotCapture
-}
-
-func (g fakeGStreamerSnapshot) StartSnapshot(context.Context) (SnapshotCapture, error) {
-	return g.capture, nil
-}
-
-type fakeSnapshotCapture struct {
-	image   []byte
-	closed  bool
-	packets int
-	wait    func()
-}
-
-func (c *fakeSnapshotCapture) Consume(Packet) {
-	c.packets++
-}
-
-func (c *fakeSnapshotCapture) Wait(context.Context) ([]byte, error) {
-	if c.wait != nil {
-		c.wait()
+func TestSnapshotManagerRejectsUnsafeEntrypointFilename(t *testing.T) {
+	manager := NewSnapshotManager(t.TempDir(), nil)
+	if _, ok := manager.path("../gate1"); ok {
+		t.Fatal("path() accepted traversal")
 	}
-
-	return c.image, nil
 }
 
-func (c *fakeSnapshotCapture) Close() error {
-	c.closed = true
+func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if image, err := manager.Latest(entrypointID); err == nil {
+			return image
+		}
+		time.Sleep(snapshotPollInterval)
+	}
+	t.Fatal("snapshot was not published")
 	return nil
 }
 
-type fakeOpenWebNetVideo struct {
-	calls        int
-	entrypointID core.EntrypointID
-	start        func(context.Context, core.EntrypointID) error
+type snapshotRunnerFunc func(context.Context, string) (snapshotProcess, error)
+
+func (f snapshotRunnerFunc) Start(ctx context.Context, output string) (snapshotProcess, error) {
+	return f(ctx, output)
 }
 
-func (o *fakeOpenWebNetVideo) StartVideo(ctx context.Context, entrypointID core.EntrypointID) error {
-	o.calls++
+type fakeSnapshotProcess struct {
+	once sync.Once
+}
 
-	o.entrypointID = entrypointID
-	if o.start == nil {
-		return nil
-	}
-
-	return o.start(ctx, entrypointID)
+func (p *fakeSnapshotProcess) Close() error {
+	p.once.Do(func() {})
+	return nil
 }

@@ -118,7 +118,7 @@ func writeCommandError(w http.ResponseWriter, err error) {
 	code := "command_failed"
 
 	switch {
-	case errors.Is(err, system.ErrRuntimeUnavailable), errors.Is(err, system.ErrUpdateUnavailable), errors.Is(err, system.ErrServiceNotAllowed), errors.Is(err, media.ErrSnapshotUnavailable), errors.Is(err, media.ErrSnapshotNoVideo):
+	case errors.Is(err, system.ErrRuntimeUnavailable), errors.Is(err, system.ErrUpdateUnavailable), errors.Is(err, system.ErrServiceNotAllowed), errors.Is(err, media.ErrSnapshotUnavailable):
 		status = http.StatusServiceUnavailable
 		code = "unavailable"
 	}
@@ -314,8 +314,12 @@ func (s *Server) snapshotLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	image, err := s.snapshot.Capture(r.Context(), core.EntrypointID(r.PathValue("id")))
+	image, err := s.snapshot.Latest(r.PathValue("id"))
 	if err != nil {
+		if errors.Is(err, media.ErrSnapshotNotFound) {
+			writeError(w, http.StatusNotFound, "snapshot_not_found", "snapshot is not available yet")
+			return
+		}
 		writeCommandError(w, err)
 		return
 	}

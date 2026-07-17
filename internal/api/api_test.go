@@ -309,6 +309,30 @@ func TestServer_WebRTCContract(t *testing.T) {
 
 }
 
+func TestServer_SnapshotLatest(t *testing.T) {
+	server, _ := newTestServer(t)
+	server.SetSnapshot(snapshotRecorder{image: []byte{0xff, 0xd8, 1, 0xff, 0xd9}})
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v3/entrypoints/main/snapshot/latest.jpg", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/jpeg" || string(response.Body.Bytes()) != string([]byte{0xff, 0xd8, 1, 0xff, 0xd9}) {
+		t.Fatalf("snapshot response = %d, headers = %#v, body = %v", response.Code, response.Header(), response.Body.Bytes())
+	}
+
+	server.SetSnapshot(snapshotRecorder{err: media.ErrSnapshotNotFound})
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing snapshot response = %d", response.Code)
+	}
+}
+
 func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +448,15 @@ type failingConn struct{}
 
 type unlockRecorder struct {
 	entrypoint core.EntrypointID
+}
+
+type snapshotRecorder struct {
+	image []byte
+	err   error
+}
+
+func (r snapshotRecorder) Latest(string) ([]byte, error) {
+	return r.image, r.err
 }
 
 type webRTCRecorder struct {

@@ -42,5 +42,5 @@ type WebRTCControl interface {
 }
 
 type SnapshotControl interface {
-	Capture(ctx context.Context, entrypointID core.EntrypointID) ([]byte, error)
+	Latest(entrypointID string) ([]byte, error)
 }
