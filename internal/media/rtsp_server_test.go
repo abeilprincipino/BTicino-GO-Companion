@@ -7,19 +7,18 @@ import (
 	"testing"
 
 	"github.com/bluenviron/gortsplib/v5"
-	"github.com/pion/rtp"
 )
 
 func TestRTSPServerUsesConfiguredEntrypointRouteAndDevAddr(t *testing.T) {
 	t.Parallel()
 
 	var started config.Entrypoint
-	source := &fakeRTSPSource{}
+	source := &fakeManagedSource{}
 	server := testRTSPServer(t, []config.Entrypoint{
 		{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}},
 		{ID: "gate2", DevAddr: "21", Capabilities: config.Capabilities{Stream: true}},
-	}, func(entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (RTSPSource, func(), error) {
-		if videoPacket == nil || audioPacket == nil {
+	}, func(entrypoint config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
+		if events.VideoRTP == nil || events.AudioRTP == nil || events.RemoteBYE == nil {
 			t.Fatal("source packet callback is nil")
 		}
 		started = entrypoint
@@ -44,11 +43,11 @@ func TestRTSPServerUsesConfiguredEntrypointRouteAndDevAddr(t *testing.T) {
 func TestRTSPServerRejectsDifferentEntrypointWhileSourceActive(t *testing.T) {
 	t.Parallel()
 
-	source := &fakeRTSPSource{}
+	source := &fakeManagedSource{}
 	server := testRTSPServer(t, []config.Entrypoint{
 		{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}},
 		{ID: "gate2", DevAddr: "21", Capabilities: config.Capabilities{Stream: true}},
-	}, func(config.Entrypoint, func(*rtp.Packet), func(*rtp.Packet)) (RTSPSource, func(), error) {
+	}, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
 		return source, nil, nil
 	})
 
@@ -57,12 +56,24 @@ func TestRTSPServerRejectsDifferentEntrypointWhileSourceActive(t *testing.T) {
 		t.Fatalf("first play = response %#v, error %v", response, err)
 	}
 	response, err := server.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "doorbell-gate2", Session: &gortsplib.ServerSession{}})
-	if response.StatusCode != 400 || !errors.Is(err, ErrEntrypointSwitchBlocked) {
+	if response.StatusCode != 400 || !errors.Is(err, ErrStreamBusy) {
 		t.Fatalf("second play = response %#v, error %v", response, err)
 	}
 }
 
-func testRTSPServer(t *testing.T, entrypoints []config.Entrypoint, factory RTSPSourceFactory) *RTSPServer {
+func TestRTSPServerRejectsExternalStream(t *testing.T) {
+	t.Parallel()
+	server := testRTSPServer(t, []config.Entrypoint{{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}}}, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return &fakeManagedSource{}, nil, nil
+	})
+	server.ObserveControlTrack(true)
+	response, err := server.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "doorbell-gate1", Session: &gortsplib.ServerSession{}})
+	if response.StatusCode != 400 || !errors.Is(err, ErrExternalStream) {
+		t.Fatalf("play while external stream active = response %#v, error %v", response, err)
+	}
+}
+
+func testRTSPServer(t *testing.T, entrypoints []config.Entrypoint, factory ManagedSourceFactory) *RTSPServer {
 	t.Helper()
 	server, err := NewRTSPServer(nil, "", entrypoints, factory)
 	if err != nil {
@@ -72,10 +83,10 @@ func testRTSPServer(t *testing.T, entrypoints []config.Entrypoint, factory RTSPS
 	return server
 }
 
-type fakeRTSPSource struct {
+type fakeManagedSource struct {
 	starts int
 	closes int
 }
 
-func (s *fakeRTSPSource) Start(context.Context) error { s.starts++; return nil }
-func (s *fakeRTSPSource) Close(context.Context) error { s.closes++; return nil }
+func (s *fakeManagedSource) Start(context.Context) error { s.starts++; return nil }
+func (s *fakeManagedSource) Close(context.Context) error { s.closes++; return nil }

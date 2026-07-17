@@ -48,6 +48,7 @@ type AudioBridge struct {
 	gstreamer   GStreamerAudio
 	opusOutput  func(*rtp.Packet)
 	backchannel Backchannel
+	logger      *slog.Logger
 	pipeline    AudioPipeline
 	cancel      context.CancelFunc
 	done        chan struct{}
@@ -57,11 +58,16 @@ func NewAudioBridge(
 	gstreamer GStreamerAudio,
 	opusOutput func(*rtp.Packet),
 	backchannel Backchannel,
+	logger *slog.Logger,
 ) *AudioBridge {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &AudioBridge{
 		gstreamer:   gstreamer,
 		opusOutput:  opusOutput,
 		backchannel: backchannel,
+		logger:      logger.With("component", "media.audio"),
 	}
 }
 
@@ -77,8 +83,10 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 		return ErrAudioBridgeStarted
 	}
 
+	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink", "input_codec", "Speex/8000", "output_codec", "Opus/48000")
 	pipeline, err := b.gstreamer.StartAudioBridge(ctx)
 	if err != nil {
+		b.logger.ErrorContext(ctx, "audio bridge start failed", "error", err)
 		return err
 	}
 
@@ -92,6 +100,7 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 
 	b.done = make(chan struct{})
 	go b.forward(runCtx, pipeline, b.done)
+	b.logger.InfoContext(ctx, "audio bridge started")
 
 	return nil
 }
@@ -107,6 +116,7 @@ func (b *AudioBridge) WriteIntercomSpeex(packet *rtp.Packet) error {
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
 	}
+	b.logger.Info("audio bridge stopping")
 	return pipeline.WriteIntercomSpeex(packet)
 }
 
@@ -148,7 +158,12 @@ func (b *AudioBridge) Stop() error {
 
 	<-done
 
-	return err
+	if err != nil {
+		b.logger.Error("audio bridge stop failed", "error", err)
+		return err
+	}
+	b.logger.Info("audio bridge stopped")
+	return nil
 }
 
 func (b *AudioBridge) forward(ctx context.Context, pipeline AudioPipeline, done chan struct{}) {
@@ -222,7 +237,8 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 			_ = p.Close()
 			return nil, fmt.Errorf("start audio bridge pipeline: %w", err)
 		}
-		go p.wait(command)
+		g.logger.Debug("audio bridge pipeline started", "pipeline", audioPipelineName(index), "generation", 1)
+		go p.wait(command, audioPipelineName(index))
 	}
 	go p.read(p.opusConn, audioBridgeOpusPT, p.opusOut)
 	go p.read(p.speexConn, 97, p.speexOut)
@@ -238,13 +254,28 @@ type gstreamerAudioPipeline struct {
 	closed                               bool
 }
 
-func (p *gstreamerAudioPipeline) wait(command *exec.Cmd) {
+func (p *gstreamerAudioPipeline) wait(command *exec.Cmd, name string) {
 	err := command.Wait()
 	p.mu.Lock()
 	closed := p.closed
 	p.mu.Unlock()
 	if !closed {
-		p.logger.Error("audio bridge pipeline exited", "error", err)
+		p.logger.Error("audio bridge pipeline exited", "pipeline", name, "error", err)
+	}
+}
+
+func audioPipelineName(index int) string {
+	switch index {
+	case 0:
+		return "downlink-speex-decode"
+	case 1:
+		return "downlink-opus-encode"
+	case 2:
+		return "uplink-opus-decode"
+	case 3:
+		return "uplink-speex-encode"
+	default:
+		return "unknown"
 	}
 }
 
@@ -285,6 +316,7 @@ func (p *gstreamerAudioPipeline) Close() error {
 		return nil
 	}
 	p.closed = true
+	p.logger.Info("audio bridge pipeline stopping")
 	for _, conn := range []*net.UDPConn{p.opusConn, p.speexConn, p.speexIn, p.opusIn} {
 		if conn != nil {
 			_ = conn.Close()

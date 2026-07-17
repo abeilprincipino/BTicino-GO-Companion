@@ -25,7 +25,10 @@ type Listener struct {
 	mapper *Mapper
 	logger *slog.Logger
 	trace  *Trace
+	frameObserver func(string)
 }
+
+func (l *Listener) SetFrameObserver(observer func(string)) { l.frameObserver = observer }
 
 func NewListener(entrypoints []config.Entrypoint, logger *slog.Logger, trace *Trace) *Listener {
 	if logger == nil {
@@ -64,6 +67,9 @@ func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
 		message, err := l.parser.Parse(buf[:n])
 		if err != nil {
 			continue
+		}
+		if l.frameObserver != nil {
+			l.frameObserver(message.Raw)
 		}
 		events := l.mapper.Map(message)
 		l.trace.Record(message, len(events))

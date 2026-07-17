@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
@@ -24,20 +23,13 @@ var (
 	ErrEntrypointSwitchBlocked = errors.New("media: another entrypoint source is active")
 )
 
-type RTSPSource interface {
-	Start(context.Context) error
-	Close(context.Context) error
-}
-
-// RTSPSourceFactory creates the selected entrypoint's source and forwards its video and audio RTP.
-type RTSPSourceFactory func(config.Entrypoint, func(*rtp.Packet), func(*rtp.Packet)) (RTSPSource, func(), error)
-
 type rtspRoute struct {
 	entrypoint config.Entrypoint
 }
 
 type rtspReader struct {
 	route rtspRoute
+	lease *StreamLease
 }
 
 // RTSPServer maps every configured stream entrypoint to doorbell-<entrypoint-id>.
@@ -48,20 +40,17 @@ type RTSPServer struct {
 	logger        *slog.Logger
 	address       string
 	routes        map[string]rtspRoute
-	sourceFactory RTSPSourceFactory
 	server        *gortsplib.Server
 	ctx           context.Context
+	coordinator   *StreamCoordinator
 
 	stream  *gortsplib.ServerStream
 	video   *description.Media
 	audio   *description.Media
-	source  RTSPSource
-	cleanup func()
-	active  rtspRoute
 	readers map[*gortsplib.ServerSession]rtspReader
 }
 
-func NewRTSPServer(logger *slog.Logger, address string, entrypoints []config.Entrypoint, sourceFactory RTSPSourceFactory) (*RTSPServer, error) {
+func NewRTSPServer(logger *slog.Logger, address string, entrypoints []config.Entrypoint, sourceFactory ManagedSourceFactory) (*RTSPServer, error) {
 	if sourceFactory == nil {
 		return nil, fmt.Errorf("media: rtsp source factory is required")
 	}
@@ -92,10 +81,16 @@ func NewRTSPServer(logger *slog.Logger, address string, entrypoints []config.Ent
 		logger:        logger.With("component", "media.rtsp"),
 		address:       address,
 		routes:        routes,
-		sourceFactory: sourceFactory,
 		readers:       make(map[*gortsplib.ServerSession]rtspReader),
+		coordinator:   NewStreamCoordinator(logger, sourceFactory),
 	}, nil
 }
+
+func (s *RTSPServer) ObserveControlTrack(video bool) { s.coordinator.ObserveControlTrack(video) }
+
+func (s *RTSPServer) ObserveControlStop() { s.coordinator.ObserveControlStop() }
+
+func (s *RTSPServer) StreamSnapshot() StreamSnapshot { return s.coordinator.Snapshot() }
 
 func (s *RTSPServer) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -123,11 +118,11 @@ func (s *RTSPServer) Close() error {
 	s.mu.Lock()
 	server, stream := s.server, s.stream
 	s.server, s.stream, s.video, s.audio = nil, nil, nil, nil
+	readers := s.readers
 	s.readers = make(map[*gortsplib.ServerSession]rtspReader)
-	source, cleanup := s.takeSourceLocked()
 	s.mu.Unlock()
-	if err := stopRTSPSource(source, cleanup); err != nil {
-		return err
+	for _, reader := range readers {
+		s.coordinator.Release(reader.lease)
 	}
 	if stream != nil {
 		stream.Close()
@@ -176,15 +171,15 @@ func (s *RTSPServer) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respon
 		}
 		return &base.Response{StatusCode: base.StatusOK}, nil
 	}
-	if s.source != nil && s.active.entrypoint.ID != route.entrypoint.ID {
-		s.logger.Warn("rtsp play rejected; another entrypoint is active", "requested_entrypoint_id", route.entrypoint.ID, "active_entrypoint_id", s.active.entrypoint.ID)
-		return &base.Response{StatusCode: base.StatusBadRequest}, ErrEntrypointSwitchBlocked
+	lease, err := s.coordinator.Acquire(s.ctx, route.entrypoint, SourceEvents{
+		VideoRTP: s.writeVideoRTP,
+		AudioRTP: s.writeAudioRTP,
+	})
+	if err != nil {
+		s.logger.Warn("rtsp play rejected; stream unavailable", "requested_entrypoint_id", route.entrypoint.ID, "error", err)
+		return &base.Response{StatusCode: base.StatusBadRequest}, err
 	}
-	if err := s.startSourceLocked(route); err != nil {
-		s.logger.Error("start rtsp source", "entrypoint_id", route.entrypoint.ID, "dev_addr", route.entrypoint.DevAddr, "error", err)
-		return &base.Response{StatusCode: base.StatusInternalServerError}, nil
-	}
-	s.readers[ctx.Session] = rtspReader{route: route}
+	s.readers[ctx.Session] = rtspReader{route: route, lease: lease}
 	s.logger.Info("rtsp reader started", "entrypoint_id", route.entrypoint.ID, "dev_addr", route.entrypoint.DevAddr, "readers", len(s.readers))
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
@@ -203,12 +198,9 @@ func (s *RTSPServer) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCt
 		s.logger.Info("rtsp reader stopped", "entrypoint_id", reader.route.entrypoint.ID, "readers", readers)
 		return
 	}
-	source, cleanup := s.takeSourceLocked()
 	s.mu.Unlock()
-	s.logger.Info("rtsp last reader stopped; stopping source", "entrypoint_id", reader.route.entrypoint.ID)
-	if err := stopRTSPSource(source, cleanup); err != nil {
-		s.logger.Warn("stop rtsp source", "error", err)
-	}
+	s.coordinator.Release(reader.lease)
+	s.logger.Info("rtsp reader stopped", "entrypoint_id", reader.route.entrypoint.ID)
 }
 
 func (s *RTSPServer) ensureStreamLocked() error {
@@ -228,33 +220,6 @@ func (s *RTSPServer) ensureStreamLocked() error {
 	return nil
 }
 
-func (s *RTSPServer) startSourceLocked(route rtspRoute) error {
-	if s.source != nil {
-		return nil
-	}
-	source, cleanup, err := s.sourceFactory(route.entrypoint, s.writeVideoRTP, s.writeAudioRTP)
-	if err != nil {
-		return fmt.Errorf("create source: %w", err)
-	}
-	if source == nil {
-		return ErrSourceUnavailable
-	}
-	if err := source.Start(s.ctx); err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return fmt.Errorf("start source: %w", err)
-	}
-	s.source, s.cleanup, s.active = source, cleanup, route
-	s.logger.Info("rtsp source started", "entrypoint_id", route.entrypoint.ID, "dev_addr", route.entrypoint.DevAddr)
-	return nil
-}
-
-func (s *RTSPServer) takeSourceLocked() (RTSPSource, func()) {
-	source, cleanup := s.source, s.cleanup
-	s.source, s.cleanup, s.active = nil, nil, rtspRoute{}
-	return source, cleanup
-}
 
 func (s *RTSPServer) writeVideoRTP(packet *rtp.Packet) {
 	s.writeRTP(s.video, packet)
@@ -310,20 +275,4 @@ func rtspPathToken(id string) string {
 		}
 	}
 	return strings.Trim(token.String(), "-")
-}
-
-func stopRTSPSource(source RTSPSource, cleanup func()) error {
-	if source == nil {
-		return nil
-	}
-	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	err := source.Close(closeCtx)
-	cancel()
-	if cleanup != nil {
-		cleanup()
-	}
-	if err != nil {
-		return fmt.Errorf("stop rtsp source: %w", err)
-	}
-	return nil
 }

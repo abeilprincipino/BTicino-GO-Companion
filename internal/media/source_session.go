@@ -106,14 +106,15 @@ func (s *SourceSession) Close(ctx context.Context) error {
 // It deliberately does not send BYE because the peer has already done so.
 func (s *SourceSession) RemoteDialogEnded() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.started {
+		s.mu.Unlock()
 		return
 	}
 
 	s.started = false
 	s.logger.Info("source session stopped by remote sip dialog")
 	s.closeReceivers()
+	s.mu.Unlock()
 }
 
 func (s *SourceSession) closeReceivers() {

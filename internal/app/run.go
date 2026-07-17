@@ -64,8 +64,8 @@ func run(
 	projector := core.NewProjector()
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
-	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (media.RTSPSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, entrypoint, videoPacket, audioPacket)
+	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+		return newBridgeSource(configStore.Snapshot(), logger, entrypoint, events)
 	})
 	if err != nil {
 		return fmt.Errorf("create rtsp server: %w", err)
@@ -154,6 +154,16 @@ func run(
 		server.BroadcastEvent(map[string]any{"type": event.Type()})
 	}
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
+	listener.SetFrameObserver(func(frame string) {
+		switch {
+		case openwebnet.IsStreamStartVideo(frame):
+			rtspServer.ObserveControlTrack(true)
+		case openwebnet.IsStreamStartAudio(frame):
+			rtspServer.ObserveControlTrack(false)
+		case openwebnet.IsStreamStop(frame), openwebnet.IsFreeAVResources(frame):
+			rtspServer.ObserveControlStop()
+		}
+	})
 	go func() {
 		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "error", err)
@@ -194,17 +204,17 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (media.RTSPSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
 	var bridge *media.AudioBridge
-	source, closeSource, err := newSource(cfg, logger, entrypoint, videoPacket, func(packet *rtp.Packet) {
+	source, closeSource, err := newSource(cfg, logger, entrypoint, events.VideoRTP, func(packet *rtp.Packet) {
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
 			logger.Warn("bridge intercom speex", "error", err)
 		}
-	})
+	}, events.RemoteBYE)
 	if err != nil {
 		return nil, nil, err
 	}
-	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), audioPacket, nil)
+	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, nil, logger)
 	return &bridgeSource{source: source, bridge: bridge}, closeSource, nil
 }
 
@@ -232,7 +242,7 @@ func (s *bridgeSource) Close(ctx context.Context) error {
 	return err
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet)) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -253,6 +263,9 @@ func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypo
 		Logger: logger,
 		RemoteDialogEnded: func() {
 			source.RemoteDialogEnded()
+			if remoteBYE != nil {
+				remoteBYE()
+			}
 		},
 	})
 	if err != nil {

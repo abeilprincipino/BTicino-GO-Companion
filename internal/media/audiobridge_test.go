@@ -19,7 +19,7 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 	backchannel := &recordingBackchannel{written: make(chan struct{}, 1)}
 	opus := make(chan *rtp.Packet, 1)
 
-	bridge := NewAudioBridge(fakeGStreamerAudio{pipeline: pipeline}, func(packet *rtp.Packet) { opus <- packet }, backchannel)
+	bridge := NewAudioBridge(fakeGStreamerAudio{pipeline: pipeline}, func(packet *rtp.Packet) { opus <- packet }, backchannel, nil)
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 func TestAudioBridge_StartRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	bridge := NewAudioBridge(nil, nil, nil)
+	bridge := NewAudioBridge(nil, nil, nil, nil)
 	if err := bridge.Start(context.Background()); !errors.Is(err, ErrAudioBridgeUnavailable) {
 		t.Fatalf("Start() error = %v, want %v", err, ErrAudioBridgeUnavailable)
 	}
