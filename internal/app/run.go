@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
@@ -64,8 +65,25 @@ func run(
 	projector := core.NewProjector()
 	openWebNetTrace := openwebnet.NewTrace(0)
 	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
-	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, configStore.Snapshot().Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, entrypoint, events)
+	initialConfig := configStore.Snapshot()
+	if len(initialConfig.Companion.Entrypoints) == 0 {
+		return errors.New("create sip runtime: no entrypoints configured")
+	}
+	mediaConfig, err := media.ResolveSourceConfig(initialConfig.Companion.Model, initialConfig.Companion.Entrypoints[0])
+	if err != nil {
+		return fmt.Errorf("resolve sip runtime source: %w", err)
+	}
+	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{Target: mediaConfig.Target, Domain: signaling.DiscoverFlexisipDomain()})
+	if err != nil {
+		return fmt.Errorf("create sip runtime: %w", err)
+	}
+	defer func() {
+		if err := dialer.Close(); err != nil {
+			logger.Warn("close sip runtime", "error", err)
+		}
+	}()
+	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events)
 	})
 	if err != nil {
 		return fmt.Errorf("create rtsp server: %w", err)
@@ -107,6 +125,7 @@ func run(
 	snapshot := media.NewSnapshotService(nil, nil, nil)
 
 	authStore := auth.NewStore(configStore)
+	authStore.SetLogger(logger)
 	mdns := discovery.NewService(nil)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
@@ -135,7 +154,7 @@ func run(
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	webUI := webui.New(configStore, logger, restartCompanion, setLogLevel)
+	webUI := webui.New(configStore, authStore, logger, restartCompanion, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
 	webUI.SetDiagnostics(diagnosticService)
 	webUI.SetUpdate(updater)
@@ -204,9 +223,9 @@ func run(
 	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
 	var bridge *media.AudioBridge
-	source, closeSource, err := newSource(cfg, logger, entrypoint, events.VideoRTP, func(packet *rtp.Packet) {
+	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, events.VideoRTP, func(packet *rtp.Packet) {
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
 			logger.Warn("bridge intercom speex", "error", err)
 		}
@@ -228,7 +247,7 @@ func (s *bridgeSource) Start(ctx context.Context) error {
 		return fmt.Errorf("start audio bridge: %w", err)
 	}
 	if err := s.source.Start(ctx); err != nil {
-		_ = s.bridge.Stop()
+		_ = s.bridge.StopContext(ctx)
 		return err
 	}
 	return nil
@@ -236,13 +255,13 @@ func (s *bridgeSource) Start(ctx context.Context) error {
 
 func (s *bridgeSource) Close(ctx context.Context) error {
 	err := s.source.Close(ctx)
-	if bridgeErr := s.bridge.Stop(); bridgeErr != nil && err == nil {
+	if bridgeErr := s.bridge.StopContext(ctx); bridgeErr != nil && err == nil {
 		err = bridgeErr
 	}
 	return err
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -256,20 +275,20 @@ func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypo
 		"target", sourceConfig.Target,
 	)
 
+	if dialer == nil {
+		return nil, nil, errors.New("sip runtime is unavailable")
+	}
 	var source *media.SourceSession
-	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{
-		Target: sourceConfig.Target,
-		Domain: signaling.DiscoverFlexisipDomain(),
-		Logger: logger,
-		RemoteDialogEnded: func() {
+	var sourceLive atomic.Bool
+	if callbackSetter, ok := dialer.(interface{ SetRemoteDialogEnded(func()) }); ok {
+		callbackSetter.SetRemoteDialogEnded(func() {
 			source.RemoteDialogEnded()
 			if remoteBYE != nil {
 				remoteBYE()
 			}
-		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("create sip dialer: %w", err)
+		})
+	} else {
+		return nil, nil, errors.New("sip runtime does not support remote bye callback")
 	}
 	source = media.NewSourceSession(
 		logger,
@@ -277,17 +296,23 @@ func newSource(cfg config.Config, logger *slog.Logger, entrypoint config.Entrypo
 		core.EntrypointID(entrypoint.ID),
 		signaling.NewManager("127.0.0.1", dialer, nil),
 		openwebnet.NewAVClient(logger),
-		media.NewVideoRTPReceiver(logger, videoPacket),
-		media.NewAudioRTPReceiver(logger, audioPacket),
+		media.NewVideoRTPReceiver(logger, func(packet *rtp.Packet) {
+			if sourceLive.Load() && videoPacket != nil {
+				videoPacket(packet)
+			}
+		}),
+		media.NewAudioRTPReceiver(logger, func(packet *rtp.Packet) {
+			if sourceLive.Load() && audioPacket != nil {
+				audioPacket(packet)
+			}
+		}),
 	)
+	source.SetStartedCallback(func() { sourceLive.Store(true) })
 	return source, func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := source.Close(closeCtx); err != nil {
 			logger.Warn("close media source", "error", err)
-		}
-		if err := dialer.Close(); err != nil {
-			logger.Warn("close diagnostic sip dialer", "error", err)
 		}
 	}, nil
 }

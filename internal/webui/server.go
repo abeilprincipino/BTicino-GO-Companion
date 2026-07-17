@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/httputil"
@@ -10,6 +11,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -47,6 +49,7 @@ type UpdateProvider interface {
 
 type Server struct {
 	config      *config.Store
+	auth        *auth.Store
 	logger      *slog.Logger
 	restart     RestartFunc
 	setLogLevel func(string) error
@@ -103,12 +106,12 @@ type passwordRequest struct {
 	Password        string `json:"password"`
 }
 
-func New(store *config.Store, logger *slog.Logger, restart RestartFunc, setLogLevel func(string) error) *Server {
+func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restart RestartFunc, setLogLevel func(string) error) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
+	return &Server{config: store, auth: authStore, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
 }
 
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
@@ -122,6 +125,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webui/api/logout", s.handleLogout)
 	mux.HandleFunc("POST /webui/api/password", s.handlePassword)
 	mux.HandleFunc("POST /webui/api/credentials", s.handlePassword)
+	mux.HandleFunc("GET /webui/api/pairing", s.requireReady(s.handlePairing))
+	mux.HandleFunc("POST /webui/api/repair-code", s.requireReady(s.handleRepairCode))
 	mux.HandleFunc("GET /webui/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("PUT /webui/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("POST /webui/api/restart", s.requireReady(s.handleRestart))
@@ -335,6 +340,37 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) handlePairing(w http.ResponseWriter, _ *http.Request) {
+	if s.auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "authentication is unavailable")
+		return
+	}
+	cfg, ok := s.snapshot()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claimed": !s.auth.NeedsClaim(), "claim_code": cfg.Auth.ClaimCode})
+}
+
+func (s *Server) handleRepairCode(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	if s.auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "authentication is unavailable")
+		return
+	}
+	code, expiresAt, err := s.auth.IssueRepairCode()
+	if err != nil {
+		s.logger.Warn("issue repair code", "error", err)
+		writeError(w, http.StatusConflict, "repair code is unavailable")
+		return
+	}
+	s.logger.InfoContext(r.Context(), "webui repair code issued", "expires_at", expiresAt)
+	writeJSON(w, http.StatusOK, map[string]any{"repair_code": code, "expires_at": expiresAt, "ttl_s": int(auth.RepairCodeLifetime.Seconds())})
+}
+
 func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
@@ -402,7 +438,18 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	s.sessions = make(map[string]session)
 	s.mu.Unlock()
 	clearSessionCookie(w)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	response := map[string]any{"ok": true}
+	if current.bootstrap && s.auth != nil {
+		claimCode, err := s.auth.IssueInitialClaimCode()
+		if err != nil && !errors.Is(err, auth.ErrAlreadyClaimed) {
+			s.logger.Error("issue initial claim code", "error", err)
+			writeError(w, http.StatusInternalServerError, "save password failed")
+			return
+		}
+		response["claim_code"] = claimCode
+		s.logger.Info("webui owner setup completed", "claim_code_issued", claimCode != "")
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

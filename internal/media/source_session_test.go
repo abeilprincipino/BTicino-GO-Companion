@@ -72,6 +72,54 @@ func TestSourceSession_RemoteDialogEndedClosesReceiversWithoutSendingBYE(t *test
 	}
 }
 
+func TestSourceSessionCloseCancelsStartupAndCleansUp(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &blockingSourceAV{started: make(chan struct{})}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+
+	startResult := make(chan error, 1)
+	go func() { startResult <- session.Start(context.Background()) }()
+	select {
+	case <-av.started:
+	case <-time.After(time.Second):
+		t.Fatal("source session did not reach AV startup")
+	}
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-startResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context cancellation", err)
+	}
+	if sip.hangups != 1 || video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
+	}
+}
+
+func TestSourceSessionRemoteDialogEndedDuringStartupDoesNotSendBYE(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &blockingSourceAV{started: make(chan struct{})}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+
+	startResult := make(chan error, 1)
+	go func() { startResult <- session.Start(context.Background()) }()
+	select {
+	case <-av.started:
+	case <-time.After(time.Second):
+		t.Fatal("source session did not reach AV startup")
+	}
+
+	session.RemoteDialogEnded()
+	if err := <-startResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context cancellation", err)
+	}
+	if sip.hangups != 0 || video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
+	}
+}
+
 type fakeSourceSIP struct {
 	startCalls int
 	hangups    int
@@ -84,6 +132,14 @@ type fakeSourceAV struct {
 	calls   int
 	highRes bool
 	err     error
+}
+
+type blockingSourceAV struct{ started chan struct{} }
+
+func (a *blockingSourceAV) Start(ctx context.Context, _ bool, _, _ FlowProbe) error {
+	close(a.started)
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func (a *fakeSourceAV) Start(_ context.Context, highRes bool, _, _ FlowProbe) error {

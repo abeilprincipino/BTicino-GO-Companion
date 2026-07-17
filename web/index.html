@@ -33,7 +33,7 @@
 <div id="setupView" class="auth-container hidden">
   <div class="auth-card">
     <h1>Replace Default Account</h1>
-    <p class="auth-subtitle">Set a real username and password</p>
+    <p class="auth-subtitle">Set a real username and password, then use the claim code shown once to pair Home Assistant</p>
     <div id="setupError" class="auth-error"></div>
     <p class="auth-help">The bootstrap login is intentionally temporary. Set a real username and password before config or logs are exposed.</p>
     <form id="setupForm">
@@ -45,7 +45,7 @@
         <label class="form-label">New password</label>
         <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
       </div>
-      <button type="submit" class="btn btn-primary">Save Credentials</button>
+        <button type="submit" class="btn btn-primary">Save and Show Claim Code</button>
     </form>
   </div>
 </div>
@@ -162,9 +162,8 @@
       <div class="flex-between mb-16">
         <div>
           <h1 class="page-title">Home Assistant</h1>
-          <p class="page-desc" style="margin-bottom:0">Pairing and local API credentials</p>
+          <p class="page-desc" style="margin-bottom:0">Pair Home Assistant with a claim code</p>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="saveHomeAssistantConfig(this)">Save</button>
       </div>
       <div class="card section">
         <div class="card-header">Pairing</div>
@@ -173,37 +172,11 @@
           <span class="info-value"><span id="haConfigBadge" class="badge badge-info">-</span></span>
         </div>
         <form id="haConfigForm" onsubmit="return false">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Claim Code</label>
-              <div class="input-toggle-wrap">
-                <input class="form-input" name="claim_code" type="password" autocomplete="off">
-                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
-              </div>
-            </div>
-            <div class="form-group">
-              <label class="form-label">API Bearer Token</label>
-              <div class="input-toggle-wrap">
-                <input class="form-input" name="bearer_token" type="password" autocomplete="off">
-                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
-              </div>
-            </div>
+          <div class="form-group">
+            <label class="form-label">Claim Code</label>
+            <input class="form-input" name="claim_code" type="text" readonly>
           </div>
-          <details class="advanced-section">
-            <summary>Advanced</summary>
-            <div class="advanced-body">
-              <div class="form-row">
-                <div class="form-group">
-                  <label class="form-label">Device ID</label>
-                  <input class="form-input" name="device_id" type="text" autocomplete="off" readonly>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Key ID</label>
-                  <input class="form-input" name="key_id" type="text" autocomplete="off" readonly>
-                </div>
-              </div>
-            </div>
-          </details>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="issueRepairCode()">Issue Repair Code</button>
           <div id="haConfigStatus" class="form-status"></div>
         </form>
       </div>

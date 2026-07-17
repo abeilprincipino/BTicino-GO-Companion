@@ -32,22 +32,27 @@ type rtspReader struct {
 	lease *StreamLease
 }
 
+type rtspStartingReader struct {
+	cancel context.CancelFunc
+}
+
 // RTSPServer maps every configured stream entrypoint to doorbell-<entrypoint-id>.
 // The device has one fixed RTP input, so readers can share one entrypoint source only.
 type RTSPServer struct {
 	mu sync.Mutex
 
-	logger        *slog.Logger
-	address       string
-	routes        map[string]rtspRoute
-	server        *gortsplib.Server
-	ctx           context.Context
-	coordinator   *StreamCoordinator
+	logger      *slog.Logger
+	address     string
+	routes      map[string]rtspRoute
+	server      *gortsplib.Server
+	ctx         context.Context
+	coordinator *StreamCoordinator
 
-	stream  *gortsplib.ServerStream
-	video   *description.Media
-	audio   *description.Media
-	readers map[*gortsplib.ServerSession]rtspReader
+	stream   *gortsplib.ServerStream
+	video    *description.Media
+	audio    *description.Media
+	readers  map[*gortsplib.ServerSession]rtspReader
+	starting map[*gortsplib.ServerSession]rtspStartingReader
 }
 
 func NewRTSPServer(logger *slog.Logger, address string, entrypoints []config.Entrypoint, sourceFactory ManagedSourceFactory) (*RTSPServer, error) {
@@ -78,11 +83,12 @@ func NewRTSPServer(logger *slog.Logger, address string, entrypoints []config.Ent
 		return nil, fmt.Errorf("media: no stream-capable entrypoints")
 	}
 	return &RTSPServer{
-		logger:        logger.With("component", "media.rtsp"),
-		address:       address,
-		routes:        routes,
-		readers:       make(map[*gortsplib.ServerSession]rtspReader),
-		coordinator:   NewStreamCoordinator(logger, sourceFactory),
+		logger:      logger.With("component", "media.rtsp"),
+		address:     address,
+		routes:      routes,
+		readers:     make(map[*gortsplib.ServerSession]rtspReader),
+		starting:    make(map[*gortsplib.ServerSession]rtspStartingReader),
+		coordinator: NewStreamCoordinator(logger, sourceFactory),
 	}, nil
 }
 
@@ -120,7 +126,12 @@ func (s *RTSPServer) Close() error {
 	s.server, s.stream, s.video, s.audio = nil, nil, nil, nil
 	readers := s.readers
 	s.readers = make(map[*gortsplib.ServerSession]rtspReader)
+	starting := s.starting
+	s.starting = make(map[*gortsplib.ServerSession]rtspStartingReader)
 	s.mu.Unlock()
+	for _, reader := range starting {
+		reader.cancel()
+	}
 	for _, reader := range readers {
 		s.coordinator.Release(reader.lease)
 	}
@@ -164,41 +175,72 @@ func (s *RTSPServer) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respon
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if reader, exists := s.readers[ctx.Session]; exists {
+		s.mu.Unlock()
 		if reader.route.entrypoint.ID != route.entrypoint.ID {
 			return &base.Response{StatusCode: base.StatusBadRequest}, ErrEntrypointSwitchBlocked
 		}
 		return &base.Response{StatusCode: base.StatusOK}, nil
 	}
-	lease, err := s.coordinator.Acquire(s.ctx, route.entrypoint, SourceEvents{
+	if _, exists := s.starting[ctx.Session]; exists {
+		s.mu.Unlock()
+		return &base.Response{StatusCode: base.StatusBadRequest}, ErrStreamBusy
+	}
+	runCtx, cancel := context.WithCancel(s.ctx)
+	s.starting[ctx.Session] = rtspStartingReader{cancel: cancel}
+	s.mu.Unlock()
+	lease, err := s.coordinator.Acquire(runCtx, route.entrypoint, SourceEvents{
 		VideoRTP: s.writeVideoRTP,
 		AudioRTP: s.writeAudioRTP,
 	})
+	s.mu.Lock()
+	_, active := s.starting[ctx.Session]
+	delete(s.starting, ctx.Session)
+	if err == nil && active {
+		s.readers[ctx.Session] = rtspReader{route: route, lease: lease}
+		readers := len(s.readers)
+		s.mu.Unlock()
+		s.logger.Info("rtsp reader started", "entrypoint_id", route.entrypoint.ID, "dev_addr", route.entrypoint.DevAddr, "readers", readers)
+		return &base.Response{StatusCode: base.StatusOK}, nil
+	}
+	s.mu.Unlock()
 	if err != nil {
+		cancel()
 		s.logger.Warn("rtsp play rejected; stream unavailable", "requested_entrypoint_id", route.entrypoint.ID, "error", err)
 		return &base.Response{StatusCode: base.StatusBadRequest}, err
 	}
-	s.readers[ctx.Session] = rtspReader{route: route, lease: lease}
-	s.logger.Info("rtsp reader started", "entrypoint_id", route.entrypoint.ID, "dev_addr", route.entrypoint.DevAddr, "readers", len(s.readers))
-	return &base.Response{StatusCode: base.StatusOK}, nil
+	s.coordinator.Release(lease)
+	return &base.Response{StatusCode: base.StatusBadRequest}, context.Canceled
 }
 
 func (s *RTSPServer) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 	s.mu.Lock()
+	starting, wasStarting := s.starting[ctx.Session]
+	if wasStarting {
+		delete(s.starting, ctx.Session)
+	}
 	reader, exists := s.readers[ctx.Session]
 	if !exists {
 		s.mu.Unlock()
+		if wasStarting {
+			starting.cancel()
+		}
 		return
 	}
 	delete(s.readers, ctx.Session)
 	if len(s.readers) != 0 {
 		readers := len(s.readers)
 		s.mu.Unlock()
+		if wasStarting {
+			starting.cancel()
+		}
 		s.logger.Info("rtsp reader stopped", "entrypoint_id", reader.route.entrypoint.ID, "readers", readers)
 		return
 	}
 	s.mu.Unlock()
+	if wasStarting {
+		starting.cancel()
+	}
 	s.coordinator.Release(reader.lease)
 	s.logger.Info("rtsp reader stopped", "entrypoint_id", reader.route.entrypoint.ID)
 }
@@ -219,7 +261,6 @@ func (s *RTSPServer) ensureStreamLocked() error {
 	}
 	return nil
 }
-
 
 func (s *RTSPServer) writeVideoRTP(packet *rtp.Packet) {
 	s.writeRTP(s.video, packet)

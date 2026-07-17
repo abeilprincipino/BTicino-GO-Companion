@@ -58,8 +58,8 @@ type Capabilities struct {
 }
 
 type Auth struct {
-	ClaimCode   string `yaml:"claim_code"`
-	BearerToken string `yaml:"bearer_token"`
+	ClaimCode       string `yaml:"claim_code"`
+	BearerTokenHash string `yaml:"bearer_token_hash"`
 }
 
 type WebUI struct {
@@ -143,11 +143,6 @@ func Default(metadata Metadata) (Config, error) {
 		return Config{}, err
 	}
 
-	claimCode, err := GenerateClaimCode()
-	if err != nil {
-		return Config{}, fmt.Errorf("generate claim code: %w", err)
-	}
-
 	homeKitPIN, err := GenerateHomeKitPIN()
 	if err != nil {
 		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
@@ -169,8 +164,8 @@ func Default(metadata Metadata) (Config, error) {
 			}},
 		},
 		Auth: Auth{
-			ClaimCode:   claimCode,
-			BearerToken: "",
+			ClaimCode:       "",
+			BearerTokenHash: "",
 		},
 		WebUI: WebUI{
 			AdminUsername:     "",
@@ -292,8 +287,11 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("invalid log level %q", cfg.Companion.LogLevel)
 	}
 
-	if !ValidClaimCode(cfg.Auth.ClaimCode) {
+	if cfg.Auth.ClaimCode != "" && !ValidClaimCode(cfg.Auth.ClaimCode) {
 		return errors.New("claim code must use xxxx-xxxx hexadecimal format")
+	}
+	if cfg.Auth.BearerTokenHash != "" && !validBearerTokenHash(cfg.Auth.BearerTokenHash) {
+		return errors.New("bearer token hash must be a SHA-256 hexadecimal value")
 	}
 
 	if len(cfg.Companion.Entrypoints) == 0 {
@@ -404,6 +402,14 @@ func ValidClaimCode(code string) bool {
 		return false
 	}
 	_, err := hex.DecodeString(code[:4] + code[5:])
+	return err == nil
+}
+
+func validBearerTokenHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
 	return err == nil
 }
 

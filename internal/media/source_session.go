@@ -43,6 +43,12 @@ type SourceSession struct {
 	video        SourceReceiver
 	audio        SourceReceiver
 	started      bool
+	starting     bool
+	startCancel  context.CancelFunc
+	startDone    chan struct{}
+	remoteEnded  bool
+	terminating  bool
+	onStarted    func()
 }
 
 func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypointID core.EntrypointID, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
@@ -54,49 +60,115 @@ func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypoint
 
 func (s *SourceSession) Start(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.started {
+	if s.started || s.starting {
+		s.mu.Unlock()
 		return ErrSourceSessionStarted
 	}
 	if s.sourceConfig.Model == "" || s.sourceConfig.DevAddr == "" || s.entrypointID == "" || s.sip == nil || s.av == nil || s.video == nil || s.audio == nil {
+		s.mu.Unlock()
 		return errors.New("media: incomplete source session")
 	}
-	s.logger.InfoContext(ctx, "source session starting", "dev_addr", s.sourceConfig.DevAddr, "high_res_video", s.sourceConfig.HighResVideo)
-	if err := s.video.Start(ctx); err != nil {
+	startCtx, cancel := context.WithCancel(ctx)
+	s.starting = true
+	s.remoteEnded = false
+	s.terminating = false
+	s.startCancel = cancel
+	s.startDone = make(chan struct{})
+	s.mu.Unlock()
+
+	var videoStarted, audioStarted, sipStarted bool
+	started := false
+	defer func() {
+		if !started {
+			s.mu.Lock()
+			hangup := sipStarted && !s.remoteEnded && !s.terminating
+			if hangup {
+				s.terminating = true
+			}
+			s.mu.Unlock()
+			if hangup {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := s.sip.Hangup(cleanupCtx); err != nil {
+					s.logger.WarnContext(cleanupCtx, "sip cleanup after startup failure failed", "error", err)
+				}
+				cleanupCancel()
+			}
+			if audioStarted || videoStarted {
+				s.closeReceivers()
+			}
+		}
+		var onStarted func()
+		s.mu.Lock()
+		s.started = started
+		s.starting = false
+		s.startCancel = nil
+		close(s.startDone)
+		s.startDone = nil
+		if started {
+			onStarted = s.onStarted
+		}
+		s.mu.Unlock()
+		if onStarted != nil {
+			onStarted()
+		}
+	}()
+
+	s.logger.InfoContext(startCtx, "source session starting", "dev_addr", s.sourceConfig.DevAddr, "high_res_video", s.sourceConfig.HighResVideo)
+	if err := s.video.Start(startCtx); err != nil {
 		return fmt.Errorf("start video receiver: %w", err)
 	}
-	if err := s.audio.Start(ctx); err != nil {
-		_ = s.video.Close()
+	videoStarted = true
+	if err := s.audio.Start(startCtx); err != nil {
 		return fmt.Errorf("start audio receiver: %w", err)
 	}
-	if err := s.sip.StartStream(ctx, s.sourceConfig.DevAddr); err != nil {
-		s.closeReceivers()
+	audioStarted = true
+	if err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr); err != nil {
 		return fmt.Errorf("start outgoing sip: %w", err)
 	}
-	if err := s.av.Start(ctx, s.sourceConfig.HighResVideo, s.video, s.audio); err != nil {
-		s.closeReceivers()
-		if closeErr := s.sip.Hangup(ctx); closeErr != nil {
-			s.logger.WarnContext(ctx, "sip cleanup after av failure failed", "error", closeErr)
-			return errors.Join(fmt.Errorf("start av: %w", err), fmt.Errorf("cleanup sip: %w", closeErr))
-		}
+	sipStarted = true
+	if err := s.av.Start(startCtx, s.sourceConfig.HighResVideo, s.video, s.audio); err != nil {
 		return fmt.Errorf("start av: %w", err)
 	}
-	s.started = true
-	s.logger.InfoContext(ctx, "source session started")
+	if err := startCtx.Err(); err != nil {
+		return fmt.Errorf("start source session: %w", err)
+	}
+	started = true
+	s.logger.InfoContext(startCtx, "source session started")
 	return nil
+}
+
+// SetStartedCallback runs once the session has completed SIP and AV activation.
+func (s *SourceSession) SetStartedCallback(callback func()) {
+	s.mu.Lock()
+	s.onStarted = callback
+	s.mu.Unlock()
 }
 
 func (s *SourceSession) Close(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.starting {
+		cancel, done := s.startCancel, s.startDone
+		s.mu.Unlock()
+		cancel()
+		<-done
+		return nil
+	}
 	if !s.started {
+		s.mu.Unlock()
 		return nil
 	}
 	s.logger.InfoContext(ctx, "source session stopping")
 	s.started = false
+	hangup := !s.remoteEnded && !s.terminating
+	if hangup {
+		s.terminating = true
+	}
+	s.mu.Unlock()
 	s.closeReceivers()
-	if err := s.sip.Hangup(ctx); err != nil {
-		return fmt.Errorf("stop outgoing sip: %w", err)
+	if hangup {
+		if err := s.sip.Hangup(ctx); err != nil {
+			return fmt.Errorf("stop outgoing sip: %w", err)
+		}
 	}
 	s.logger.InfoContext(ctx, "source session stopped")
 	return nil
@@ -106,6 +178,13 @@ func (s *SourceSession) Close(ctx context.Context) error {
 // It deliberately does not send BYE because the peer has already done so.
 func (s *SourceSession) RemoteDialogEnded() {
 	s.mu.Lock()
+	s.remoteEnded = true
+	if s.starting {
+		cancel := s.startCancel
+		s.mu.Unlock()
+		cancel()
+		return
+	}
 	if !s.started {
 		s.mu.Unlock()
 		return

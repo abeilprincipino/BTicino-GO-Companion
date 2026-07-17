@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/pion/rtp"
 )
@@ -29,6 +31,7 @@ const (
 	audioBridgeOpusPT            = 111
 	audioBridgeBackchannelOpusPT = 112
 	audioBridgeRestartLimit      = 2
+	audioBridgeStopTimeout       = 5 * time.Second
 )
 
 type AudioPipeline interface {
@@ -206,7 +209,6 @@ func (b *AudioBridge) WriteRTP(packet *rtp.Packet) error {
 func (b *AudioBridge) WriteIntercomSpeex(packet *rtp.Packet) error {
 	b.mu.Lock()
 	pipeline := b.pipeline
-	b.active = false
 	b.mu.Unlock()
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
@@ -227,13 +229,26 @@ func (b *AudioBridge) WriteBackchannelOpus(packet *rtp.Packet) error {
 }
 
 func (b *AudioBridge) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), audioBridgeStopTimeout)
+	defer cancel()
+
+	return b.StopContext(ctx)
+}
+
+// StopContext stops the bridge and waits for forwarding to exit until ctx expires.
+// Pipeline Close is synchronous so its GStreamer children are reaped before this returns.
+func (b *AudioBridge) StopContext(ctx context.Context) error {
 	if b == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	b.mu.Lock()
 
 	pipeline := b.pipeline
+	b.active = false
 	if pipeline == nil {
 		b.mu.Unlock()
 		return nil
@@ -251,7 +266,11 @@ func (b *AudioBridge) Stop() error {
 
 	err := pipeline.Close()
 
-	<-done
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	if err != nil {
 		b.logger.Error("audio bridge stop failed", "error", err)
@@ -316,7 +335,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		_ = opusConn.Close()
 		return nil, fmt.Errorf("listen bridge speex output: %w", err)
 	}
-	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4)}
+	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4), closeDone: make(chan struct{})}
 	bundle := filepath.Join(g.bundleRoot, "bin", "gst-launch-1.0")
 	p.commands = []*exec.Cmd{
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51060", "caps=application/x-rtp,media=audio,encoding-name=SPEEX,clock-rate=8000,payload=110", "!", "rtpspeexdepay", "!", "speexdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51062"),
@@ -325,6 +344,8 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51068", "caps=application/x-rtp,media=audio,encoding-name=L16,clock-rate=8000,channels=1,encoding-params=1,payload=96", "!", "rtpL16depay", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,rate=8000,channels=1", "!", "speexenc", "!", "rtpspeexpay", "pt=97", "!", "udpsink", "host=127.0.0.1", "port=51070"),
 	}
 	for index, command := range p.commands {
+		// Each launch owns a process group so Close can also terminate descendants.
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if index == 1 || index == 2 {
 			command.Env = bundledGSTEnv(g.bundleRoot)
 		}
@@ -333,6 +354,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 			return nil, fmt.Errorf("start audio bridge pipeline: %w", err)
 		}
 		g.logger.Debug("audio bridge pipeline started", "pipeline", audioPipelineName(index), "generation", 1)
+		p.waiters.Add(1)
 		go p.wait(command, audioPipelineName(index))
 	}
 	go p.read(p.opusConn, audioBridgeOpusPT, p.opusOut)
@@ -347,10 +369,14 @@ type gstreamerAudioPipeline struct {
 	opusConn, speexConn, speexIn, opusIn *net.UDPConn
 	opusOut, speexOut                    chan *rtp.Packet
 	errors                               chan error
+	waiters                              sync.WaitGroup
+	closeDone                            chan struct{}
+	closeErr                             error
 	closed                               bool
 }
 
 func (p *gstreamerAudioPipeline) wait(command *exec.Cmd, name string) {
+	defer p.waiters.Done()
 	err := command.Wait()
 	p.mu.Lock()
 	closed := p.closed
@@ -416,8 +442,10 @@ func (p *gstreamerAudioPipeline) write(packet *rtp.Packet, conn **net.UDPConn, p
 func (p *gstreamerAudioPipeline) Close() error {
 	p.mu.Lock()
 	if p.closed {
+		done := p.closeDone
 		p.mu.Unlock()
-		return nil
+		<-done
+		return p.closeErr
 	}
 	p.closed = true
 	p.logger.Info("audio bridge pipeline stopping")
@@ -428,11 +456,20 @@ func (p *gstreamerAudioPipeline) Close() error {
 	}
 	for _, command := range p.commands {
 		if command.Process != nil {
-			_ = command.Process.Kill()
+			// A negative PID targets the process group created at Start.
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		}
 	}
 	p.mu.Unlock()
-	return nil
+
+	// Wait must be called exactly once per started command. The waiter goroutines
+	// do that work and Close does not return until every child has been reaped.
+	p.waiters.Wait()
+
+	p.mu.Lock()
+	close(p.closeDone)
+	p.mu.Unlock()
+	return p.closeErr
 }
 func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, output chan<- *rtp.Packet) {
 	defer close(output)

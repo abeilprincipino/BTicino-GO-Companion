@@ -81,6 +81,9 @@ func TestServer_Pair(t *testing.T) {
 	t.Parallel()
 
 	server, store := newTestServer(t)
+	if _, err := server.auth.IssueInitialClaimCode(); err != nil {
+		t.Fatal(err)
+	}
 	challengeRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/challenge", nil)
 	challengeRequest.RemoteAddr = "192.0.2.1:1234"
 	challengeResponse := httptest.NewRecorder()
@@ -106,7 +109,7 @@ func TestServer_Pair(t *testing.T) {
 	}
 }
 
-func TestServer_RepairReset(t *testing.T) {
+func TestServer_RepairRecovery(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newTestServer(t)
@@ -115,26 +118,29 @@ func TestServer_RepairReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	issue := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/admin/issue-repair-code", nil)
-	issue.Header.Set("Authorization", "Bearer "+token)
-	issued := httptest.NewRecorder()
-	server.Handler().ServeHTTP(issued, issue)
-	var repair struct {
-		RepairCode string `json:"repair_code"`
+	repair, _, err := server.auth.IssueRepairCode()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if issued.Code != http.StatusOK || json.Unmarshal(issued.Body.Bytes(), &repair) != nil || repair.RepairCode == "" {
-		t.Fatalf("issue repair response = %s", issued.Body.String())
+	withoutRepair := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/auth/recover", strings.NewReader(`{}`))
+	withoutRepair.Header.Set("Authorization", "Bearer "+token)
+	withoutRepairResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(withoutRepairResponse, withoutRepair)
+	if withoutRepairResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("old bearer recovery status = %d: %s", withoutRepairResponse.Code, withoutRepairResponse.Body.String())
 	}
 
-	reset := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/admin/reset-claim", strings.NewReader(`{"repair_code":"`+repair.RepairCode+`"}`))
-	reset.Header.Set("Authorization", "Bearer "+token)
-	resetResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(resetResponse, reset)
-	if resetResponse.Code != http.StatusOK {
-		t.Fatalf("reset repair response = %s", resetResponse.Body.String())
+	recoverRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/auth/recover", strings.NewReader(`{"repair_code":"`+repair+`"}`))
+	recoverResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recoverResponse, recoverRequest)
+	var recovered struct {
+		AccessToken string `json:"access_token"`
+	}
+	if recoverResponse.Code != http.StatusOK || json.Unmarshal(recoverResponse.Body.Bytes(), &recovered) != nil || recovered.AccessToken == "" {
+		t.Fatalf("recover bearer response = %s", recoverResponse.Body.String())
 	}
 	if server.auth.ValidateBearer(token) {
-		t.Fatal("reset repair did not revoke bearer")
+		t.Fatal("recovery did not replace bearer")
 	}
 }
 

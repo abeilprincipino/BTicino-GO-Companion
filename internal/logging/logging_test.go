@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,5 +73,18 @@ func TestParseLevel(t *testing.T) {
 	}
 	if _, err := parseLevel("invalid"); err == nil {
 		t.Fatal("invalid level succeeded")
+	}
+}
+
+func TestHTTPSuppressesWebUIAPIRequests(t *testing.T) {
+	var output bytes.Buffer
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/webui/api/status", nil))
+
+	if output.Len() != 0 {
+		t.Fatalf("web UI API request logged: %q", output.String())
 	}
 }

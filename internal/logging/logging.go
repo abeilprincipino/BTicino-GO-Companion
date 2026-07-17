@@ -79,7 +79,7 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 		if route == "" {
 			route = r.URL.Path
 		}
-		if r.URL.Path == "/webui/api/logs" {
+		if strings.HasPrefix(r.URL.Path, "/webui/api/") {
 			return
 		}
 
@@ -92,7 +92,6 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 			logger.WarnContext(r.Context(), "http request failed", attributes...)
 			return
 		}
-
 		logger.DebugContext(r.Context(), "http request", attributes...)
 	})
 }

@@ -2,10 +2,12 @@ package auth
 
 import (
 	"bticino-go-companion/internal/config"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"sync"
@@ -59,6 +61,7 @@ type repairCode struct {
 type Store struct {
 	config *config.Store
 	now    func() time.Time
+	logger *slog.Logger
 
 	mu         sync.Mutex
 	challenges map[string]challenge
@@ -70,8 +73,15 @@ func NewStore(cfg *config.Store) *Store {
 	return &Store{
 		config:     cfg,
 		now:        time.Now,
+		logger:     slog.Default(),
 		challenges: make(map[string]challenge),
 		attempts:   make(map[string]attempts),
+	}
+}
+
+func (s *Store) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.logger = logger
 	}
 }
 
@@ -106,7 +116,7 @@ func (s *Store) CreateChallenge(sourceIP string) (Challenge, error) {
 	return Challenge{ID: id, ExpiresAt: expiresAt}, nil
 }
 
-func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) {
+func (s *Store) Claim(sourceIP, challengeID, claimCode string) (string, error) {
 	sourceIP, err := canonicalIP(sourceIP)
 	if err != nil {
 		return "", err
@@ -148,18 +158,13 @@ func (s *Store) Claim(sourceIP, challengeID, repairCode string) (string, error) 
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
 
-	nextClaimCode, err := config.GenerateClaimCode()
-	if err != nil {
-		return "", fmt.Errorf("generate repair code: %w", err)
-	}
-
 	if err := s.config.Update(func(cfg *config.Config) error {
-		if !constantTimeClaimCodeEqual(repairCode, cfg.Auth.ClaimCode) {
+		if !constantTimeClaimCodeEqual(claimCode, cfg.Auth.ClaimCode) {
 			return ErrInvalidClaimCode
 		}
 
-		cfg.Auth.BearerToken = token
-		cfg.Auth.ClaimCode = nextClaimCode
+		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
+		cfg.Auth.ClaimCode = ""
 
 		return nil
 	}); err != nil {
@@ -176,7 +181,7 @@ func (s *Store) ValidateBearer(token string) bool {
 		return false
 	}
 
-	return constantTimeHexEqual(token, s.config.Snapshot().Auth.BearerToken, bearerTokenBytes)
+	return constantTimeHexEqual(bearerTokenHash(token), s.config.Snapshot().Auth.BearerTokenHash, sha256.Size)
 }
 
 func (s *Store) NeedsClaim() bool {
@@ -184,7 +189,31 @@ func (s *Store) NeedsClaim() bool {
 		return true
 	}
 
-	return s.config.Snapshot().Auth.BearerToken == ""
+	return s.config.Snapshot().Auth.BearerTokenHash == ""
+}
+
+func (s *Store) IssueInitialClaimCode() (string, error) {
+	if s.config == nil {
+		return "", ErrStoreUnavailable
+	}
+	if !s.NeedsClaim() {
+		return "", ErrAlreadyClaimed
+	}
+
+	code, err := config.GenerateClaimCode()
+	if err != nil {
+		return "", fmt.Errorf("generate claim code: %w", err)
+	}
+	if err := s.config.Update(func(cfg *config.Config) error {
+		if cfg.Auth.ClaimCode != "" {
+			return ErrAlreadyClaimed
+		}
+		cfg.Auth.ClaimCode = code
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return code, nil
 }
 
 func (s *Store) RotateBearer() (string, error) {
@@ -198,7 +227,8 @@ func (s *Store) RotateBearer() (string, error) {
 	}
 
 	if err := s.config.Update(func(cfg *config.Config) error {
-		cfg.Auth.BearerToken = token
+		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
+		cfg.Auth.ClaimCode = ""
 		return nil
 	}); err != nil {
 		return "", err
@@ -213,7 +243,7 @@ func (s *Store) RevokeBearer() error {
 	}
 
 	return s.config.Update(func(cfg *config.Config) error {
-		cfg.Auth.BearerToken = ""
+		cfg.Auth.BearerTokenHash = ""
 		return nil
 	})
 }
@@ -232,11 +262,12 @@ func (s *Store) IssueRepairCode() (string, time.Time, error) {
 	s.mu.Lock()
 	s.repair = repairCode{value: code, expiresAt: expiresAt}
 	s.mu.Unlock()
+	s.logger.Info("repair code issued", "expires_at", expiresAt)
 
 	return code, expiresAt, nil
 }
 
-func (s *Store) ResetClaim(code string) (string, error) {
+func (s *Store) RecoverBearer(code string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
@@ -247,27 +278,30 @@ func (s *Store) ResetClaim(code string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.repair.value == "" || !constantTimeStringEqual(code, s.repair.value) {
+		s.logger.Warn("repair code rejected")
 		return "", ErrInvalidRepairCode
 	}
 	if !s.repair.expiresAt.After(s.now()) {
 		s.repair = repairCode{}
+		s.logger.Info("repair code expired")
 		return "", ErrRepairCodeExpired
 	}
 
-	claimCode, err := config.GenerateClaimCode()
+	token, err := config.RandomHex(bearerTokenBytes)
 	if err != nil {
-		return "", fmt.Errorf("generate claim code: %w", err)
+		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
 	if err := s.config.Update(func(cfg *config.Config) error {
-		cfg.Auth.ClaimCode = claimCode
-		cfg.Auth.BearerToken = ""
+		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
 		return nil
 	}); err != nil {
 		return "", err
 	}
 
 	s.repair = repairCode{}
-	return claimCode, nil
+	s.logger.Info("repair code consumed")
+	s.logger.Info("bearer recovery completed")
+	return token, nil
 }
 
 func (s *Store) allowAttempt(sourceIP string, now time.Time) bool {
@@ -291,6 +325,7 @@ func (s *Store) removeExpiredChallenges(now time.Time) {
 	for id, challenge := range s.challenges {
 		if !challenge.expiresAt.After(now) {
 			delete(s.challenges, id)
+			s.logger.Info("pairing challenge expired")
 		}
 	}
 }
@@ -317,6 +352,11 @@ func constantTimeHexEqual(left, right string, size int) bool {
 	rightBytes, rightValid := decodeHex(right, size)
 
 	return subtle.ConstantTimeCompare(leftBytes, rightBytes) == 1 && leftValid && rightValid
+}
+
+func bearerTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func constantTimeClaimCodeEqual(left, right string) bool {

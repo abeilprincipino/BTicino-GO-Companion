@@ -84,15 +84,19 @@ type ManagedSourceFactory func(config.Entrypoint, SourceEvents) (ManagedSource, 
 // StreamCoordinator is the sole owner of the intercom's single media source.
 // OpenWebNet frames describe requested tracks; RTP metadata proves actual flow.
 type StreamCoordinator struct {
-	mu            sync.Mutex
-	nextID        uint64
-	leaseID       uint64
-	snapshot      StreamSnapshot
-	factory       ManagedSourceFactory
-	source        ManagedSource
-	cleanup       func()
-	stopping      bool
-	logger        *slog.Logger
+	mu      sync.Mutex
+	nextID  uint64
+	leaseID uint64
+	// controlLeaseID identifies the lease that emitted the currently observed
+	// OpenWebNet stream-start frames. Stops without a matching start are stale.
+	controlLeaseID uint64
+	snapshot       StreamSnapshot
+	factory        ManagedSourceFactory
+	source         ManagedSource
+	cleanup        func()
+	starting       bool
+	stopping       bool
+	logger         *slog.Logger
 }
 
 func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *StreamCoordinator {
@@ -116,6 +120,8 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	}
 	c.nextID++
 	c.leaseID = c.nextID
+	c.controlLeaseID = 0
+	c.starting = true
 	c.snapshot = StreamSnapshot{Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
@@ -165,6 +171,11 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 		c.stop(lease, "source startup failed")
 		return nil, err
 	}
+	c.mu.Lock()
+	if c.leaseID == lease.id {
+		c.starting = false
+	}
+	c.mu.Unlock()
 	go c.watch(ctx, lease)
 	return lease, nil
 }
@@ -236,7 +247,6 @@ func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {
 	return true
 }
 
-
 func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource, cleanup func(), reason string) {
 	var closeErr error
 	if source != nil {
@@ -251,6 +261,8 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 	defer c.mu.Unlock()
 	if c.leaseID == lease.id {
 		c.leaseID = 0
+		c.controlLeaseID = 0
+		c.starting = false
 		c.stopping = false
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
 	}
@@ -265,16 +277,39 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 func (c *StreamCoordinator) ObserveControlTrack(video bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.leaseID != 0 {
+		if !c.starting {
+			c.logger.Debug("openwebnet stream start ignored; source attempt is not starting", "lease_id", c.leaseID)
+			return
+		}
+		c.controlLeaseID = c.leaseID
+	}
 	c.observeRequestedTrackLocked(video)
 }
 
 // ObserveControlStop records OpenWebNet stream teardown. A Companion lease is
-// retained until its source has completed local cleanup.
+// retained until its source has completed local cleanup. The stop must follow
+// a start observed for the active source attempt; multicast can otherwise
+// replay a stop from an earlier attempt.
 func (c *StreamCoordinator) ObserveControlStop() {
 	c.mu.Lock()
 	if c.leaseID == 0 {
-		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
+		if c.snapshot.Owner == StreamOwnerExternal {
+			c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
+		}
 		c.mu.Unlock()
+		return
+	}
+	if c.controlLeaseID != c.leaseID {
+		leaseID := c.leaseID
+		c.mu.Unlock()
+		c.logger.Debug("openwebnet stream stop ignored; no matching start", "lease_id", leaseID)
+		return
+	}
+	if c.starting {
+		leaseID := c.leaseID
+		c.mu.Unlock()
+		c.logger.Debug("openwebnet stream stop ignored during source startup", "lease_id", leaseID)
 		return
 	}
 	lease := &StreamLease{id: c.leaseID}

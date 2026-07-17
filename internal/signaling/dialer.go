@@ -15,7 +15,14 @@ import (
 	"github.com/emiago/sipgo/sip"
 )
 
-const streamAnswerTimeout = 8 * time.Second
+const (
+	streamAnswerTimeout     = 8 * time.Second
+	registerCheckInterval   = 10 * time.Second
+	registerTimeout         = 4 * time.Second
+	registerExpires         = 600 * time.Second
+	registerRefreshSkew     = 10 * time.Second
+	registerRefreshInterval = registerExpires - registerRefreshSkew
+)
 
 var (
 	ErrStreamTargetUnset              = errors.New("sip: stream target not configured")
@@ -39,14 +46,19 @@ type StreamDialerConfig struct {
 type streamDialer struct {
 	ua                *sipgo.UserAgent
 	server            *sipgo.Server
+	client            *sipgo.Client
 	out               *sipgo.DialogClientCache
+	contact           sip.ContactHeader
 	target            inviteTarget
 	authUser          string
 	authPass          string
 	transport         string
 	logger            *slog.Logger
 	remoteDialogEnded func()
+	callbackMu        sync.RWMutex
 	listenerCancel    context.CancelFunc
+	registerCancel    context.CancelFunc
+	registerWG        sync.WaitGroup
 	closeOnce         sync.Once
 	closeErr          error
 }
@@ -92,10 +104,13 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 		logger = slog.Default()
 	}
 	listenerCtx, listenerCancel := context.WithCancel(context.Background())
+	registerCtx, registerCancel := context.WithCancel(context.Background())
 	dialer := &streamDialer{
 		ua:                ua,
 		server:            server,
+		client:            client,
 		out:               sipgo.NewDialogClientCache(client, contact),
+		contact:           contact,
 		target:            target,
 		authUser:          firstNonEmpty(cfg.AuthUser, fromUser),
 		authPass:          strings.TrimSpace(cfg.AuthPass),
@@ -103,6 +118,7 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 		logger:            logger.With("component", "media.sip", "target", target.URI.User+"@"+target.URI.Host, "domain", strings.TrimSpace(cfg.Domain), "transport", normalizeTransport(cfg.Transport)),
 		remoteDialogEnded: cfg.RemoteDialogEnded,
 		listenerCancel:    listenerCancel,
+		registerCancel:    registerCancel,
 	}
 	server.OnBye(dialer.onBye)
 
@@ -111,6 +127,8 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 		listenAddr = net.JoinHostPort(fromHost, strconv.Itoa(fromPort))
 	}
 	go dialer.listen(listenerCtx, listenAddr)
+	dialer.registerWG.Add(1)
+	go dialer.registrationLoop(registerCtx)
 
 	return dialer, nil
 }
@@ -118,6 +136,8 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 func (d *streamDialer) Close() error {
 	d.closeOnce.Do(func() {
 		d.listenerCancel()
+		d.registerCancel()
+		d.registerWG.Wait()
 		d.closeErr = errors.Join(d.server.Close(), d.ua.Close())
 	})
 	return d.closeErr
@@ -136,8 +156,77 @@ func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	d.logger.Info("remote sip stream ended")
-	if d.remoteDialogEnded != nil {
-		d.remoteDialogEnded()
+	d.callbackMu.RLock()
+	callback := d.remoteDialogEnded
+	d.callbackMu.RUnlock()
+	if callback != nil {
+		callback()
+	}
+}
+
+// SetRemoteDialogEnded assigns the callback for the sole active stream.
+func (d *streamDialer) SetRemoteDialogEnded(callback func()) {
+	d.callbackMu.Lock()
+	d.remoteDialogEnded = callback
+	d.callbackMu.Unlock()
+}
+
+// Register announces this persistent Companion SIP endpoint to Flexisip.
+// Registration failure is non-fatal, matching V2's startup behavior.
+func (d *streamDialer) Register(ctx context.Context) error {
+	if d.client == nil || d.target.URI.Host == "" {
+		return errors.New("sip: registration unavailable")
+	}
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Scheme: "sip", Host: d.target.URI.Host})
+	req.SetTransport(strings.ToUpper(d.transport))
+	req.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:%s@%s>", d.authUser, d.target.URI.Host)))
+	req.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", d.authUser, d.target.URI.Host, sip.GenerateTagN(16))))
+	req.AppendHeader(sip.NewHeader("Contact", fmt.Sprintf("<sip:%s@%s:%d>", d.contact.Address.User, d.contact.Address.Host, d.contact.Address.Port)))
+	req.AppendHeader(sip.NewHeader("Expires", "600"))
+	response, err := d.client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
+	if err != nil {
+		return fmt.Errorf("send register: %w", err)
+	}
+	if response == nil || !response.IsSuccess() {
+		if response == nil {
+			return errors.New("sip: empty register response")
+		}
+		return fmt.Errorf("sip: register response status=%d", response.StatusCode)
+	}
+	d.logger.InfoContext(ctx, "sip registration succeeded", "domain", d.target.URI.Host)
+	return nil
+}
+
+func (d *streamDialer) registrationLoop(ctx context.Context) {
+	defer d.registerWG.Done()
+
+	registrationLoop(ctx, registerRefreshInterval, registerCheckInterval, registerTimeout, d.Register)
+}
+
+func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeout time.Duration, register func(context.Context) error) {
+	var lastSuccess time.Time
+	tryRegister := func() {
+		if !lastSuccess.IsZero() && time.Since(lastSuccess) < refreshInterval {
+			return
+		}
+
+		registerCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if err := register(registerCtx); err == nil {
+			lastSuccess = time.Now()
+		}
+	}
+
+	tryRegister()
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tryRegister()
+		}
 	}
 }
 

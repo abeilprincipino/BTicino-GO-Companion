@@ -73,8 +73,7 @@ func (s *Server) Handler() http.Handler {
 	s.handle(mux, "POST", "/api/v3/pair/claim", s.pairClaim)
 	s.handleProtected(mux, "POST", "/api/v3/auth/rotate", s.rotateBearer)
 	s.handleProtected(mux, "POST", "/api/v3/auth/revoke", s.revokeBearer)
-	s.handleProtected(mux, "POST", "/api/v3/admin/issue-repair-code", s.issueRepairCode)
-	s.handleProtected(mux, "POST", "/api/v3/admin/reset-claim", s.resetClaim)
+	s.handle(mux, "POST", "/api/v3/auth/recover", s.recoverBearer)
 	s.handleProtected(mux, "GET", "/api/v3/state", s.stateSnapshot)
 	s.handleProtected(mux, "GET", "/api/v3/diagnostics", s.diagnosticsSnapshot)
 	mux.HandleFunc("POST /api/v3/diagnostics", s.requireBearer(s.diagnosticsRefresh))
@@ -109,15 +108,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
-	writeOK(w, http.StatusOK, map[string]any{"claimed": s.config != nil && s.config.Snapshot().Auth.BearerToken != ""})
+	writeOK(w, http.StatusOK, map[string]any{"claimed": s.auth != nil && !s.auth.NeedsClaim()})
 }
 
 func (s *Server) pairChallenge(w http.ResponseWriter, r *http.Request) {
 	challenge, err := s.auth.CreateChallenge(sourceIP(r))
 	if err != nil {
+		s.logger.WarnContext(r.Context(), "pairing challenge rejected", "source_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
+	s.logger.InfoContext(r.Context(), "pairing challenge created", "source_ip", sourceIP(r))
 
 	writeOK(w, http.StatusCreated, map[string]any{"challenge_id": challenge.ID, "expires_at": challenge.ExpiresAt.Format(time.RFC3339)})
 }
@@ -133,9 +134,11 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 
 	token, err := s.auth.Claim(sourceIP(r), body.ChallengeID, body.ClaimCode)
 	if err != nil {
+		s.logger.WarnContext(r.Context(), "pairing claim rejected", "source_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
+	s.logger.InfoContext(r.Context(), "companion pairing completed", "source_ip", sourceIP(r))
 
 	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
 }
@@ -143,6 +146,7 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rotateBearer(w http.ResponseWriter, r *http.Request) {
 	token, err := s.auth.RotateBearer()
 	if err != nil {
+		s.logger.WarnContext(r.Context(), "bearer recovery rejected", "source_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
@@ -159,17 +163,7 @@ func (s *Server) revokeBearer(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusOK, nil)
 }
 
-func (s *Server) issueRepairCode(w http.ResponseWriter, r *http.Request) {
-	code, expiresAt, err := s.auth.IssueRepairCode()
-	if err != nil {
-		writeAuthError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, map[string]any{"repair_code": code, "expires_at": expiresAt, "ttl_s": int(auth.RepairCodeLifetime.Seconds())})
-}
-
-func (s *Server) resetClaim(w http.ResponseWriter, r *http.Request) {
+func (s *Server) recoverBearer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RepairCode string `json:"repair_code"`
 	}
@@ -177,13 +171,14 @@ func (s *Server) resetClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code, err := s.auth.ResetClaim(body.RepairCode)
+	token, err := s.auth.RecoverBearer(body.RepairCode)
 	if err != nil {
 		writeAuthError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, map[string]any{"needs_claim": true, "claim_code": code})
+	s.logger.InfoContext(r.Context(), "companion bearer recovered", "source_ip", sourceIP(r))
+	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
 }
 
 func (s *Server) stateSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +210,7 @@ func (s *Server) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || token == "" || s.auth == nil || !s.auth.ValidateBearer(token) {
+			s.logger.WarnContext(r.Context(), "bearer authentication rejected", "route", r.Method+" "+r.URL.Path, "source_ip", sourceIP(r))
 			writeError(w, http.StatusUnauthorized, "unauthorized", "a valid bearer token is required")
 			return
 		}

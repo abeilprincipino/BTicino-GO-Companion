@@ -30,7 +30,7 @@ func TestCreateAndLoad(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	if loaded.Auth.ClaimCode != created.Auth.ClaimCode {
+	if loaded.Auth.ClaimCode != "" || created.Auth.ClaimCode != "" {
 		t.Fatalf("loaded config differs: got %#v want %#v", loaded, created)
 	}
 	if loaded.Companion.DeviceID != "" || loaded.Companion.Model != "" {
@@ -76,7 +76,7 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		"companion.entrypoints.0.capabilities.unlock",
 		"companion.entrypoints.0.capabilities.ring",
 		"auth.claim_code",
-		"auth.bearer_token",
+		"auth.bearer_token_hash",
 		"webui.admin_username",
 		"webui.admin_password_hash",
 		"webui.session_secret",
@@ -93,7 +93,7 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"auth.bearer_token", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
+	for _, path := range []string{"auth.claim_code", "auth.bearer_token_hash", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
 		if value, _ := yamlPath(document, path); value != "" {
 			t.Errorf("YAML value at %q = %#v, want empty string", path, value)
 		}

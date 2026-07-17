@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/system"
 	"bytes"
@@ -44,6 +45,41 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 	}
 }
 
+func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authStore := auth.NewStore(store)
+	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, func(string) error { return nil })
+
+	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	setup := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, sessionCookieFrom(t, login))
+	var response struct {
+		ClaimCode string `json:"claim_code"`
+	}
+	decodeResponse(t, setup, &response)
+	if setup.Code != http.StatusOK || !config.ValidClaimCode(response.ClaimCode) || store.Snapshot().Auth.ClaimCode != response.ClaimCode {
+		t.Fatalf("owner setup response = %d: %s", setup.Code, setup.Body.String())
+	}
+
+	if _, err := authStore.RotateBearer(); err != nil {
+		t.Fatal(err)
+	}
+	repair := request(t, server, http.MethodPost, "/webui/api/repair-code", map[string]string{}, passwordSession(t, server, "correct-horse"))
+	if repair.Code != http.StatusOK || !strings.Contains(repair.Body.String(), "repair_code") {
+		t.Fatalf("repair code response = %d: %s", repair.Code, repair.Body.String())
+	}
+}
+
 func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 	t.Parallel()
 
@@ -72,7 +108,7 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 		t.Fatalf("saved companion name = %q", store.Snapshot().Companion.Name)
 	}
 
-	if store.Snapshot().Auth.BearerToken != "bearer-secret" || store.Snapshot().Auth.ClaimCode != "0123-4567" {
+	if store.Snapshot().Auth.BearerTokenHash == "" || store.Snapshot().Auth.ClaimCode != "" {
 		t.Fatal("config save changed auth secrets")
 	}
 }
@@ -201,9 +237,6 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 		t.Fatalf("default config: %v", err)
 	}
 
-	cfg.Auth.ClaimCode = "0123-4567"
-
-	cfg.Auth.BearerToken = "bearer-secret"
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -213,7 +246,11 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 		t.Fatalf("open config: %v", err)
 	}
 
-	return New(store, slog.New(slog.DiscardHandler), restart, func(string) error { return nil }), store
+	authStore := auth.NewStore(store)
+	if _, err := authStore.RotateBearer(); err != nil {
+		t.Fatalf("create bearer: %v", err)
+	}
+	return New(store, authStore, slog.New(slog.DiscardHandler), restart, func(string) error { return nil }), store
 }
 
 func configuredSession(t *testing.T, server *Server) *http.Cookie {

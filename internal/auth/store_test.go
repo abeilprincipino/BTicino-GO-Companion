@@ -31,13 +31,16 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	if !store.ValidateBearer(token) {
 		t.Fatal("issued bearer token was not valid")
 	}
+	if stored := backend.Snapshot().Auth.BearerTokenHash; stored == token || len(stored) != 64 {
+		t.Fatalf("persisted bearer value = %q, want SHA-256 hash", stored)
+	}
 
 	if _, err := store.Claim("192.0.2.1", challenge.ID, code); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("replayed claim error = %v, want ErrAlreadyClaimed", err)
 	}
 
-	if got := backend.Snapshot().Auth.ClaimCode; got == code {
-		t.Fatal("successful claim did not replace repair code")
+	if got := backend.Snapshot().Auth.ClaimCode; got != "" {
+		t.Fatal("successful claim did not clear claim code")
 	}
 	if _, err := store.CreateChallenge("192.0.2.1"); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("challenge after claim error = %v, want ErrAlreadyClaimed", err)
@@ -179,7 +182,7 @@ func TestStore_RotateAndRevokeBearer(t *testing.T) {
 	}
 }
 
-func TestStore_RepairCodeIssueAndReset(t *testing.T) {
+func TestStore_RepairCodeIssueAndRecoverBearer(t *testing.T) {
 	t.Parallel()
 
 	store, backend := newTestStore(t)
@@ -205,25 +208,25 @@ func TestStore_RepairCodeIssueAndReset(t *testing.T) {
 		t.Fatal("issuing repair code revoked bearer")
 	}
 
-	if _, err := store.ResetClaim("invalid"); !errors.Is(err, ErrInvalidRepairCode) {
+	if _, err := store.RecoverBearer("invalid"); !errors.Is(err, ErrInvalidRepairCode) {
 		t.Fatalf("invalid repair code error = %v, want ErrInvalidRepairCode", err)
 	}
 
-	reset, err := store.ResetClaim(issued)
+	replacement, err := store.RecoverBearer(issued)
 	if err != nil {
-		t.Fatalf("reset repair code: %v", err)
+		t.Fatalf("recover bearer: %v", err)
 	}
 
-	if !config.ValidClaimCode(reset) {
-		t.Fatalf("reset claim code = %q", reset)
+	if !store.ValidateBearer(replacement) {
+		t.Fatal("recovered bearer is not valid")
 	}
 
 	if store.ValidateBearer(token) {
 		t.Fatal("reset repair code did not revoke bearer")
 	}
 
-	if got := backend.Snapshot().Auth.ClaimCode; got != reset {
-		t.Fatalf("stored repair code = %q, want %q", got, reset)
+	if got := backend.Snapshot().Auth.ClaimCode; got != "" {
+		t.Fatalf("stored claim code = %q, want empty", got)
 	}
 }
 
@@ -251,6 +254,9 @@ func newTestStore(t *testing.T) (*Store, *config.Store) {
 
 	store := NewStore(backend)
 	store.now = func() time.Time { return testNow }
+	if _, err := store.IssueInitialClaimCode(); err != nil {
+		t.Fatalf("issue initial claim code: %v", err)
+	}
 
 	return store, backend
 }

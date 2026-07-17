@@ -122,7 +122,8 @@ function buildNav() {
     {
       label: 'Config',
       children: [
-        { id: 'configEntrypoints', label: 'Entrypoints' }
+        { id: 'configEntrypoints', label: 'Entrypoints' },
+        { id: 'configHa', label: 'Home Assistant' }
       ]
     },
     {
@@ -312,6 +313,9 @@ function submitSetup(event) {
       btn.textContent = 'Save Credentials';
       return;
     }
+    if (data.claim_code) {
+      window.alert('Home Assistant claim code: ' + data.claim_code + '\n\nStore it now. It is shown only until pairing completes.');
+    }
     showToast('Credentials saved. Sign in with the new account.', 'success');
     btn.textContent = 'Save Credentials';
     resetLoginForm();
@@ -408,16 +412,12 @@ function ensureCompanionConfig() {
 }
 
 function renderHomeAssistantConfig() {
-  var auth = (_configDoc.companion && _configDoc.companion.auth) || {};
-  var cfg = ensureCompanionConfig();
   var form = document.getElementById('haConfigForm');
-  form.device_id.value = auth.device_id || '';
-  form.key_id.value = auth.key_id || '';
-  form.claim_code.value = auth.claim_code || '';
-  form.bearer_token.value = auth.bearer_token || '';
-  renderHABadge(!!auth.claimed);
-  renderIceServers((cfg.webrtc && cfg.webrtc.ice_servers) || []);
-  setStatus('haConfigStatus', '');
+  apiGet('/webui/api/pairing').then(function(pairing) {
+    form.claim_code.value = pairing.claim_code || '';
+    renderHABadge(!!pairing.claimed);
+    setStatus('haConfigStatus', pairing.claimed ? 'Home Assistant is paired.' : 'Enter this code in Home Assistant to pair.');
+  }).catch(function(err) { handleApiError(err, 'Failed to load pairing status'); });
 }
 
 function renderHABadge(claimed) {
@@ -427,18 +427,10 @@ function renderHABadge(claimed) {
   badge.className = 'badge ' + (claimed ? 'badge-success' : 'badge-info');
 }
 
-function saveHomeAssistantConfig(saveBtn) {
-  var form = document.getElementById('haConfigForm');
-  var cfg = ensureCompanionConfig();
-  var iceServers = collectIceServers();
-  if (!iceServers) return;
-  _configDoc.companion.auth = _configDoc.companion.auth || {};
-  _configDoc.companion.auth.claim_code = form.claim_code.value.trim();
-  _configDoc.companion.auth.bearer_token = form.bearer_token.value.trim();
-  cfg.webrtc = cfg.webrtc || {};
-  cfg.webrtc.ice_servers = iceServers;
-  renderHABadge(_configDoc.companion.auth.claimed);
-  saveConfig(document.getElementById('haConfigStatus'), saveBtn).catch(function(err) { handleApiError(err); });
+function issueRepairCode() {
+  apiPost('/webui/api/repair-code', {}).then(function(data) {
+    window.alert('Home Assistant repair code: ' + data.repair_code + '\n\nIt expires in 10 minutes and is shown only here.');
+  }).catch(function(err) { handleApiError(err, 'Failed to issue repair code'); });
 }
 
 function renderIceServers(servers) {

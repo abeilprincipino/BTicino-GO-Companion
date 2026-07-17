@@ -14,8 +14,10 @@ func TestStreamCoordinatorConfirmsReservedStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beginControlAttempt(c)
 	c.ObserveControlTrack(true)
 	c.ObserveControlTrack(false)
+	endControlAttempt(c)
 	snapshot := c.Snapshot()
 	if snapshot.Owner != StreamOwnerCompanion || !snapshot.Video.Requested || !snapshot.Audio.Requested {
 		t.Fatalf("snapshot = %#v", snapshot)
@@ -61,14 +63,74 @@ func TestStreamCoordinatorReleasesStaleRequestedTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beginControlAttempt(c)
 	c.ObserveControlTrack(true)
 	c.ObserveControlTrack(false)
+	endControlAttempt(c)
 	if !c.Reconcile(lease, time.Now().Add(trackFlowTimeout+time.Second)) {
 		t.Fatal("stale tracks did not stop the source")
 	}
 	if source.closes != 1 || c.Snapshot().Owner != StreamOwnerIdle {
 		t.Fatalf("source closes=%d snapshot=%#v", source.closes, c.Snapshot())
 	}
+}
+
+func TestStreamCoordinatorIgnoresControlStopWithoutCurrentAttemptStart(t *testing.T) {
+	source := &remoteBYESource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) { return source, nil, nil })
+	first, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	c.ObserveControlTrack(false)
+	endControlAttempt(c)
+	if !c.Release(first) {
+		t.Fatal("release first lease")
+	}
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A replayed start from the prior lease cannot claim the new lease.
+	c.ObserveControlTrack(true)
+	c.ObserveControlTrack(false)
+	if snapshot := c.Snapshot(); snapshot.Video.Requested || snapshot.Audio.Requested {
+		t.Fatalf("stale start altered current attempt: %#v", snapshot)
+	}
+
+	// A delayed stop from a prior multicast observation must not close this lease.
+	c.ObserveControlStop()
+	if source.closes != 1 || c.Snapshot().Owner != StreamOwnerCompanion {
+		t.Fatalf("stale stop closed current source: closes=%d snapshot=%#v", source.closes, c.Snapshot())
+	}
+
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	c.ObserveControlTrack(false)
+	endControlAttempt(c)
+	c.ObserveControlStop()
+	if source.closes != 2 || c.Snapshot().Owner != StreamOwnerIdle {
+		t.Fatalf("matched stop did not close source: closes=%d snapshot=%#v", source.closes, c.Snapshot())
+	}
+	if c.Release(lease) {
+		t.Fatal("released an already stopped lease")
+	}
+}
+
+func beginControlAttempt(c *StreamCoordinator) {
+	c.mu.Lock()
+	c.starting = true
+	c.mu.Unlock()
+}
+
+func endControlAttempt(c *StreamCoordinator) {
+	c.mu.Lock()
+	c.starting = false
+	c.mu.Unlock()
 }
 
 func testManagedSourceFactory() ManagedSourceFactory {
@@ -78,10 +140,10 @@ func testManagedSourceFactory() ManagedSourceFactory {
 }
 
 type remoteBYESource struct {
-	closes int
+	closes   int
 	callback func()
 }
 
-func (*remoteBYESource) Start(context.Context) error { return nil }
+func (*remoteBYESource) Start(context.Context) error   { return nil }
 func (s *remoteBYESource) Close(context.Context) error { s.closes++; return nil }
-func (s *remoteBYESource) remote() { s.callback() }
+func (s *remoteBYESource) remote()                     { s.callback() }
