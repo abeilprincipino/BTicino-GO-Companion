@@ -70,6 +70,7 @@ type SourceEvents struct {
 	VideoRTP  func(*rtp.Packet)
 	AudioRTP  func(*rtp.Packet)
 	RemoteBYE func()
+	Failed    func(error)
 }
 
 // ManagedSource is the transport layer for a single already-authorized source.
@@ -134,6 +135,10 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 			}
 		},
 		RemoteBYE: func() { c.stop(lease, "remote sip bye") },
+		Failed: func(err error) {
+			c.logger.Error("managed source failed", "lease_id", lease.id, "error", err)
+			c.stop(lease, "managed source failure")
+		},
 	})
 	if err != nil || source == nil {
 		c.finishStop(lease, nil, cleanup, "source creation failed")

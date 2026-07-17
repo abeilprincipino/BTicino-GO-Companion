@@ -18,7 +18,7 @@ func TestRTSPServerUsesConfiguredEntrypointRouteAndDevAddr(t *testing.T) {
 		{ID: "gate1", DevAddr: "20", Capabilities: config.Capabilities{Stream: true}},
 		{ID: "gate2", DevAddr: "21", Capabilities: config.Capabilities{Stream: true}},
 	}, func(entrypoint config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
-		if events.VideoRTP == nil || events.AudioRTP == nil || events.RemoteBYE == nil {
+		if events.VideoRTP == nil || events.AudioRTP == nil || events.RemoteBYE == nil || events.Failed == nil {
 			t.Fatal("source packet callback is nil")
 		}
 		started = entrypoint

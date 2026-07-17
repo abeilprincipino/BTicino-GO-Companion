@@ -214,7 +214,7 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, entrypoint config.E
 	if err != nil {
 		return nil, nil, err
 	}
-	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, nil, logger)
+	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, nil, logger, events.Failed)
 	return &bridgeSource{source: source, bridge: bridge}, closeSource, nil
 }
 

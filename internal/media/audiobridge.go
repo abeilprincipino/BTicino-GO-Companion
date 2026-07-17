@@ -28,6 +28,7 @@ const (
 	audioBridgeSpeexOut          = 51070
 	audioBridgeOpusPT            = 111
 	audioBridgeBackchannelOpusPT = 112
+	audioBridgeRestartLimit      = 2
 )
 
 type AudioPipeline interface {
@@ -35,6 +36,7 @@ type AudioPipeline interface {
 	WriteBackchannelOpus(*rtp.Packet) error
 	ReadOpusOut() <-chan *rtp.Packet
 	ReadSpeexOut() <-chan *rtp.Packet
+	Errors() <-chan error
 	Close() error
 }
 
@@ -49,9 +51,13 @@ type AudioBridge struct {
 	opusOutput  func(*rtp.Packet)
 	backchannel Backchannel
 	logger      *slog.Logger
+	failure     func(error)
 	pipeline    AudioPipeline
 	cancel      context.CancelFunc
 	done        chan struct{}
+	active      bool
+	generation  uint64
+	restarts    int
 }
 
 func NewAudioBridge(
@@ -59,6 +65,7 @@ func NewAudioBridge(
 	opusOutput func(*rtp.Packet),
 	backchannel Backchannel,
 	logger *slog.Logger,
+	failure func(error),
 ) *AudioBridge {
 	if logger == nil {
 		logger = slog.Default()
@@ -68,6 +75,7 @@ func NewAudioBridge(
 		opusOutput:  opusOutput,
 		backchannel: backchannel,
 		logger:      logger.With("component", "media.audio"),
+		failure:     failure,
 	}
 }
 
@@ -77,32 +85,118 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 	}
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	if b.pipeline != nil {
+		b.mu.Unlock()
 		return ErrAudioBridgeStarted
 	}
+	b.active = true
+	b.restarts = 0
+	b.mu.Unlock()
 
 	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink", "input_codec", "Speex/8000", "output_codec", "Opus/48000")
 	pipeline, err := b.gstreamer.StartAudioBridge(ctx)
 	if err != nil {
+		b.mu.Lock()
+		b.active = false
+		b.mu.Unlock()
 		b.logger.ErrorContext(ctx, "audio bridge start failed", "error", err)
 		return err
 	}
 
 	if pipeline == nil {
+		b.mu.Lock()
+		b.active = false
+		b.mu.Unlock()
 		return ErrAudioBridgeUnavailable
 	}
-
-	runCtx, cancel := context.WithCancel(context.Background())
-	b.pipeline = pipeline
-	b.cancel = cancel
-
-	b.done = make(chan struct{})
-	go b.forward(runCtx, pipeline, b.done)
-	b.logger.InfoContext(ctx, "audio bridge started")
+	b.mu.Lock()
+	if !b.active {
+		b.mu.Unlock()
+		_ = pipeline.Close()
+		return ErrAudioBridgeUnavailable
+	}
+	b.installLocked(pipeline)
+	generation := b.generation
+	b.mu.Unlock()
+	b.logger.InfoContext(ctx, "audio bridge started", "generation", generation)
 
 	return nil
+}
+
+func (b *AudioBridge) installLocked(pipeline AudioPipeline) {
+	runCtx, cancel := context.WithCancel(context.Background())
+	b.generation++
+	b.pipeline = pipeline
+	b.cancel = cancel
+	b.done = make(chan struct{})
+	go b.forward(runCtx, pipeline, b.done)
+	go b.monitor(runCtx, pipeline)
+}
+
+func (b *AudioBridge) monitor(ctx context.Context, pipeline AudioPipeline) {
+	select {
+	case <-ctx.Done():
+		return
+	case err, ok := <-pipeline.Errors():
+		if !ok || err == nil {
+			return
+		}
+		b.restart(pipeline, err)
+	}
+}
+
+func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
+	b.mu.Lock()
+	if !b.active || b.pipeline != failed {
+		b.mu.Unlock()
+		return
+	}
+	if b.restarts >= audioBridgeRestartLimit {
+		b.mu.Unlock()
+		b.logger.Error("audio bridge restart budget exhausted", "generation", b.generation, "attempts", audioBridgeRestartLimit, "error", cause)
+		if b.failure != nil {
+			b.failure(cause)
+		}
+		return
+	}
+	b.restarts++
+	attempt, generation := b.restarts, b.generation
+	cancel, done := b.cancel, b.done
+	b.pipeline, b.cancel, b.done = nil, nil, nil
+	b.mu.Unlock()
+	b.logger.Warn("audio bridge restarting", "generation", generation, "attempt", attempt, "limit", audioBridgeRestartLimit, "error", cause)
+	cancel()
+	_ = failed.Close()
+	<-done
+
+	pipeline, err := b.gstreamer.StartAudioBridge(context.Background())
+	if err != nil || pipeline == nil {
+		if err == nil {
+			err = ErrAudioBridgeUnavailable
+		}
+		b.logger.Error("audio bridge restart failed", "generation", generation, "attempt", attempt, "error", err)
+		b.restartFailure(failed, err)
+		return
+	}
+	b.mu.Lock()
+	if !b.active || b.pipeline != nil {
+		b.mu.Unlock()
+		_ = pipeline.Close()
+		return
+	}
+	b.installLocked(pipeline)
+	newGeneration := b.generation
+	b.mu.Unlock()
+	b.logger.Info("audio bridge restarted", "generation", newGeneration, "attempt", attempt)
+}
+
+func (b *AudioBridge) restartFailure(failed AudioPipeline, err error) {
+	_ = failed
+	b.logger.Error("audio bridge restart budget exhausted", "attempts", audioBridgeRestartLimit, "error", err)
+	if b.failure != nil {
+		b.failure(err)
+	}
 }
 
 func (b *AudioBridge) WriteRTP(packet *rtp.Packet) error {
@@ -112,11 +206,11 @@ func (b *AudioBridge) WriteRTP(packet *rtp.Packet) error {
 func (b *AudioBridge) WriteIntercomSpeex(packet *rtp.Packet) error {
 	b.mu.Lock()
 	pipeline := b.pipeline
+	b.active = false
 	b.mu.Unlock()
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
 	}
-	b.logger.Info("audio bridge stopping")
 	return pipeline.WriteIntercomSpeex(packet)
 }
 
@@ -144,6 +238,7 @@ func (b *AudioBridge) Stop() error {
 		b.mu.Unlock()
 		return nil
 	}
+	b.logger.Info("audio bridge stopping")
 
 	b.pipeline = nil
 	cancel := b.cancel
@@ -221,7 +316,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		_ = opusConn.Close()
 		return nil, fmt.Errorf("listen bridge speex output: %w", err)
 	}
-	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32)}
+	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4)}
 	bundle := filepath.Join(g.bundleRoot, "bin", "gst-launch-1.0")
 	p.commands = []*exec.Cmd{
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51060", "caps=application/x-rtp,media=audio,encoding-name=SPEEX,clock-rate=8000,payload=110", "!", "rtpspeexdepay", "!", "speexdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51062"),
@@ -251,6 +346,7 @@ type gstreamerAudioPipeline struct {
 	commands                             []*exec.Cmd
 	opusConn, speexConn, speexIn, opusIn *net.UDPConn
 	opusOut, speexOut                    chan *rtp.Packet
+	errors                               chan error
 	closed                               bool
 }
 
@@ -261,6 +357,13 @@ func (p *gstreamerAudioPipeline) wait(command *exec.Cmd, name string) {
 	p.mu.Unlock()
 	if !closed {
 		p.logger.Error("audio bridge pipeline exited", "pipeline", name, "error", err)
+		if err == nil {
+			err = fmt.Errorf("audio bridge pipeline %s exited unexpectedly", name)
+		}
+		select {
+		case p.errors <- err:
+		default:
+		}
 	}
 }
 
@@ -287,6 +390,7 @@ func (p *gstreamerAudioPipeline) WriteBackchannelOpus(packet *rtp.Packet) error 
 }
 func (p *gstreamerAudioPipeline) ReadOpusOut() <-chan *rtp.Packet  { return p.opusOut }
 func (p *gstreamerAudioPipeline) ReadSpeexOut() <-chan *rtp.Packet { return p.speexOut }
+func (p *gstreamerAudioPipeline) Errors() <-chan error             { return p.errors }
 func (p *gstreamerAudioPipeline) write(packet *rtp.Packet, conn **net.UDPConn, port int) error {
 	if packet == nil {
 		return nil
