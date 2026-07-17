@@ -172,7 +172,7 @@ func (d *streamDialer) SetRemoteDialogEnded(callback func()) {
 }
 
 // Register announces this persistent Companion SIP endpoint to Flexisip.
-// Registration failure is non-fatal, matching V2's startup behavior.
+// Registration failure is non-fatal so media startup can report its own failure.
 func (d *streamDialer) Register(ctx context.Context) error {
 	if d.client == nil || d.target.URI.Host == "" {
 		return errors.New("sip: registration unavailable")

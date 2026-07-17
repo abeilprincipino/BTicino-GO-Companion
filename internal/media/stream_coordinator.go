@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrStreamBusy     = errors.New("media: intercom stream is busy")
-	ErrExternalStream = errors.New("media: intercom stream is active externally")
+	ErrStreamBusy             = errors.New("media: intercom stream is busy")
+	ErrExternalStream         = errors.New("media: intercom stream is active externally")
+	ErrBackchannelUnavailable = errors.New("media: backchannel is unavailable")
 )
 
 const (
@@ -79,6 +80,11 @@ type ManagedSource interface {
 	Close(context.Context) error
 }
 
+// ManagedSourceBackchannel is an optional uplink capability of a managed source.
+type ManagedSourceBackchannel interface {
+	WriteBackchannelRTP(*rtp.Packet) error
+}
+
 type ManagedSourceFactory func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error)
 
 // StreamCoordinator is the sole owner of the intercom's single media source.
@@ -140,10 +146,18 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 				events.AudioRTP(packet)
 			}
 		},
-		RemoteBYE: func() { c.stop(lease, "remote sip bye") },
+		RemoteBYE: func() {
+			c.stop(lease, "remote sip bye")
+			if events.RemoteBYE != nil {
+				events.RemoteBYE()
+			}
+		},
 		Failed: func(err error) {
 			c.logger.Error("managed source failed", "lease_id", lease.id, "error", err)
 			c.stop(lease, "managed source failure")
+			if events.Failed != nil {
+				events.Failed(err)
+			}
 		},
 	})
 	if err != nil || source == nil {
@@ -221,6 +235,24 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 
 func (c *StreamCoordinator) Release(lease *StreamLease) bool {
 	return c.stop(lease, "consumer released")
+}
+
+// WriteBackchannelRTP forwards uplink RTP only to the current live source lease.
+func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.Packet) error {
+	if lease == nil {
+		return ErrBackchannelUnavailable
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.leaseID != lease.id || c.starting || c.stopping {
+		return ErrBackchannelUnavailable
+	}
+	backchannel, ok := c.source.(ManagedSourceBackchannel)
+	if !ok || backchannel == nil {
+		return ErrBackchannelUnavailable
+	}
+	return backchannel.WriteBackchannelRTP(packet)
 }
 
 func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {

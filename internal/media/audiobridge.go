@@ -312,7 +312,7 @@ func (b *AudioBridge) forward(ctx context.Context, pipeline AudioPipeline, done 
 	}
 }
 
-// GStreamerAudioBridge is the V2-compatible process implementation of GStreamerAudio.
+// GStreamerAudioBridge is the process implementation of GStreamerAudio.
 type GStreamerAudioBridge struct {
 	bundleRoot string
 	logger     *slog.Logger

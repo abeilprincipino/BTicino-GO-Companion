@@ -36,9 +36,9 @@ type UpdateControl interface {
 }
 
 type WebRTCControl interface {
-	Offer(source media.Source, sessionID media.SessionID, offer media.SessionDescription) (media.SessionDescription, error)
-	AddCandidate(sessionID media.SessionID, candidate media.ICECandidate) error
-	Close(sessionID media.SessionID) error
+	Offer(ctx context.Context, sessionID, entrypointID, offerSDP string) (string, error)
+	AddICECandidate(sessionID string, candidate media.ICECandidate) error
+	Close(sessionID string) error
 }
 
 type SnapshotControl interface {

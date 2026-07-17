@@ -143,7 +143,7 @@ func TestCreateRejectsMissingMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsLegacyCompanionMetadata(t *testing.T) {
+func TestLoadRejectsUnsupportedCompanionMetadata(t *testing.T) {
 	t.Parallel()
 
 	for _, field := range []string{"model", "device_id"} {
@@ -157,7 +157,7 @@ func TestLoadRejectsLegacyCompanionMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config: %v", err)
 			}
-			data = []byte(strings.Replace(string(data), "companion:\n", "companion:\n    "+field+": legacy\n", 1))
+			data = []byte(strings.Replace(string(data), "companion:\n", "companion:\n    "+field+": invalid\n", 1))
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatalf("write config: %v", err)
 			}

@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"bticino-go-companion/internal/media"
+	"github.com/pion/rtp"
 )
 
 func TestOpenConfigCreatesThenReusesConfig(t *testing.T) {
@@ -101,6 +104,58 @@ func TestServeRunsAPIAndWebUI(t *testing.T) {
 		t.Fatal("servers did not shut down")
 	}
 }
+
+func TestBridgeSourceWritesBackchannelToAudioBridge(t *testing.T) {
+	pipeline := &appAudioPipeline{
+		opusOut:  make(chan *rtp.Packet),
+		speexOut: make(chan *rtp.Packet),
+		errors:   make(chan error),
+	}
+	bridge := media.NewAudioBridge(appGStreamerAudio{pipeline: pipeline}, func(*rtp.Packet) {}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	if err := bridge.Start(context.Background()); err != nil {
+		t.Fatalf("start bridge: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := bridge.Stop(); err != nil {
+			t.Errorf("stop bridge: %v", err)
+		}
+	})
+
+	packet := &rtp.Packet{Header: rtp.Header{PayloadType: 112}}
+	if err := (&bridgeSource{bridge: bridge}).WriteBackchannelRTP(packet); err != nil {
+		t.Fatalf("write backchannel RTP: %v", err)
+	}
+	if pipeline.backchannelPacket != packet {
+		t.Fatal("audio bridge did not receive backchannel packet")
+	}
+}
+
+type appGStreamerAudio struct {
+	pipeline media.AudioPipeline
+}
+
+func (g appGStreamerAudio) StartAudioBridge(context.Context) (media.AudioPipeline, error) {
+	return g.pipeline, nil
+}
+
+type appAudioPipeline struct {
+	backchannelPacket *rtp.Packet
+	opusOut           chan *rtp.Packet
+	speexOut          chan *rtp.Packet
+	errors            chan error
+}
+
+func (*appAudioPipeline) WriteIntercomSpeex(*rtp.Packet) error { return nil }
+
+func (p *appAudioPipeline) WriteBackchannelOpus(packet *rtp.Packet) error {
+	p.backchannelPacket = packet
+	return nil
+}
+
+func (p *appAudioPipeline) ReadOpusOut() <-chan *rtp.Packet  { return p.opusOut }
+func (p *appAudioPipeline) ReadSpeexOut() <-chan *rtp.Packet { return p.speexOut }
+func (p *appAudioPipeline) Errors() <-chan error             { return p.errors }
+func (*appAudioPipeline) Close() error                       { return nil }
 
 func testListener(t *testing.T) net.Listener {
 	t.Helper()

@@ -21,7 +21,7 @@ var (
 	ErrAVFlowTimeout     = errors.New("openwebnet av rtp flow did not start")
 )
 
-// AVClient starts the clear-RTP streams accepted by the V2 implementation.
+// AVClient starts the intercom clear-RTP streams.
 type AVClient struct {
 	logger       *slog.Logger
 	address      string

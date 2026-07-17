@@ -89,6 +89,9 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/enable", s.enableVoicemail)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/disable", s.disableVoicemail)
 	s.handleProtected(mux, "GET", "/api/v3/ws", s.websocket)
+	s.handleProtected(mux, "POST", "/api/v3/webrtc/offer", s.webrtcOffer)
+	s.handleProtected(mux, "POST", "/api/v3/webrtc/candidate", s.webrtcCandidate)
+	s.handleProtected(mux, "POST", "/api/v3/webrtc/close", s.webrtcClose)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
 	return logging.HTTP(s.logger, mux)

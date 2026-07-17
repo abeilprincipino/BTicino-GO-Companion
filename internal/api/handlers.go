@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 var (
@@ -132,45 +133,24 @@ func (s *Server) webrtcOffer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Source    media.Source             `json:"source"`
-		SessionID media.SessionID          `json:"session_id"`
-		Offer     media.SessionDescription `json:"offer"`
+		SessionID    string `json:"session_id"`
+		EntrypointID string `json:"entrypoint_id"`
+		OfferSDP     string `json:"offer_sdp"`
 	}
 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 
-	answer, err := s.webrtc.Offer(req.Source, req.SessionID, req.Offer)
+	answer, err := s.webrtc.Offer(r.Context(), req.SessionID, req.EntrypointID, req.OfferSDP)
 	if err != nil {
 		writeCommandError(w, err)
 		return
 	}
 
-	writeOK(w, http.StatusOK, map[string]any{"answer": answer})
-}
-
-func (s *Server) webrtcCandidate(w http.ResponseWriter, r *http.Request) {
-	if s.webrtc == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "webrtc control is unavailable")
-		return
-	}
-
-	var req struct {
-		SessionID media.SessionID    `json:"session_id"`
-		Candidate media.ICECandidate `json:"candidate"`
-	}
-
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-
-	if err := s.webrtc.AddCandidate(req.SessionID, req.Candidate); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
+	writeOK(w, http.StatusOK, map[string]any{
+		"session_id": req.SessionID, "entrypoint_id": req.EntrypointID, "answer_sdp": answer,
+	})
 }
 
 func (s *Server) webrtcClose(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +160,7 @@ func (s *Server) webrtcClose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		SessionID media.SessionID `json:"session_id"`
+		SessionID string `json:"session_id"`
 	}
 
 	if !decodeJSON(w, r, &req) {
@@ -192,7 +172,33 @@ func (s *Server) webrtcClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeOK(w, http.StatusOK, nil)
+	writeOK(w, http.StatusOK, map[string]any{"session_id": req.SessionID, "action": "close"})
+}
+
+func (s *Server) webrtcCandidate(w http.ResponseWriter, r *http.Request) {
+	if s.webrtc == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "webrtc control is unavailable")
+		return
+	}
+
+	var req struct {
+		SessionID string             `json:"session_id"`
+		Candidate media.ICECandidate `json:"candidate"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Candidate.Candidate) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_candidate", "candidate is required")
+		return
+	}
+
+	if err := s.webrtc.AddICECandidate(req.SessionID, req.Candidate); err != nil {
+		writeCommandError(w, err)
+		return
+	}
+
+	writeOK(w, http.StatusOK, map[string]any{"session_id": strings.TrimSpace(req.SessionID), "action": "candidate"})
 }
 
 func (s *Server) systemReboot(w http.ResponseWriter, r *http.Request) {

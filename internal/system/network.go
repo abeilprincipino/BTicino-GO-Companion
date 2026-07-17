@@ -52,7 +52,7 @@ type NetworkSnapshot struct {
 }
 
 // DetectNetworkSnapshot reads the active WiFi service from ConnMan. This uses
-// the same source as the V2 companion rather than kernel interface ordering.
+// the configured source rather than kernel interface ordering.
 func DetectNetworkSnapshot() (NetworkSnapshot, bool) {
 	out, err := exec.Command("/usr/bin/dbus-send", "--system", "--print-reply", "--dest=net.connman", "/", "net.connman.Manager.GetServices").Output()
 	if err != nil {

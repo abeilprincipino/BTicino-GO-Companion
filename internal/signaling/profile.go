@@ -17,7 +17,7 @@ var (
 )
 
 // DiscoverFlexisipDomain returns the local Flexisip domain using the same
-// file paths and precedence as the V2 companion.
+// file paths and precedence required by the intercom.
 func DiscoverFlexisipDomain() string {
 	if body, ok := readFirstExistingFile(flexisipDomainRegistrationPaths); ok {
 		for _, line := range splitNonEmptyLines(body) {

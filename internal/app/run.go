@@ -121,7 +121,10 @@ func run(
 	}
 	updater := system.NewUpdater(updateSource, build, updatePolicy, restartCompanion)
 
-	webrtc := media.NewWebRTCService(nil, nil, nil, nil)
+	webrtc, err := media.NewWebRTCService(rtspServer.Coordinator(), initialConfig.Companion.Entrypoints)
+	if err != nil {
+		return fmt.Errorf("create WebRTC service: %w", err)
+	}
 	snapshot := media.NewSnapshotService(nil, nil, nil)
 
 	authStore := auth.NewStore(configStore)
@@ -224,6 +227,11 @@ func run(
 }
 
 func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+	backchannel, err := media.NewUDPBackchannel("")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
+	}
+
 	var bridge *media.AudioBridge
 	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, events.VideoRTP, func(packet *rtp.Packet) {
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
@@ -231,16 +239,24 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 		}
 	}, events.RemoteBYE)
 	if err != nil {
+		_ = backchannel.Close()
 		return nil, nil, err
 	}
-	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, nil, logger, events.Failed)
-	return &bridgeSource{source: source, bridge: bridge}, closeSource, nil
+	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, backchannel, logger, events.Failed)
+	return &bridgeSource{source: source, bridge: bridge}, func() {
+		closeSource()
+		if err := backchannel.Close(); err != nil {
+			logger.Warn("close udp backchannel", "error", err)
+		}
+	}, nil
 }
 
 type bridgeSource struct {
 	source *media.SourceSession
 	bridge *media.AudioBridge
 }
+
+var _ media.ManagedSourceBackchannel = (*bridgeSource)(nil)
 
 func (s *bridgeSource) Start(ctx context.Context) error {
 	if err := s.bridge.Start(ctx); err != nil {
@@ -259,6 +275,10 @@ func (s *bridgeSource) Close(ctx context.Context) error {
 		err = bridgeErr
 	}
 	return err
+}
+
+func (s *bridgeSource) WriteBackchannelRTP(packet *rtp.Packet) error {
+	return s.bridge.WriteBackchannelOpus(packet)
 }
 
 func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {

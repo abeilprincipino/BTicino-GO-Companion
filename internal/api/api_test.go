@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/system"
 	"context"
 	"encoding/json"
@@ -247,6 +248,67 @@ func TestServer_UnlockEntrypoint(t *testing.T) {
 	}
 }
 
+func TestServer_WebRTCContract(t *testing.T) {
+	server, _ := newTestServer(t)
+	control := &webRTCRecorder{answer: "answer-sdp"}
+	server.SetWebRTC(control)
+	unauthorizedCandidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{"candidate":"candidate"}}`))
+	unauthorizedCandidateResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthorizedCandidateResponse, unauthorizedCandidate)
+	if unauthorizedCandidateResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized candidate response = %d: %s", unauthorizedCandidateResponse.Code, unauthorizedCandidateResponse.Body.String())
+	}
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offer := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/offer", strings.NewReader(`{"session_id":"session-1","entrypoint_id":"main","offer_sdp":"offer-sdp"}`))
+	offer.Header.Set("Authorization", "Bearer "+token)
+	offer.Header.Set("Content-Type", "application/json")
+	offerResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(offerResponse, offer)
+	var offerBody struct {
+		OK           bool   `json:"ok"`
+		SessionID    string `json:"session_id"`
+		EntrypointID string `json:"entrypoint_id"`
+		AnswerSDP    string `json:"answer_sdp"`
+	}
+	if offerResponse.Code != http.StatusOK || json.Unmarshal(offerResponse.Body.Bytes(), &offerBody) != nil || !offerBody.OK || offerBody.SessionID != "session-1" || offerBody.EntrypointID != "main" || offerBody.AnswerSDP != "answer-sdp" {
+		t.Fatalf("offer response = %d: %s", offerResponse.Code, offerResponse.Body.String())
+	}
+	if control.sessionID != "session-1" || control.entrypointID != "main" || control.offerSDP != "offer-sdp" {
+		t.Fatalf("offer call = %#v", control)
+	}
+
+	candidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{"candidate":"candidate:1 1 udp 1 192.0.2.1 12345 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}}`))
+	candidate.Header.Set("Authorization", "Bearer "+token)
+	candidateResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(candidateResponse, candidate)
+	if candidateResponse.Code != http.StatusOK || !strings.Contains(candidateResponse.Body.String(), `"action":"candidate"`) || control.candidateSessionID != "session-1" || control.candidate.Candidate == "" || control.candidate.SDPMid == nil || *control.candidate.SDPMid != "0" || control.candidate.SDPMLineIndex == nil || *control.candidate.SDPMLineIndex != 0 || control.candidate.UsernameFragment == nil || *control.candidate.UsernameFragment != "ufrag" {
+		t.Fatalf("candidate response = %d: %s, call = %#v", candidateResponse.Code, candidateResponse.Body.String(), control)
+	}
+
+	invalidCandidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{}}`))
+	invalidCandidate.Header.Set("Authorization", "Bearer "+token)
+	invalidCandidateResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invalidCandidateResponse, invalidCandidate)
+	if invalidCandidateResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid candidate response = %d: %s", invalidCandidateResponse.Code, invalidCandidateResponse.Body.String())
+	}
+
+	close := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/close", strings.NewReader(`{"session_id":"session-1"}`))
+	close.Header.Set("Authorization", "Bearer "+token)
+	close.Header.Set("Content-Type", "application/json")
+	closeResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(closeResponse, close)
+	if closeResponse.Code != http.StatusOK || !strings.Contains(closeResponse.Body.String(), `"action":"close"`) || control.closed != "session-1" {
+		t.Fatalf("close response = %d: %s", closeResponse.Code, closeResponse.Body.String())
+	}
+
+}
+
 func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	t.Parallel()
 
@@ -362,6 +424,29 @@ type failingConn struct{}
 
 type unlockRecorder struct {
 	entrypoint core.EntrypointID
+}
+
+type webRTCRecorder struct {
+	answer                            string
+	sessionID, entrypointID, offerSDP string
+	closed                            string
+	candidateSessionID                string
+	candidate                         media.ICECandidate
+}
+
+func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string) (string, error) {
+	r.sessionID, r.entrypointID, r.offerSDP = sessionID, entrypointID, offerSDP
+	return r.answer, nil
+}
+
+func (r *webRTCRecorder) AddICECandidate(sessionID string, candidate media.ICECandidate) error {
+	r.candidateSessionID, r.candidate = sessionID, candidate
+	return nil
+}
+
+func (r *webRTCRecorder) Close(sessionID string) error {
+	r.closed = sessionID
+	return nil
 }
 
 func (r *unlockRecorder) Unlock(_ context.Context, id core.EntrypointID) error {

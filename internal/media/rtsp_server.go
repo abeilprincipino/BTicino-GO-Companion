@@ -98,6 +98,9 @@ func (s *RTSPServer) ObserveControlStop() { s.coordinator.ObserveControlStop() }
 
 func (s *RTSPServer) StreamSnapshot() StreamSnapshot { return s.coordinator.Snapshot() }
 
+// Coordinator returns the coordinator shared by RTSP and WebRTC consumers.
+func (s *RTSPServer) Coordinator() *StreamCoordinator { return s.coordinator }
+
 func (s *RTSPServer) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

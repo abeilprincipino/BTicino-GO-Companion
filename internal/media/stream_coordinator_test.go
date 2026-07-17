@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/pion/rtp"
 )
 
 func TestStreamCoordinatorConfirmsReservedStart(t *testing.T) {
@@ -121,6 +123,90 @@ func TestStreamCoordinatorIgnoresControlStopWithoutCurrentAttemptStart(t *testin
 	}
 }
 
+func TestStreamCoordinatorWriteBackchannelRTP(t *testing.T) {
+	source := &backchannelManagedSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := testRTPPacket(1)
+	if err := c.WriteBackchannelRTP(lease, packet); err != nil {
+		t.Fatalf("WriteBackchannelRTP() error = %v", err)
+	}
+	if source.packet != packet {
+		t.Fatal("backchannel did not receive packet")
+	}
+}
+
+func TestStreamCoordinatorWriteBackchannelRTPRejectsUnavailableLease(t *testing.T) {
+	source := &backchannelManagedSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		lease *StreamLease
+		state func()
+	}{
+		{name: "nil lease", lease: nil},
+		{name: "stale lease", lease: &StreamLease{id: lease.id + 1}},
+		{
+			name:  "starting lease",
+			lease: lease,
+			state: func() {
+				c.mu.Lock()
+				c.starting = true
+				c.mu.Unlock()
+			},
+		},
+		{
+			name:  "stopping lease",
+			lease: lease,
+			state: func() {
+				c.mu.Lock()
+				c.stopping = true
+				c.mu.Unlock()
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c.mu.Lock()
+			c.starting = false
+			c.stopping = false
+			c.mu.Unlock()
+			if test.state != nil {
+				test.state()
+			}
+			if err := c.WriteBackchannelRTP(test.lease, testRTPPacket(1)); !errors.Is(err, ErrBackchannelUnavailable) {
+				t.Fatalf("WriteBackchannelRTP() error = %v, want ErrBackchannelUnavailable", err)
+			}
+			if source.packet != nil {
+				t.Fatal("backchannel received packet for unavailable lease")
+			}
+		})
+	}
+}
+
+func TestStreamCoordinatorWriteBackchannelRTPRejectsSourceWithoutBackchannel(t *testing.T) {
+	c := NewStreamCoordinator(nil, testManagedSourceFactory())
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteBackchannelRTP(lease, testRTPPacket(1)); !errors.Is(err, ErrBackchannelUnavailable) {
+		t.Fatalf("WriteBackchannelRTP() error = %v, want ErrBackchannelUnavailable", err)
+	}
+}
+
 func beginControlAttempt(c *StreamCoordinator) {
 	c.mu.Lock()
 	c.starting = true
@@ -147,3 +233,14 @@ type remoteBYESource struct {
 func (*remoteBYESource) Start(context.Context) error   { return nil }
 func (s *remoteBYESource) Close(context.Context) error { s.closes++; return nil }
 func (s *remoteBYESource) remote()                     { s.callback() }
+
+type backchannelManagedSource struct {
+	packet *rtp.Packet
+}
+
+func (*backchannelManagedSource) Start(context.Context) error { return nil }
+func (*backchannelManagedSource) Close(context.Context) error { return nil }
+func (s *backchannelManagedSource) WriteBackchannelRTP(packet *rtp.Packet) error {
+	s.packet = packet
+	return nil
+}
