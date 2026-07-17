@@ -151,6 +151,21 @@ func TestSessionIncludesBuildInfoAndUpdateStatusEndpoint(t *testing.T) {
 	}
 }
 
+func TestSessionDoesNotExposeOwnerOrBuildMetadataWithoutAuthentication(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, nil)
+	response := request(t, server, http.MethodGet, "/webui/api/session", nil, nil)
+	var sessionBody map[string]any
+	decodeResponse(t, response, &sessionBody)
+
+	for _, field := range []string{"username", "version", "git_sha"} {
+		if _, exposed := sessionBody[field]; exposed {
+			t.Errorf("unauthenticated session exposed %q", field)
+		}
+	}
+}
+
 func TestPasswordChangeRotatesSecretAndInvalidatesEverySession(t *testing.T) {
 	t.Parallel()
 

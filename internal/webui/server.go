@@ -264,15 +264,18 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if authenticated {
 		refreshSessionCookie(w, r)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"authenticated":            authenticated,
 		"password_change_required": authenticated && current.bootstrap,
 		"bootstrap":                authenticated && current.bootstrap,
 		"bootstrap_required":       cfg.WebUI.AdminPasswordHash == "",
-		"username":                 cfg.WebUI.AdminUsername,
-		"version":                  system.BuildVersion,
-		"git_sha":                  system.BuildGitSHA,
-	})
+	}
+	if authenticated {
+		response["username"] = cfg.WebUI.AdminUsername
+		response["version"] = system.BuildVersion
+		response["git_sha"] = system.BuildGitSHA
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
