@@ -112,7 +112,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
-	writeOK(w, http.StatusOK, map[string]any{"claimed": s.auth != nil && !s.auth.NeedsClaim()})
+	if s.auth == nil || s.config == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is unavailable")
+		return
+	}
+
+	status := s.auth.Status()
+	cfg := s.config.Snapshot()
+	writeOK(w, http.StatusOK, map[string]any{
+		"device_id":     cfg.Companion.DeviceID,
+		"instance_id":   status.InstanceID,
+		"model":         cfg.Companion.Model,
+		"pairing_state": status.State,
+	})
 }
 
 func (s *Server) pairChallenge(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +311,10 @@ func writeAuthError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "repair_code_invalid", "repair code is invalid or expired")
 	case errors.Is(err, auth.ErrRepairNotAllowed):
 		writeError(w, http.StatusConflict, "repair_not_allowed", "claim reset is not currently allowed")
+	case errors.Is(err, auth.ErrSetupRequired):
+		writeError(w, http.StatusConflict, "setup_required", "companion owner setup is required")
+	case errors.Is(err, auth.ErrClaimNotAllowed):
+		writeError(w, http.StatusConflict, "claim_not_allowed", "initial claim is not currently allowed")
 	case errors.Is(err, auth.ErrAlreadyClaimed):
 		writeError(w, http.StatusConflict, "already_claimed", "device is already claimed")
 	case errors.Is(err, auth.ErrStoreUnavailable):

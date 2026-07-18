@@ -81,10 +81,7 @@ func TestServer_EnvelopesAndBearer(t *testing.T) {
 func TestServer_Pair(t *testing.T) {
 	t.Parallel()
 
-	server, store := newTestServer(t)
-	if _, err := server.auth.IssueInitialClaimCode(); err != nil {
-		t.Fatal(err)
-	}
+	server, _ := newTestServer(t)
 	challengeRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/challenge", nil)
 	challengeRequest.RemoteAddr = "192.0.2.1:1234"
 	challengeResponse := httptest.NewRecorder()
@@ -97,7 +94,11 @@ func TestServer_Pair(t *testing.T) {
 		t.Fatalf("challenge response = %s", challengeResponse.Body.String())
 	}
 
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/claim", strings.NewReader(`{"challenge_id":"`+challenge.ChallengeID+`","claim_code":"`+store.Snapshot().Auth.ClaimCode+`"}`))
+	claimCode, err := server.auth.InitialClaimCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/claim", strings.NewReader(`{"challenge_id":"`+challenge.ChallengeID+`","claim_code":"`+claimCode+`"}`))
 	request.RemoteAddr = "192.0.2.1:1234"
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -107,6 +108,29 @@ func TestServer_Pair(t *testing.T) {
 	}
 	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &claim) != nil || claim.AccessToken == "" {
 		t.Fatalf("claim response = %s", response.Body.String())
+	}
+}
+
+func TestServer_AuthStatusPublishesSafePairingState(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/auth/status", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	var status struct {
+		InstanceID   string `json:"instance_id"`
+		PairingState string `json:"pairing_state"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &status) != nil {
+		t.Fatalf("auth status response = %d: %s", response.Code, response.Body.String())
+	}
+	if status.PairingState != string(config.PairingStateClaimable) {
+		t.Fatalf("pairing state = %q, want claimable", status.PairingState)
+	}
+	if status.InstanceID != store.Snapshot().Auth.InstanceID {
+		t.Fatalf("instance id = %q, want %q", status.InstanceID, store.Snapshot().Auth.InstanceID)
 	}
 }
 
@@ -441,7 +465,18 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 		t.Fatal(err)
 	}
 
-	return NewServer(auth.NewStore(store), store, core.NewProjector(), slog.New(slog.DiscardHandler)), store
+	authStore := auth.NewStore(store)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authStore.StartInitialClaim(); err != nil {
+		t.Fatal(err)
+	}
+
+	return NewServer(authStore, store, core.NewProjector(), slog.New(slog.DiscardHandler)), store
 }
 
 type failingConn struct{}

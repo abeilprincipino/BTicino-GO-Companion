@@ -1,12 +1,12 @@
 package discovery
 
 import (
+	"bticino-go-companion/internal/config"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,12 +24,12 @@ const (
 var ErrInvalidDeviceID = errors.New("invalid mDNS device ID")
 
 type Advertisement struct {
-	DeviceID   string
-	Name       string
-	Model      string
-	NeedsClaim bool
-	Port       int
-	Interfaces []net.Interface
+	DeviceID     string
+	Model        string
+	PairingState config.PairingState
+	InstanceID   string
+	Port         int
+	Interfaces   []net.Interface
 }
 
 type Registration interface {
@@ -129,7 +129,7 @@ func wait(ctx context.Context, duration time.Duration) error {
 }
 
 func advertisementsEqual(left, right Advertisement) bool {
-	return left.DeviceID == right.DeviceID && left.Name == right.Name && left.Model == right.Model && left.NeedsClaim == right.NeedsClaim && left.Port == right.Port && slices.EqualFunc(left.Interfaces, right.Interfaces, func(a, b net.Interface) bool { return a.Index == b.Index && a.Name == b.Name })
+	return left.DeviceID == right.DeviceID && left.Model == right.Model && left.PairingState == right.PairingState && left.InstanceID == right.InstanceID && left.Port == right.Port && slices.EqualFunc(left.Interfaces, right.Interfaces, func(a, b net.Interface) bool { return a.Index == b.Index && a.Name == b.Name })
 }
 
 func registrationRequest(advertisement Advertisement) (RegistrationRequest, error) {
@@ -157,9 +157,9 @@ func txtRecords(advertisement Advertisement) []string {
 		"device_id=" + advertisement.DeviceID,
 		"api=v3",
 		"scheme=http",
-		"name=" + strings.TrimSpace(advertisement.Name),
 		"model=" + strings.TrimSpace(advertisement.Model),
-		"needs_claim=" + strconv.FormatBool(advertisement.NeedsClaim),
+		"pairing_state=" + string(advertisement.PairingState),
+		"instance_id=" + strings.TrimSpace(advertisement.InstanceID),
 	}
 }
 

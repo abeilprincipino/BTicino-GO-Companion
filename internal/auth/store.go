@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bticino-go-companion/internal/config"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -33,6 +34,8 @@ var (
 	ErrChallengeSourceMismatch = errors.New("challenge source mismatch")
 	ErrInvalidClaimCode        = errors.New("invalid claim code")
 	ErrAlreadyClaimed          = errors.New("device already claimed")
+	ErrSetupRequired           = errors.New("companion owner setup is required")
+	ErrClaimNotAllowed         = errors.New("initial claim is not currently allowed")
 	ErrRepairNotAllowed        = errors.New("repair flow is not allowed")
 	ErrInvalidRepairCode       = errors.New("invalid repair code")
 	ErrRepairCodeExpired       = errors.New("repair code expired")
@@ -41,6 +44,14 @@ var (
 type Challenge struct {
 	ID        string
 	ExpiresAt time.Time
+}
+
+type PairingStatus struct {
+	State              config.PairingState
+	InstanceID         string
+	ClaimCode          string
+	RecoveryCode       string
+	RecoveryCodeExpiry time.Time
 }
 
 type challenge struct {
@@ -94,8 +105,14 @@ func (s *Store) CreateChallenge(sourceIP string) (Challenge, error) {
 	if s.config == nil {
 		return Challenge{}, ErrStoreUnavailable
 	}
-	if !s.NeedsClaim() {
+	switch s.PairingState() {
+	case config.PairingStateClaimed:
 		return Challenge{}, ErrAlreadyClaimed
+	case config.PairingStateSetupRequired:
+		return Challenge{}, ErrSetupRequired
+	case config.PairingStateClaimable:
+	default:
+		return Challenge{}, ErrClaimNotAllowed
 	}
 
 	id, err := config.RandomHex(challengeBytes)
@@ -125,8 +142,14 @@ func (s *Store) Claim(sourceIP, challengeID, claimCode string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-	if !s.NeedsClaim() {
+	switch s.PairingState() {
+	case config.PairingStateClaimed:
 		return "", ErrAlreadyClaimed
+	case config.PairingStateSetupRequired:
+		return "", ErrSetupRequired
+	case config.PairingStateClaimable:
+	default:
+		return "", ErrClaimNotAllowed
 	}
 
 	now := s.now()
@@ -153,18 +176,21 @@ func (s *Store) Claim(sourceIP, challengeID, claimCode string) (string, error) {
 		return "", ErrChallengeSourceMismatch
 	}
 
-	token, err := config.RandomHex(bearerTokenBytes)
-	if err != nil {
-		return "", fmt.Errorf("generate bearer token: %w", err)
-	}
-
+	var token string
 	if err := s.config.Update(func(cfg *config.Config) error {
-		if !constantTimeClaimCodeEqual(claimCode, cfg.Auth.ClaimCode) {
+		if cfg.Auth.PairingState != config.PairingStateClaimable {
+			return ErrClaimNotAllowed
+		}
+		if !constantTimeClaimCodeEqual(claimCode, deriveClaimCode(cfg.WebUI.SessionSecret)) {
 			return ErrInvalidClaimCode
 		}
-
+		var err error
+		token, err = config.RandomHex(bearerTokenBytes)
+		if err != nil {
+			return fmt.Errorf("generate bearer token: %w", err)
+		}
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
-		cfg.Auth.ClaimCode = ""
+		cfg.Auth.PairingState = config.PairingStateClaimed
 
 		return nil
 	}); err != nil {
@@ -184,36 +210,77 @@ func (s *Store) ValidateBearer(token string) bool {
 	return constantTimeHexEqual(bearerTokenHash(token), s.config.Snapshot().Auth.BearerTokenHash, sha256.Size)
 }
 
-func (s *Store) NeedsClaim() bool {
+func (s *Store) PairingState() config.PairingState {
 	if s.config == nil {
-		return true
+		return config.PairingStateError
 	}
 
-	return s.config.Snapshot().Auth.BearerTokenHash == ""
+	return s.config.Snapshot().Auth.PairingState
 }
 
-func (s *Store) IssueInitialClaimCode() (string, error) {
+func (s *Store) StartInitialClaim() (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-	if !s.NeedsClaim() {
+	if s.PairingState() == config.PairingStateClaimed {
 		return "", ErrAlreadyClaimed
 	}
-
-	code, err := config.GenerateClaimCode()
-	if err != nil {
-		return "", fmt.Errorf("generate claim code: %w", err)
+	if s.PairingState() != config.PairingStateSetupRequired {
+		return "", ErrClaimNotAllowed
 	}
 	if err := s.config.Update(func(cfg *config.Config) error {
-		if cfg.Auth.ClaimCode != "" {
-			return ErrAlreadyClaimed
+		if cfg.Auth.PairingState != config.PairingStateSetupRequired {
+			return ErrClaimNotAllowed
 		}
-		cfg.Auth.ClaimCode = code
+		cfg.Auth.PairingState = config.PairingStateClaimable
 		return nil
 	}); err != nil {
 		return "", err
 	}
-	return code, nil
+
+	return s.InitialClaimCode()
+}
+
+func (s *Store) InitialClaimCode() (string, error) {
+	if s.config == nil {
+		return "", ErrStoreUnavailable
+	}
+	cfg := s.config.Snapshot()
+	if cfg.Auth.PairingState == config.PairingStateSetupRequired {
+		return "", ErrSetupRequired
+	}
+	if cfg.Auth.PairingState != config.PairingStateClaimable {
+		return "", ErrClaimNotAllowed
+	}
+
+	return deriveClaimCode(cfg.WebUI.SessionSecret), nil
+}
+
+func (s *Store) Status() PairingStatus {
+	if s.config == nil {
+		return PairingStatus{State: config.PairingStateError}
+	}
+
+	cfg := s.config.Snapshot()
+	status := PairingStatus{
+		State:      cfg.Auth.PairingState,
+		InstanceID: cfg.Auth.InstanceID,
+	}
+	if status.State == config.PairingStateClaimable {
+		status.ClaimCode = deriveClaimCode(cfg.WebUI.SessionSecret)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.repair.value != "" && s.repair.expiresAt.After(s.now()) {
+		status.RecoveryCode = s.repair.value
+		status.RecoveryCodeExpiry = s.repair.expiresAt
+	}
+	if s.repair.value != "" && !s.repair.expiresAt.After(s.now()) {
+		s.repair = repairCode{}
+	}
+
+	return status
 }
 
 func (s *Store) RotateBearer() (string, error) {
@@ -227,8 +294,11 @@ func (s *Store) RotateBearer() (string, error) {
 	}
 
 	if err := s.config.Update(func(cfg *config.Config) error {
+		if cfg.Auth.PairingState != config.PairingStateClaimed && cfg.Auth.PairingState != config.PairingStateClaimable {
+			return ErrClaimNotAllowed
+		}
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
-		cfg.Auth.ClaimCode = ""
+		cfg.Auth.PairingState = config.PairingStateClaimed
 		return nil
 	}); err != nil {
 		return "", err
@@ -243,13 +313,17 @@ func (s *Store) RevokeBearer() error {
 	}
 
 	return s.config.Update(func(cfg *config.Config) error {
+		if cfg.Auth.PairingState != config.PairingStateClaimed {
+			return ErrClaimNotAllowed
+		}
 		cfg.Auth.BearerTokenHash = ""
+		cfg.Auth.PairingState = config.PairingStateClaimable
 		return nil
 	})
 }
 
 func (s *Store) IssueRepairCode() (string, time.Time, error) {
-	if s.NeedsClaim() {
+	if s.PairingState() != config.PairingStateClaimed {
 		return "", time.Time{}, ErrRepairNotAllowed
 	}
 
@@ -271,7 +345,7 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
-	if s.NeedsClaim() {
+	if s.PairingState() != config.PairingStateClaimed {
 		return "", ErrRepairNotAllowed
 	}
 
@@ -292,6 +366,9 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
 	if err := s.config.Update(func(cfg *config.Config) error {
+		if cfg.Auth.PairingState != config.PairingStateClaimed {
+			return ErrRepairNotAllowed
+		}
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
 		return nil
 	}); err != nil {
@@ -357,6 +434,14 @@ func constantTimeHexEqual(left, right string, size int) bool {
 func bearerTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func deriveClaimCode(sessionSecret string) string {
+	mac := hmac.New(sha256.New, []byte(sessionSecret))
+	_, _ = mac.Write([]byte("bticino-go-companion/initial-claim/v1"))
+	sum := mac.Sum(nil)
+	encoded := hex.EncodeToString(sum[:4])
+	return encoded[:4] + "-" + encoded[4:]
 }
 
 func constantTimeClaimCodeEqual(left, right string) bool {

@@ -3,6 +3,7 @@
 var _session = null;
 var _configDoc = null;
 var _sessionMonitor = null;
+var _sessionRefreshPending = false;
 
 function escapeHtml(str) {
   if (typeof str !== 'string') str = String(str);
@@ -24,7 +25,8 @@ function apiRequest(url, opts) {
         try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
       }
       if (!r.ok) {
-        var err = new Error(data.error || r.statusText || 'Request failed');
+        var message = data.error && typeof data.error === 'object' ? data.error.message : data.error;
+        var err = new Error(message || r.statusText || 'Request failed');
         err.status = r.status;
         err.data = data;
         throw err;
@@ -53,7 +55,8 @@ function apiPutRawJSON(url, jsonText) {
         try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
       }
       if (!r.ok) {
-        var err = new Error(data.error || r.statusText || 'Request failed');
+        var message = data.error && typeof data.error === 'object' ? data.error.message : data.error;
+        var err = new Error(message || r.statusText || 'Request failed');
         err.status = r.status;
         err.data = data;
         throw err;
@@ -65,13 +68,10 @@ function apiPutRawJSON(url, jsonText) {
 
 function handleApiError(err, fallback) {
   if (err && (err.status === 401 || err.status === 403)) {
-    _session = null;
-    stopPolling();
-    show('loginView');
-    showToast(err.message || 'Authentication required', 'error');
+    checkSession('expired');
     return;
   }
-  if (fallback) showToast(fallback, 'error');
+  if (fallback && _session && _session.authenticated) toast.show({ kind: 'error', message: fallback });
 }
 
 function getCached(url) {
@@ -81,19 +81,73 @@ function getCached(url) {
   } catch (e) { return null; }
 }
 
-function showToast(msg, type) {
-  var t = document.getElementById('_toast');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = '_toast';
-    document.body.appendChild(t);
+var toast = (function() {
+  function region() {
+    return document.getElementById('notificationRegion');
   }
-  t.textContent = msg;
-  t.className = 'toast toast-' + (type || 'info') + ' show';
-  clearTimeout(t._tid);
-  if (type === 'warning') return;
-  t._tid = setTimeout(function() { t.classList.remove('show'); }, 3500);
-}
+
+  function dismiss(id) {
+    var element = document.getElementById('notification-' + id);
+    if (!element) return;
+    if (element._timer) clearTimeout(element._timer);
+    element.remove();
+  }
+
+  function show(options) {
+    options = options || {};
+    var scope = options.scope || 'authenticated';
+    if (scope === 'authenticated' && (!_session || !_session.authenticated)) return;
+
+    var kind = options.kind || 'success';
+    var id = options.id || kind + '-' + options.message;
+    dismiss(id);
+
+    var element = document.createElement('div');
+    element.id = 'notification-' + id;
+    element.className = 'toast toast-' + kind;
+    element.dataset.scope = scope;
+    element.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+
+    var message = document.createElement('div');
+    message.className = 'toast-message';
+    message.textContent = options.message || '';
+    element.appendChild(message);
+
+    var action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'toast-action';
+    action.textContent = options.action ? options.action.label : '';
+    action.disabled = !options.action;
+    if (options.action) action.addEventListener('click', options.action.onClick);
+    element.appendChild(action);
+
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    close.textContent = '×';
+    close.disabled = options.dismissible === false;
+    if (!close.disabled) close.addEventListener('click', function() { dismiss(id); });
+    element.appendChild(close);
+
+    region().appendChild(element);
+    if (!options.persistent) {
+      element._timer = setTimeout(function() { dismiss(id); }, options.duration || 3000);
+    }
+  }
+
+  function clearScope(scope) {
+    region().querySelectorAll('[data-scope="' + scope + '"]').forEach(function(element) {
+      dismiss(element.id.replace('notification-', ''));
+    });
+  }
+
+  function clearAll() {
+    region().replaceChildren();
+  }
+
+  return { show: show, dismiss: dismiss, clearScope: clearScope, clearAll: clearAll };
+})();
 
 function switchPage(pageId) {
   document.querySelectorAll('.page').forEach(function(p) { p.classList.add('hidden'); });
@@ -109,9 +163,10 @@ function switchPage(pageId) {
   }
   if (pageId === 'about') renderAbout();
   if (pageId === 'diagnostics') renderDiagnostics();
-  if (pageId === 'configHa') loadConfig().then(renderHomeAssistantConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
+  if (pageId === 'configHa') renderHomeAssistantConfig();
   if (pageId === 'configEntrypoints') loadConfig().then(renderEntrypointsConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
   if (pageId === 'adminUser') renderAdminUser();
+  startPolling(pageId);
 }
 
 /* ──── Nav bar ──── */
@@ -186,30 +241,66 @@ function toggleVis(btn) {
 }
 
 /* ──── Session ──── */
-function checkSession() {
+function checkSession(reason) {
+  if (_sessionRefreshPending) return;
+  _sessionRefreshPending = true;
   return apiGet('/webui/api/session', { cache: true }).then(function(session) {
-    _session = session;
-    if (!session.authenticated) {
-      stopSessionMonitor();
-      renderLoginHelp(session.bootstrap_required);
-      resetLoginForm();
-      show('loginView');
-      return;
-    }
-    if (session.bootstrap) {
-      stopSessionMonitor();
-      show('setupView');
-      return;
-    }
-    startSessionMonitor();
-    show('appView');
-    buildNav();
-    switchPage('about');
+    applySession(session, reason);
   }).catch(function(err) {
-    resetLoginForm();
-    show('loginView');
-    showToast(err.message || 'Failed to connect', 'error');
+    enterLogin(null, 'connection_error', err.message);
+  }).finally(function() {
+    _sessionRefreshPending = false;
   });
+}
+
+function applySession(session, reason) {
+  _session = session;
+  if (!session.authenticated) {
+    enterLogin(session, reason);
+    return;
+  }
+  if (session.bootstrap) {
+    stopPolling();
+    toast.clearScope('authenticated');
+    resetSetupForm();
+    show('setupView');
+    return;
+  }
+  startSessionMonitor();
+  show('appView');
+  buildNav();
+  refreshPairingToast();
+  switchPage('about');
+}
+
+function enterLogin(session, reason, detail) {
+  _session = session;
+  stopSessionMonitor();
+  stopPolling();
+  toast.clearScope('authenticated');
+  renderLoginHelp(!!(session && session.bootstrap_required));
+  resetLoginForm();
+  setLoginNotice(reason, detail);
+  show('loginView');
+}
+
+function setLoginNotice(reason, detail) {
+  var notice = document.getElementById('loginNotice');
+  notice.className = 'auth-notice hidden';
+  notice.textContent = '';
+  if (reason === 'account_created') {
+    notice.textContent = 'Account created. Sign in with your new credentials.';
+    notice.className = 'auth-notice success';
+  } else if (reason === 'expired') {
+    notice.textContent = 'Your session ended. Sign in again.';
+    notice.className = 'auth-notice';
+  } else if (reason === 'restart') {
+    notice.textContent = 'Companion restarted. Sign in again.';
+    notice.className = 'auth-notice';
+  } else if (reason === 'connection_error') {
+    notice.textContent = detail || 'Unable to connect to Companion.';
+    notice.className = 'auth-notice error';
+  }
 }
 
 function renderLoginHelp(bootstrapRequired) {
@@ -240,17 +331,46 @@ function resetLoginForm() {
   button.textContent = 'Sign In';
 }
 
+function resetSetupForm() {
+  var form = document.getElementById('setupForm');
+  if (!form) return;
+  form.reset();
+  var error = document.getElementById('setupError');
+  if (error) error.classList.remove('visible');
+  var button = form.querySelector('.btn');
+  if (!button) return;
+  button.disabled = false;
+  button.textContent = 'Create Account';
+  updateBootstrapPasswordStatus();
+}
+
+function updateBootstrapPasswordStatus() {
+  var form = document.getElementById('setupForm');
+  if (!form) return;
+  var password = form.elements.password.value;
+  var confirmation = form.elements.password_confirm.value;
+  var passwordInput = form.elements.password;
+  var confirmationInput = form.elements.password_confirm;
+  var passwordMark = document.getElementById('setupPasswordMark');
+  var confirmationMark = document.getElementById('setupPasswordConfirmMark');
+
+  passwordMark.className = 'field-mark';
+  confirmationMark.className = 'field-mark';
+  passwordInput.classList.toggle('invalid', !!password && password.length < 8);
+  confirmationInput.classList.toggle('invalid', !!confirmation && password !== confirmation);
+  if (password.length >= 8) passwordMark.className = 'field-mark valid';
+  if (confirmation) {
+    var matches = password === confirmation;
+    if (matches) confirmationMark.className = 'field-mark valid';
+  }
+}
+
 function startSessionMonitor() {
   if (_sessionMonitor) return;
   _sessionMonitor = setInterval(function() {
     apiGet('/webui/api/session').then(function(session) {
       if (session.authenticated) return;
-      _session = null;
-      stopSessionMonitor();
-      renderLoginHelp(session.bootstrap_required);
-      resetLoginForm();
-      show('loginView');
-      showToast('Companion restarted. Sign in again.', 'info');
+      applySession(session, 'restart');
     }).catch(function() {});
   }, 5000);
 }
@@ -301,67 +421,68 @@ function submitSetup(event) {
   var errEl = document.getElementById('setupError');
   errEl.classList.remove('visible');
 
+  if (form.get('password') !== form.get('password_confirm')) {
+    errEl.textContent = 'Passwords do not match.';
+    errEl.classList.add('visible');
+    btn.disabled = false;
+    btn.textContent = 'Create Account';
+    return;
+  }
+
   apiPost('/webui/api/credentials', {
     username: form.get('username'),
     password: form.get('password'),
+    password_confirm: form.get('password_confirm'),
     current_password: ''
   }).then(function(data) {
     if (data.error) {
       errEl.textContent = data.error;
       errEl.classList.add('visible');
       btn.disabled = false;
-      btn.textContent = 'Save Credentials';
+      btn.textContent = 'Create Account';
       return;
     }
-    if (data.claim_code) {
-      window.alert('Home Assistant claim code: ' + data.claim_code + '\n\nStore it now. It is shown only until pairing completes.');
-    }
-    showToast('Credentials saved. Sign in with the new account.', 'success');
-    btn.textContent = 'Save Credentials';
     resetLoginForm();
-    show('loginView');
+    checkSession('account_created');
   }).catch(function(err) {
     errEl.textContent = err.message || 'Connection error';
     errEl.classList.add('visible');
     btn.disabled = false;
-    btn.textContent = 'Save Credentials';
+    btn.textContent = 'Create Account';
   });
 }
 
 function logout() {
   apiPost('/webui/api/logout', {}).then(function() {
-    showToast('Signed out.', 'info');
-    _session = null;
-    stopSessionMonitor();
-    resetLoginForm();
-    show('loginView');
+    checkSession('manual');
   }).catch(function(err) {
-    showToast(err.message || 'Logout failed', 'error');
+    toast.show({ kind: 'error', message: err.message || 'Logout failed' });
   });
 }
 
 function restartCompanion() {
-  showToast('Restarting Companion...', 'warning');
+  toast.show({ kind: 'attention', message: 'Restarting Companion...' });
   apiPost('/webui/api/restart', {}).then(function() {
     setTimeout(pollRestartReady, 1500);
   }).catch(function(err) {
-    showToast(err.message || 'Restart failed', 'error');
+    toast.show({ kind: 'error', message: err.message || 'Restart failed' });
   });
 }
 
 function pollRestartReady() {
   var attempts = 0;
-  var timer = setInterval(function() {
+  if (_restartTimer) clearInterval(_restartTimer);
+  _restartTimer = setInterval(function() {
     attempts++;
     apiGet('/webui/api/session').then(function(session) {
-      clearInterval(timer);
-      _session = session;
-      showToast('Companion restarted.', 'success');
-      checkSession();
+      clearInterval(_restartTimer);
+      _restartTimer = null;
+      applySession(session, 'restart');
     }).catch(function() {
       if (attempts >= 30) {
-        clearInterval(timer);
-        showToast('Restart is taking longer than expected. Refresh the page soon.', 'warning');
+        clearInterval(_restartTimer);
+        _restartTimer = null;
+        toast.show({ kind: 'attention', message: 'Restart is taking longer than expected. Refresh the page soon.' });
       }
     });
   }, 1000);
@@ -380,7 +501,7 @@ function saveConfig(statusEl, saveBtn) {
   return apiPut('/webui/api/config', _configDoc).then(function() {
     if (statusEl) setStatus(statusEl.id, '');
     flashSavedButton(saveBtn);
-    showToast('Saved. Restart Companion to apply changes.', 'warning');
+    toast.show({ kind: 'attention', message: 'Saved. Restart Companion to apply changes.' });
   }).catch(function(err) {
     if (statusEl) {
       statusEl.textContent = err.message || 'Save failed';
@@ -412,114 +533,124 @@ function ensureCompanionConfig() {
 }
 
 function renderHomeAssistantConfig() {
-  var form = document.getElementById('haConfigForm');
   apiGet('/webui/api/pairing').then(function(pairing) {
-    form.claim_code.value = pairing.claim_code || '';
-    renderHABadge(!!pairing.claimed);
-    setStatus('haConfigStatus', pairing.claimed ? 'Home Assistant is paired.' : 'Enter this code in Home Assistant to pair.');
+    renderPairingStatus(pairing);
   }).catch(function(err) { handleApiError(err, 'Failed to load pairing status'); });
 }
 
-function renderHABadge(claimed) {
+function renderPairingStatus(pairing) {
+  var state = pairing.pairing_state || 'error';
+  var heading = document.getElementById('haConfigHeading');
+  var description = document.getElementById('haConfigDescription');
+  var claim = document.getElementById('haConfigClaim');
+  var recovery = document.getElementById('haConfigRecovery');
+  var recoveryButton = document.getElementById('haConfigRecoveryButton');
+  document.getElementById('haConfigModel').textContent = pairing.model || pairing.device_id || '-';
+  claim.classList.add('hidden');
+  recovery.classList.add('hidden');
+  recoveryButton.classList.add('hidden');
+  renderHABadge(state);
+  renderPairingToast(pairing);
+
+  if (state === 'claimable') {
+    heading.textContent = 'Ready to connect';
+    description.textContent = 'Install the BTicino Companion integration in Home Assistant, select this discovered Companion, and enter the claim code below.';
+    document.getElementById('haConfigClaimCode').textContent = pairing.claim_code || '-';
+    claim.classList.remove('hidden');
+    setStatus('haConfigStatus', 'Waiting for Home Assistant to pair this Companion.');
+    return;
+  }
+  if (state === 'claimed') {
+    heading.textContent = 'Connected to Home Assistant';
+    description.textContent = 'Home Assistant is authorized to control this Companion.';
+    setStatus('haConfigStatus', 'Generate a recovery code only when Home Assistant asks you to reconnect it.');
+    recoveryButton.classList.remove('hidden');
+    if (pairing.recovery_code) {
+      document.getElementById('haConfigRecoveryCode').textContent = pairing.recovery_code;
+      document.getElementById('haConfigRecoveryExpiry').textContent = pairing.recovery_code_expires ? 'Expires ' + new Date(pairing.recovery_code_expires).toLocaleTimeString() + '.' : '';
+      recovery.classList.remove('hidden');
+    }
+    return;
+  }
+  if (state === 'setup_required') {
+    heading.textContent = 'Owner setup required';
+    description.textContent = 'Sign in with the default credentials and create a real Companion owner account before pairing Home Assistant.';
+    setStatus('haConfigStatus', 'Complete owner setup before requesting a claim code.');
+    return;
+  }
+  heading.textContent = 'Pairing needs attention';
+  description.textContent = 'Companion pairing configuration is not valid.';
+  setStatus('haConfigStatus', 'Restart Companion or review its configuration before pairing.', 'var(--danger)');
+}
+
+function renderHABadge(state) {
   var badge = document.getElementById('haConfigBadge');
   if (!badge) return;
-  badge.textContent = claimed ? 'Claimed' : 'Claimable';
-  badge.className = 'badge ' + (claimed ? 'badge-success' : 'badge-info');
+  var labels = { claimable: 'Ready to connect', claimed: 'Connected', setup_required: 'Setup required', error: 'Configuration error' };
+  badge.textContent = labels[state] || 'Unknown';
+  badge.className = 'badge ' + (state === 'claimed' ? 'badge-success' : state === 'error' ? 'badge-danger' : 'badge-info');
 }
 
 function issueRepairCode() {
   apiPost('/webui/api/repair-code', {}).then(function(data) {
-    window.alert('Home Assistant repair code: ' + data.repair_code + '\n\nIt expires in 10 minutes and is shown only here.');
+    toast.show({ kind: 'success', message: 'Recovery code generated.' });
+    renderHomeAssistantConfig();
   }).catch(function(err) { handleApiError(err, 'Failed to issue repair code'); });
 }
 
-function renderIceServers(servers) {
-  var list = document.getElementById('iceServersList');
-  if (!list) return;
-  var html = '';
-  servers = servers || [];
-  for (var i = 0; i < servers.length; i++) html += iceServerRowHTML(servers[i], false);
-  html += iceServerRowHTML('', true);
-  list.innerHTML = html;
+function copyPairingCode(elementID) {
+  var code = document.getElementById(elementID).textContent.trim();
+  if (!code || code === '-') return;
+  var copied = navigator.clipboard && window.isSecureContext ? navigator.clipboard.writeText(code) : Promise.reject(new Error('clipboard unavailable'));
+  copied.catch(function() {
+    var selection = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(document.getElementById(elementID));
+    selection.removeAllRanges();
+    selection.addRange(range);
+    if (!document.execCommand('copy')) throw new Error('copy failed');
+    selection.removeAllRanges();
+  }).then(function() {
+    toast.show({ kind: 'success', message: 'Code copied.' });
+  }).catch(function() {
+    toast.show({ kind: 'error', message: 'Copy the code manually.' });
+  });
 }
 
-function iceServerRowHTML(value, draft) {
-  return '<div class="ice-server-row" data-draft="' + (draft ? 'true' : 'false') + '">'
-    + '<div class="ice-server-field"><div class="ice-input-wrap"><input class="form-input ice-server-input" type="text" placeholder="e.g. stun:stun.l.google.com:19302" value="' + escapeHtml(value || '') + '" oninput="updateIceDraftButton(this)">'
-    + (draft ? '<button type="button" class="ice-inline-btn ice-add-btn" onclick="commitIceServerRow(this)" style="display:none">Add</button>' : '<button type="button" class="ice-inline-btn ice-remove-btn" onclick="removeIceServerRow(this)">Remove</button>')
-    + '</div><div class="form-hint">Enter a full ICE URL starting with stun:, turn:, or turns:</div></div>'
-    + '</div>';
+function refreshPairingToast() {
+  apiGet('/webui/api/pairing').then(function(pairing) {
+    renderPairingToast(pairing);
+  }).catch(function(err) { handleApiError(err); });
 }
 
-function updateIceDraftButton(input) {
-  var row = input.closest('.ice-server-row');
-  if (!row || row.getAttribute('data-draft') !== 'true') return;
-  var btn = row.querySelector('.ice-add-btn');
-  if (!btn) return;
-  btn.style.display = input.value.trim() ? 'inline-block' : 'none';
-}
-
-function commitIceServerRow(btn) {
-  var row = btn.closest('.ice-server-row');
-  if (!row) return;
-  var input = row.querySelector('.ice-server-input');
-  var value = input.value.trim();
-  var err = validateIceServer(value);
-  if (err) {
-    setStatus('haConfigStatus', err, 'var(--danger)');
-    input.focus();
+function renderPairingToast(pairing) {
+  if (!_session || !_session.authenticated) return;
+  if (pairing.pairing_state === 'claimable') {
+    toast.show({
+      id: 'pairing-ready',
+      kind: 'success',
+      message: 'Companion ready to be paired!',
+      action: { label: 'Open Home Assistant', onClick: function() { switchPage('configHa'); } },
+      scope: 'authenticated',
+      persistent: true,
+      dismissible: false
+    });
     return;
   }
-  row.setAttribute('data-draft', 'false');
-  btn.className = 'ice-inline-btn ice-remove-btn';
-  btn.textContent = 'Remove';
-  btn.removeAttribute('style');
-  btn.setAttribute('onclick', 'removeIceServerRow(this)');
-  setStatus('haConfigStatus', '');
-  document.getElementById('iceServersList').insertAdjacentHTML('beforeend', iceServerRowHTML('', true));
-}
-
-function removeIceServerRow(btn) {
-  var row = btn.closest('.ice-server-row');
-  if (row) row.remove();
-  if (!document.querySelector('#iceServersList .ice-server-row[data-draft="true"]')) {
-    document.getElementById('iceServersList').insertAdjacentHTML('beforeend', iceServerRowHTML('', true));
+  toast.dismiss('pairing-ready');
+  if (pairing.pairing_state === 'error') {
+    toast.show({
+      id: 'pairing-error',
+      kind: 'error',
+      message: 'Companion pairing needs attention.',
+      action: { label: 'Review pairing', onClick: function() { switchPage('configHa'); } },
+      scope: 'authenticated',
+      persistent: true,
+      dismissible: false
+    });
+  } else {
+    toast.dismiss('pairing-error');
   }
-}
-
-function collectIceServers() {
-  var draft = document.querySelector('#iceServersList .ice-server-row[data-draft="true"] .ice-server-input');
-  if (draft && draft.value.trim()) {
-    setStatus('haConfigStatus', 'Click Add for the ICE server before saving.', 'var(--danger)');
-    draft.focus();
-    return null;
-  }
-  var inputs = document.querySelectorAll('#iceServersList .ice-server-row[data-draft="false"] .ice-server-input');
-  var out = [];
-  for (var i = 0; i < inputs.length; i++) {
-    var value = inputs[i].value.trim();
-    if (!value) continue;
-    var err = validateIceServer(value);
-    if (err) {
-      setStatus('haConfigStatus', err, 'var(--danger)');
-      inputs[i].focus();
-      return null;
-    }
-    out.push(value);
-  }
-  return out;
-}
-
-function validateIceServer(value) {
-  if (!value) return 'ICE server URL is required.';
-  if (/\s/.test(value)) return 'ICE server URLs cannot contain spaces.';
-  var match = value.match(/^(stun|turn|turns):((\[[0-9a-fA-F:.]+\])|([^/?#:]+))(?:\:([0-9]{1,5}))?(?:\?[^#\s]+)?$/i);
-  if (!match) return 'Use stun:, turn:, or turns: with a hostname and optional port.';
-  if (match[5]) {
-    var port = Number(match[5]);
-    if (port < 1 || port > 65535) return 'ICE server port must be between 1 and 65535.';
-  }
-  return '';
 }
 
 function renderEntrypointsConfig() {
@@ -620,7 +751,7 @@ function saveAdminUser() {
     current_password: form.current_password.value,
     password: form.password.value
   }).then(function() {
-    showToast('Credentials saved. Sign in again.', 'success');
+    toast.show({ kind: 'success', message: 'Credentials saved. Sign in again.' });
     _session = null;
     show('loginView');
     document.getElementById('loginForm').reset();
@@ -644,8 +775,8 @@ function renderAbout() {
 function loadUpdateStatus() {
   apiGet('/webui/api/update/status').then(function(update) {
     renderUpdateStatus(update);
-    if (update.update_available) showToast('Companion update ' + (update.latest_version || '') + ' is available.', 'info');
-    if (update.restart_required) showToast('Companion update is staged and will activate on restart.', 'warning');
+    if (update.update_available) toast.show({ id: 'update-available', kind: 'attention', message: 'Companion update ' + (update.latest_version || '') + ' is available.' });
+    if (update.restart_required) toast.show({ id: 'update-restart', kind: 'attention', message: 'Companion update is staged and will activate on restart.' });
   }).catch(function(err) { handleApiError(err); });
 }
 
@@ -679,11 +810,11 @@ function installUpdate() {
   apiPost('/webui/api/update/install', {}).then(function(update) {
     if (!update.restart_required) {
       if (button) button.disabled = false;
-      showToast('No update is available.', 'info');
+      toast.show({ kind: 'success', message: 'No update is available.' });
       loadUpdateStatus();
       return;
     }
-    showToast('Update installed. Companion is restarting...', 'success');
+    toast.show({ kind: 'success', message: 'Update installed. Companion is restarting...' });
     setTimeout(pollRestartReady, 1500);
   }).catch(function(err) {
     if (button) button.disabled = false;
@@ -763,29 +894,23 @@ var _logPaused = false;
 var _framePaused = false;
 var _logTimer = null;
 var _frameTimer = null;
+var _pairingTimer = null;
+var _restartTimer = null;
 var _logPrevContent = '';
 
 function startPolling(page) {
   stopPolling();
   if (page === 'logs') { loadLoggingState(); fetchLogs(); _logTimer = setInterval(fetchLogs, 3000); }
   if (page === 'busframes') { fetchFrames(); _frameTimer = setInterval(fetchFrames, 2000); }
+  if (page === 'configHa') { _pairingTimer = setInterval(renderHomeAssistantConfig, 3000); }
 }
 
 function stopPolling() {
   if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
   if (_frameTimer) { clearInterval(_frameTimer); _frameTimer = null; }
+  if (_pairingTimer) { clearInterval(_pairingTimer); _pairingTimer = null; }
+  if (_restartTimer) { clearInterval(_restartTimer); _restartTimer = null; }
 }
-
-/* Patch switchPage to manage polling */
-var _origSwitch = switchPage;
-switchPage = function(pageId) {
-  _origSwitch(pageId);
-  if (pageId === 'logs' || pageId === 'busframes') {
-    startPolling(pageId);
-  } else {
-    stopPolling();
-  }
-};
 
 /* ──── Log viewer ──── */
 function fetchLogs() {
@@ -804,7 +929,7 @@ function setLoggingLevel(level) {
   apiPut('/webui/api/logging', { level: level }).then(function(data) {
     var runtimeLevel = document.getElementById('logRuntimeLevel');
     if (runtimeLevel && data.level) runtimeLevel.value = data.level;
-    showToast('Log level set to ' + data.level.toUpperCase(), 'success');
+    toast.show({ kind: 'success', message: 'Log level set to ' + data.level.toUpperCase() + '.' });
   }).catch(function(err) {
     handleApiError(err, 'Failed to update logger level');
     loadLoggingState();
@@ -914,5 +1039,7 @@ function toggleFramePause() {
 /* ──── Init ──── */
 document.getElementById('loginForm').addEventListener('submit', submitLogin);
 document.getElementById('setupForm').addEventListener('submit', submitSetup);
+document.querySelector('#setupForm [name="password"]').addEventListener('input', updateBootstrapPasswordStatus);
+document.querySelector('#setupForm [name="password_confirm"]').addEventListener('input', updateBootstrapPasswordStatus);
 
 checkSession();

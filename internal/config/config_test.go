@@ -30,7 +30,7 @@ func TestCreateAndLoad(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	if loaded.Auth.ClaimCode != "" || created.Auth.ClaimCode != "" {
+	if loaded.Auth.PairingState != PairingStateSetupRequired || created.Auth.PairingState != PairingStateSetupRequired {
 		t.Fatalf("loaded config differs: got %#v want %#v", loaded, created)
 	}
 	if loaded.Companion.DeviceID != "" || loaded.Companion.Model != "" {
@@ -75,7 +75,8 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		"companion.entrypoints.0.capabilities.stream",
 		"companion.entrypoints.0.capabilities.unlock",
 		"companion.entrypoints.0.capabilities.ring",
-		"auth.claim_code",
+		"auth.pairing_state",
+		"auth.instance_id",
 		"auth.bearer_token_hash",
 		"webui.admin_username",
 		"webui.admin_password_hash",
@@ -93,10 +94,13 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"auth.claim_code", "auth.bearer_token_hash", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
+	for _, path := range []string{"auth.bearer_token_hash", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
 		if value, _ := yamlPath(document, path); value != "" {
 			t.Errorf("YAML value at %q = %#v, want empty string", path, value)
 		}
+	}
+	if value, _ := yamlPath(document, "auth.pairing_state"); value != string(PairingStateSetupRequired) {
+		t.Errorf("YAML value at auth.pairing_state = %#v, want %q", value, PairingStateSetupRequired)
 	}
 	for _, path := range []string{"system.update_exposed", "homekit.enabled"} {
 		if value, _ := yamlPath(document, path); value != false {

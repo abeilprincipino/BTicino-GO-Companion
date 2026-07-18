@@ -36,6 +36,15 @@ type Config struct {
 	HomeKit   HomeKit   `yaml:"homekit"`
 }
 
+type PairingState string
+
+const (
+	PairingStateSetupRequired PairingState = "setup_required"
+	PairingStateClaimable     PairingState = "claimable"
+	PairingStateClaimed       PairingState = "claimed"
+	PairingStateError         PairingState = "error"
+)
+
 type Companion struct {
 	Name        string       `yaml:"name"`
 	LogLevel    string       `yaml:"log_level"`
@@ -58,8 +67,9 @@ type Capabilities struct {
 }
 
 type Auth struct {
-	ClaimCode       string `yaml:"claim_code"`
-	BearerTokenHash string `yaml:"bearer_token_hash"`
+	PairingState    PairingState `yaml:"pairing_state"`
+	InstanceID      string       `yaml:"instance_id"`
+	BearerTokenHash string       `yaml:"bearer_token_hash"`
 }
 
 type WebUI struct {
@@ -147,6 +157,10 @@ func Default(metadata Metadata) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
 	}
+	instanceID, err := RandomHex(16)
+	if err != nil {
+		return Config{}, fmt.Errorf("generate pairing instance id: %w", err)
+	}
 
 	cfg := Config{
 		Companion: Companion{
@@ -164,7 +178,8 @@ func Default(metadata Metadata) (Config, error) {
 			}},
 		},
 		Auth: Auth{
-			ClaimCode:       "",
+			PairingState:    PairingStateSetupRequired,
+			InstanceID:      instanceID,
 			BearerTokenHash: "",
 		},
 		WebUI: WebUI{
@@ -287,11 +302,20 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("invalid log level %q", cfg.Companion.LogLevel)
 	}
 
-	if cfg.Auth.ClaimCode != "" && !ValidClaimCode(cfg.Auth.ClaimCode) {
-		return errors.New("claim code must use xxxx-xxxx hexadecimal format")
+	if !validPairingState(cfg.Auth.PairingState) {
+		return fmt.Errorf("invalid pairing state %q", cfg.Auth.PairingState)
+	}
+	if !validInstanceID(cfg.Auth.InstanceID) {
+		return errors.New("pairing instance id must be a 32-character hexadecimal value")
 	}
 	if cfg.Auth.BearerTokenHash != "" && !validBearerTokenHash(cfg.Auth.BearerTokenHash) {
 		return errors.New("bearer token hash must be a SHA-256 hexadecimal value")
+	}
+	if cfg.Auth.PairingState == PairingStateClaimed && cfg.Auth.BearerTokenHash == "" {
+		return errors.New("claimed pairing state requires a bearer token hash")
+	}
+	if cfg.Auth.PairingState != PairingStateClaimed && cfg.Auth.BearerTokenHash != "" {
+		return errors.New("unclaimed pairing state must not contain a bearer token hash")
 	}
 
 	if len(cfg.Companion.Entrypoints) == 0 {
@@ -407,6 +431,23 @@ func ValidClaimCode(code string) bool {
 
 func validBearerTokenHash(value string) bool {
 	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validPairingState(state PairingState) bool {
+	switch state {
+	case PairingStateSetupRequired, PairingStateClaimable, PairingStateClaimed, PairingStateError:
+		return true
+	default:
+		return false
+	}
+}
+
+func validInstanceID(value string) bool {
+	if len(value) != 32 {
 		return false
 	}
 	_, err := hex.DecodeString(value)

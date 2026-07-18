@@ -12,7 +12,10 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	t.Parallel()
 
 	store, backend := newTestStore(t)
-	code := backend.Snapshot().Auth.ClaimCode
+	code, err := store.InitialClaimCode()
+	if err != nil {
+		t.Fatalf("initial claim code: %v", err)
+	}
 
 	challenge, err := store.CreateChallenge("192.0.2.1")
 	if err != nil {
@@ -39,8 +42,8 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 		t.Fatalf("replayed claim error = %v, want ErrAlreadyClaimed", err)
 	}
 
-	if got := backend.Snapshot().Auth.ClaimCode; got != "" {
-		t.Fatal("successful claim did not clear claim code")
+	if backend.Snapshot().Auth.PairingState != config.PairingStateClaimed {
+		t.Fatal("successful claim did not update pairing state")
 	}
 	if _, err := store.CreateChallenge("192.0.2.1"); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("challenge after claim error = %v, want ErrAlreadyClaimed", err)
@@ -64,7 +67,7 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, backend := newTestStore(t)
+			store, _ := newTestStore(t)
 
 			challenge, err := store.CreateChallenge("192.0.2.1")
 			if err != nil {
@@ -73,7 +76,11 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 
 			store.now = func() time.Time { return testNow.Add(tt.advance) }
 
-			_, err = store.Claim(tt.source, challenge.ID, backend.Snapshot().Auth.ClaimCode)
+			code, err := store.InitialClaimCode()
+			if err != nil {
+				t.Fatalf("initial claim code: %v", err)
+			}
+			_, err = store.Claim(tt.source, challenge.ID, code)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("claim error = %v, want %v", err, tt.wantErr)
 			}
@@ -84,8 +91,11 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 func TestStore_ClaimRateLimit(t *testing.T) {
 	t.Parallel()
 
-	store, backend := newTestStore(t)
-	code := backend.Snapshot().Auth.ClaimCode
+	store, _ := newTestStore(t)
+	code, err := store.InitialClaimCode()
+	if err != nil {
+		t.Fatalf("initial claim code: %v", err)
+	}
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		challenge, err := store.CreateChallenge("192.0.2.1")
@@ -225,8 +235,8 @@ func TestStore_RepairCodeIssueAndRecoverBearer(t *testing.T) {
 		t.Fatal("reset repair code did not revoke bearer")
 	}
 
-	if got := backend.Snapshot().Auth.ClaimCode; got != "" {
-		t.Fatalf("stored claim code = %q, want empty", got)
+	if backend.Snapshot().Auth.PairingState != config.PairingStateClaimed {
+		t.Fatalf("pairing state = %q, want claimed", backend.Snapshot().Auth.PairingState)
 	}
 }
 
@@ -254,7 +264,13 @@ func newTestStore(t *testing.T) (*Store, *config.Store) {
 
 	store := NewStore(backend)
 	store.now = func() time.Time { return testNow }
-	if _, err := store.IssueInitialClaimCode(); err != nil {
+	if err := backend.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatalf("set session secret: %v", err)
+	}
+	if _, err := store.StartInitialClaim(); err != nil {
 		t.Fatalf("issue initial claim code: %v", err)
 	}
 

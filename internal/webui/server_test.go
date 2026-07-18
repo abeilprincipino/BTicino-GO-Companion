@@ -34,7 +34,7 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 		t.Fatalf("bootstrap config status = %d", response.Code)
 	}
 
-	response = request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, cookie)
+	response = request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, cookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("password change status = %d: %s", response.Code, response.Body.String())
 	}
@@ -42,6 +42,37 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 	response = request(t, server, http.MethodGet, "/webui/api/config", nil, cookie)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("old bootstrap session status = %d", response.Code)
+	}
+}
+
+func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(store, auth.NewStore(store), slog.New(slog.DiscardHandler), nil, func(string) error { return nil })
+	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	response := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{
+		Username:        "admin",
+		Password:        "correct-horse",
+		PasswordConfirm: "different-horse",
+	}, sessionCookieFrom(t, login))
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "password confirmation does not match") {
+		t.Fatalf("mismatched confirmation response = %d: %s", response.Code, response.Body.String())
+	}
+	if store.Snapshot().WebUI.AdminPasswordHash != "" || store.Snapshot().Auth.PairingState != config.PairingStateSetupRequired {
+		t.Fatalf("mismatched confirmation changed bootstrap state: %#v", store.Snapshot())
 	}
 }
 
@@ -62,13 +93,22 @@ func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
 	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, func(string) error { return nil })
 
 	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
-	setup := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, sessionCookieFrom(t, login))
-	var response struct {
-		ClaimCode string `json:"claim_code"`
+	setup := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, sessionCookieFrom(t, login))
+	claimCode, err := authStore.InitialClaimCode()
+	if err != nil {
+		t.Fatal(err)
 	}
-	decodeResponse(t, setup, &response)
-	if setup.Code != http.StatusOK || !config.ValidClaimCode(response.ClaimCode) || store.Snapshot().Auth.ClaimCode != response.ClaimCode {
+	if setup.Code != http.StatusOK || !config.ValidClaimCode(claimCode) || strings.Contains(setup.Body.String(), "claim_code") {
 		t.Fatalf("owner setup response = %d: %s", setup.Code, setup.Body.String())
+	}
+	pairing := request(t, server, http.MethodGet, "/webui/api/pairing", nil, passwordSession(t, server, "correct-horse"))
+	var pairingStatus struct {
+		ClaimCode    string `json:"claim_code"`
+		PairingState string `json:"pairing_state"`
+	}
+	decodeResponse(t, pairing, &pairingStatus)
+	if pairing.Code != http.StatusOK || pairingStatus.PairingState != string(config.PairingStateClaimable) || pairingStatus.ClaimCode != claimCode {
+		t.Fatalf("pairing status = %d: %s", pairing.Code, pairing.Body.String())
 	}
 
 	if _, err := authStore.RotateBearer(); err != nil {
@@ -108,7 +148,7 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 		t.Fatalf("saved companion name = %q", store.Snapshot().Companion.Name)
 	}
 
-	if store.Snapshot().Auth.BearerTokenHash == "" || store.Snapshot().Auth.ClaimCode != "" {
+	if store.Snapshot().Auth.BearerTokenHash == "" || store.Snapshot().Auth.PairingState != config.PairingStateClaimed {
 		t.Fatal("config save changed auth secrets")
 	}
 }
@@ -262,6 +302,15 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 	}
 
 	authStore := auth.NewStore(store)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatalf("set session secret: %v", err)
+	}
+	if _, err := authStore.StartInitialClaim(); err != nil {
+		t.Fatalf("start initial claim: %v", err)
+	}
 	if _, err := authStore.RotateBearer(); err != nil {
 		t.Fatalf("create bearer: %v", err)
 	}
@@ -278,7 +327,7 @@ func configuredSession(t *testing.T, server *Server) *http.Cookie {
 
 	cookie := sessionCookieFrom(t, bootstrap)
 
-	changed := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse"}, cookie)
+	changed := request(t, server, http.MethodPost, "/webui/api/password", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, cookie)
 	if changed.Code != http.StatusOK {
 		t.Fatalf("bootstrap password status = %d", changed.Code)
 	}

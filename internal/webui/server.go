@@ -104,6 +104,7 @@ type passwordRequest struct {
 	Username        string `json:"username"`
 	CurrentPassword string `json:"current_password"`
 	Password        string `json:"password"`
+	PasswordConfirm string `json:"password_confirm"`
 }
 
 func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restart RestartFunc, setLogLevel func(string) error) *Server {
@@ -353,7 +354,16 @@ func (s *Server) handlePairing(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"claimed": !s.auth.NeedsClaim(), "claim_code": cfg.Auth.ClaimCode})
+	status := s.auth.Status()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"claim_code":            status.ClaimCode,
+		"device_id":             cfg.Companion.DeviceID,
+		"instance_id":           status.InstanceID,
+		"model":                 cfg.Companion.Model,
+		"pairing_state":         status.State,
+		"recovery_code":         status.RecoveryCode,
+		"recovery_code_expires": status.RecoveryCodeExpiry,
+	})
 }
 
 func (s *Server) handleRepairCode(w http.ResponseWriter, r *http.Request) {
@@ -402,6 +412,10 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password must replace the default and contain at least 8 characters")
 		return
 	}
+	if current.bootstrap && request.Password != request.PasswordConfirm {
+		writeError(w, http.StatusBadRequest, "password confirmation does not match")
+		return
+	}
 
 	if !current.bootstrap && bcrypt.CompareHashAndPassword([]byte(cfg.WebUI.AdminPasswordHash), []byte(request.CurrentPassword)) != nil {
 		writeError(w, http.StatusUnauthorized, "current password is invalid")
@@ -441,18 +455,16 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	s.sessions = make(map[string]session)
 	s.mu.Unlock()
 	clearSessionCookie(w)
-	response := map[string]any{"ok": true}
 	if current.bootstrap && s.auth != nil {
-		claimCode, err := s.auth.IssueInitialClaimCode()
+		_, err := s.auth.StartInitialClaim()
 		if err != nil && !errors.Is(err, auth.ErrAlreadyClaimed) {
 			s.logger.Error("issue initial claim code", "error", err)
 			writeError(w, http.StatusInternalServerError, "save password failed")
 			return
 		}
-		response["claim_code"] = claimCode
-		s.logger.Info("webui owner setup completed", "claim_code_issued", claimCode != "")
+		s.logger.Info("webui owner setup completed")
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

@@ -14,6 +14,7 @@
     <h1>BTicino Companion</h1>
     <p class="auth-subtitle">Sign in to manage the intercom</p>
     <div id="loginError" class="auth-error"></div>
+    <div id="loginNotice" class="auth-notice hidden"></div>
     <p id="loginHelp" class="auth-help" style="display:none"></p>
     <form id="loginForm">
       <div class="form-group">
@@ -30,29 +31,40 @@
 </div>
 
 <!-- Setup (bootstrap credential replacement) -->
-<div id="setupView" class="auth-container hidden">
-  <div class="auth-card">
-    <h1>Replace Default Account</h1>
-    <p class="auth-subtitle">Set a real username and password, then use the claim code shown once to pair Home Assistant</p>
-    <div id="setupError" class="auth-error"></div>
-    <p class="auth-help">The bootstrap login is intentionally temporary. Set a real username and password before config or logs are exposed.</p>
-    <form id="setupForm">
+  <div id="setupView" class="auth-container hidden">
+    <div class="auth-card">
+      <h1>Create Your Companion Account</h1>
+      <p class="auth-subtitle">Replace the default account before managing this Companion.</p>
+      <div id="setupError" class="auth-error"></div>
+      <p class="auth-help">The default account is temporary. Create an account you will use to manage this Companion.</p>
+      <form id="setupForm">
       <div class="form-group">
         <label class="form-label">New username</label>
         <input class="form-input" name="username" autocomplete="username" required>
-      </div>
-      <div class="form-group">
-        <label class="form-label">New password</label>
-        <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
-      </div>
-        <button type="submit" class="btn btn-primary">Save and Show Claim Code</button>
-    </form>
+        </div>
+        <div class="form-group">
+          <label class="form-label">New password</label>
+          <div class="validation-input">
+            <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
+            <span id="setupPasswordMark" class="field-mark" aria-label="Valid">&#10003;</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm new password</label>
+          <div class="validation-input">
+            <input class="form-input" name="password_confirm" type="password" autocomplete="new-password" minlength="8" required>
+            <span id="setupPasswordConfirmMark" class="field-mark" aria-label="Passwords match">&#10003;</span>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Create Account</button>
+      </form>
   </div>
 </div>
 
 <!-- Main App -->
 <div id="appView" class="hidden">
   <nav class="nav" id="nav"></nav>
+  <div id="notificationRegion" class="notification-region" aria-live="polite"></div>
 
   <div class="container">
 
@@ -162,29 +174,35 @@
       <div class="flex-between mb-16">
         <div>
           <h1 class="page-title">Home Assistant</h1>
-          <p class="page-desc" style="margin-bottom:0">Pair Home Assistant with a claim code</p>
+          <p class="page-desc" style="margin-bottom:0">Connect and recover this Companion from Home Assistant.</p>
         </div>
       </div>
       <div class="card section">
-        <div class="card-header">Pairing</div>
+        <div class="card-header" id="haConfigHeading">Pairing</div>
+        <p class="card-desc" id="haConfigDescription"></p>
         <div class="info-row mb-16">
           <span class="info-label">Status</span>
           <span class="info-value"><span id="haConfigBadge" class="badge badge-info">-</span></span>
         </div>
-        <form id="haConfigForm" onsubmit="return false">
-          <div class="form-group">
-            <label class="form-label">Claim Code</label>
-            <input class="form-input" name="claim_code" type="text" readonly>
-          </div>
-          <button type="button" class="btn btn-secondary btn-sm" onclick="issueRepairCode()">Issue Repair Code</button>
-          <div id="haConfigStatus" class="form-status"></div>
-        </form>
-      </div>
-
-      <div class="card section">
-        <div class="card-header">WebRTC ICE Servers</div>
-        <p class="card-desc">Optional STUN/TURN servers used by browser WebRTC clients when direct local ICE is not enough. Leave empty for local-network use.<br>Tip: Public STUN servers are best-effort and not guaranteed. For reliable remote access, use your own TURN server.</p>
-        <div id="iceServersList"></div>
+        <div id="haConfigIdentity" class="info-row mb-16">
+          <span class="info-label">Companion</span>
+          <span class="info-value" id="haConfigModel">-</span>
+        </div>
+        <div id="haConfigClaim" class="pairing-code hidden">
+          <span class="info-label">Claim Code</span>
+          <code id="haConfigClaimCode"></code>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="copyPairingCode('haConfigClaimCode')">Copy</button>
+        </div>
+        <div id="haConfigRecovery" class="pairing-code hidden">
+          <span class="info-label">Recovery Code</span>
+          <code id="haConfigRecoveryCode"></code>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="copyPairingCode('haConfigRecoveryCode')">Copy</button>
+          <p class="form-hint" id="haConfigRecoveryExpiry"></p>
+        </div>
+        <div class="header-actions">
+          <button id="haConfigRecoveryButton" type="button" class="btn btn-secondary btn-sm hidden" onclick="issueRepairCode()">Generate Recovery Code</button>
+        </div>
+        <div id="haConfigStatus" class="form-status"></div>
       </div>
     </div>
 

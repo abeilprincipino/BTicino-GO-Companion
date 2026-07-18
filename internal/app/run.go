@@ -224,12 +224,12 @@ func run(
 				return discovery.Advertisement{}, err
 			}
 			return discovery.Advertisement{
-				DeviceID:   cfg.Companion.DeviceID,
-				Name:       cfg.Companion.Name,
-				Model:      cfg.Companion.Model,
-				NeedsClaim: authStore.NeedsClaim(),
-				Port:       8080,
-				Interfaces: []net.Interface{iface},
+				DeviceID:     cfg.Companion.DeviceID,
+				Model:        cfg.Companion.Model,
+				PairingState: authStore.PairingState(),
+				InstanceID:   cfg.Auth.InstanceID,
+				Port:         8080,
+				Interfaces:   []net.Interface{iface},
 			}, nil
 		})
 		if err != nil && ctx.Err() == nil {
