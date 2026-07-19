@@ -235,12 +235,12 @@ func (s *Server) systemServiceRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.runtime.Restart(r.Context(), serviceName); err != nil {
-		writeCommandError(w, err)
-		return
-	}
-
-	writeOK(w, http.StatusOK, nil)
+	writeOK(w, http.StatusAccepted, nil)
+	go func() {
+		if err := s.runtime.Restart(context.WithoutCancel(r.Context()), serviceName); err != nil {
+			s.logger.Error("restart service", "service", serviceName, "error", err)
+		}
+	}()
 }
 
 func (s *Server) systemServiceStatus(w http.ResponseWriter, r *http.Request) {

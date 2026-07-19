@@ -8,16 +8,25 @@
 # Short-Description: Companion service
 ### END INIT INFO
 
-set -e
-
 PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
 SERVICE="companion"
+SCRIPT_PATH="/etc/init.d/${SERVICE}"
 BASE_DIR="/home/bticino/cfg/extra/companion"
 BIN_PATH="${BASE_DIR}/companion"
 STAGED_BIN_PATH="${BASE_DIR}/companion.new"
 PREVIOUS_BIN_PATH="${BASE_DIR}/companion.previous"
 PIDFILE="/var/run/${SERVICE}.pid"
+WATCHDOG_PIDFILE="/var/run/${SERVICE}-watchdog.pid"
+WATCHDOG_ENABLE_FILE="/var/run/${SERVICE}-watchdog.enabled"
+LIFECYCLE_LOCK_DIR="/var/run/${SERVICE}-lifecycle.lock"
+LIFECYCLE_LOCK_PIDFILE="${LIFECYCLE_LOCK_DIR}/pid"
 LOGFILE="/tmp/${SERVICE}.log"
+HEALTH_URL="http://127.0.0.1:8080/api/v3/health"
+HEALTH_TIMEOUT_SECONDS=15
+START_ATTEMPTS=3
+RETRY_DELAY_SECONDS=2
+WATCHDOG_INTERVAL_SECONDS=15
+WATCHDOG_MAX_BACKOFF_SECONDS=120
 
 if [ -f /etc/init.d/functions ]; then
 	# shellcheck source=/dev/null
@@ -54,17 +63,72 @@ remove_firewall() {
 	for port in $(udp_listen_ports); do remove_firewall_rule udp "${port}"; done
 }
 
-pid_matches_binary() {
-	pid="${1:-}"
+process_running() {
+	status -p "${PIDFILE}" -b "${BIN_PATH}" "${BIN_PATH}" >/dev/null 2>&1
+}
+
+companion_healthy() {
+	process_running && health_check
+}
+
+script_process_running() {
+	pid="$1"
 	[ -n "${pid}" ] && [ -d "/proc/${pid}" ] || return 1
 	cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
-	case "${cmdline}" in *"${BIN_PATH}"*) return 0 ;; *) return 1 ;; esac
+	case "${cmdline}" in *"${SERVICE}"*) return 0 ;; *) return 1 ;; esac
+}
+
+watchdog_running() {
+	[ -f "${WATCHDOG_PIDFILE}" ] || return 1
+	watchdog_pid="$(cat "${WATCHDOG_PIDFILE}" 2>/dev/null || true)"
+	script_process_running "${watchdog_pid}" || return 1
+	case "${cmdline}" in *"${SCRIPT_PATH}"*"_watchdog"*) return 0 ;; *) return 1 ;; esac
+}
+
+lock_owner_running() {
+	[ -f "${LIFECYCLE_LOCK_PIDFILE}" ] || return 1
+	lock_pid="$(cat "${LIFECYCLE_LOCK_PIDFILE}" 2>/dev/null || true)"
+	script_process_running "${lock_pid}"
+}
+
+acquire_lifecycle_lock() {
+	lock_attempt=0
+	while ! mkdir "${LIFECYCLE_LOCK_DIR}" 2>/dev/null; do
+		if ! lock_owner_running; then
+			rm -f "${LIFECYCLE_LOCK_PIDFILE}"
+			rmdir "${LIFECYCLE_LOCK_DIR}" 2>/dev/null || true
+			continue
+		fi
+		lock_attempt=$((lock_attempt + 1))
+		[ "${lock_attempt}" -lt "${HEALTH_TIMEOUT_SECONDS}" ] || return 1
+		sleep 1
+	done
+	echo "$$" > "${LIFECYCLE_LOCK_PIDFILE}"
+}
+
+release_lifecycle_lock() {
+	rm -f "${LIFECYCLE_LOCK_PIDFILE}"
+	rmdir "${LIFECYCLE_LOCK_DIR}" 2>/dev/null || true
+}
+
+with_lifecycle_lock() {
+	action="$1"
+	shift
+	acquire_lifecycle_lock || return 1
+	case "${action}" in
+	start) start_companion "$@" ;;
+	stop) stop_companion ;;
+	recover) recover_companion ;;
+	*) release_lifecycle_lock; return 1 ;;
+	esac
+	action_status=$?
+	release_lifecycle_lock
+	return "${action_status}"
 }
 
 cleanup_stale_pidfile() {
 	[ -f "${PIDFILE}" ] || return 0
-	pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
-	pid_matches_binary "${pid}" || rm -f "${PIDFILE}"
+	process_running || rm -f "${PIDFILE}"
 }
 
 activate_staged_binary() {
@@ -77,29 +141,140 @@ activate_staged_binary() {
 	chmod 755 "${BIN_PATH}"
 }
 
-do_start() {
-	activate_staged_binary
-	if [ ! -x "${BIN_PATH}" ]; then echo "Missing companion binary at ${BIN_PATH}" >&2; exit 1; fi
-	mkdir -p "$(dirname "${PIDFILE}")"
-	: > "${LOGFILE}"
-	cleanup_stale_pidfile
-	ensure_firewall
-	nohup "${BIN_PATH}" >>"${LOGFILE}" 2>&1 </dev/null &
-	echo $! > "${PIDFILE}"
+health_check() {
+	/usr/bin/curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1
 }
 
-do_stop() {
-	start-stop-daemon --stop --quiet --oknodo --pidfile "${PIDFILE}" --retry=TERM/5/KILL/2 >/dev/null 2>&1 || true
+wait_for_health() {
+	attempt=0
+	while [ "${attempt}" -lt "${HEALTH_TIMEOUT_SECONDS}" ]; do
+		health_check && return 0
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+start_process() {
+	/sbin/start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
+		--pidfile "${PIDFILE}" --exec "${BIN_PATH}" -- >>"${LOGFILE}" 2>&1
+}
+
+start_companion() {
+	promote_staged="$1"
+	cleanup_stale_pidfile
+	if companion_healthy; then
+		echo "${SERVICE} already running"
+		return 0
+	fi
+	if process_running; then
+		echo "${SERVICE} process is unhealthy; restarting" >&2
+		stop_companion || return 1
+	fi
+
+	if [ "${promote_staged}" = "true" ]; then
+		activate_staged_binary || return 1
+	fi
+	if [ ! -x "${BIN_PATH}" ]; then
+		echo "Missing companion binary at ${BIN_PATH}" >&2
+		return 1
+	fi
+	mkdir -p "$(dirname "${PIDFILE}")" || return 1
+	: > "${LOGFILE}" || return 1
+	ensure_firewall
+
+	attempt=1
+	while [ "${attempt}" -le "${START_ATTEMPTS}" ]; do
+		start_process && wait_for_health && return 0
+		echo "${SERVICE} failed health check (attempt ${attempt}/${START_ATTEMPTS})" >&2
+		stop_companion || return 1
+		attempt=$((attempt + 1))
+		[ "${attempt}" -le "${START_ATTEMPTS}" ] && sleep "${RETRY_DELAY_SECONDS}"
+	done
+	return 1
+}
+
+stop_companion() {
+	cleanup_stale_pidfile
+	if process_running; then
+		killproc -p "${PIDFILE}" -b "${BIN_PATH}" -d 5 "${BIN_PATH}" >/dev/null 2>&1 || return 1
+	fi
 	rm -f "${PIDFILE}"
 	remove_firewall
 }
 
+start_watchdog() {
+	: > "${WATCHDOG_ENABLE_FILE}" || return 1
+	if watchdog_running; then
+		return 0
+	fi
+	rm -f "${WATCHDOG_PIDFILE}"
+	"${SCRIPT_PATH}" _watchdog >>"${LOGFILE}" 2>&1 &
+	echo "$!" > "${WATCHDOG_PIDFILE}"
+}
+
+stop_watchdog() {
+	rm -f "${WATCHDOG_ENABLE_FILE}"
+	if watchdog_running; then
+		kill -TERM "${watchdog_pid}" 2>/dev/null || return 1
+		watchdog_wait=0
+		while [ -d "/proc/${watchdog_pid}" ] && [ "${watchdog_wait}" -lt 5 ]; do
+			sleep 1
+			watchdog_wait=$((watchdog_wait + 1))
+		done
+		[ ! -d "/proc/${watchdog_pid}" ] || kill -KILL "${watchdog_pid}" 2>/dev/null || return 1
+	fi
+	rm -f "${WATCHDOG_PIDFILE}"
+}
+
+recover_companion() {
+	[ -f "${WATCHDOG_ENABLE_FILE}" ] || return 0
+	companion_healthy && return 0
+	echo "${SERVICE} watchdog recovery requested" >&2
+	stop_companion || return 1
+	[ -f "${WATCHDOG_ENABLE_FILE}" ] || return 0
+	start_companion false
+}
+
+do_watchdog() {
+	trap 'rm -f "${WATCHDOG_PIDFILE}"; exit 0' INT TERM
+	backoff="${WATCHDOG_INTERVAL_SECONDS}"
+	while [ -f "${WATCHDOG_ENABLE_FILE}" ]; do
+		if companion_healthy; then
+			backoff="${WATCHDOG_INTERVAL_SECONDS}"
+			sleep "${WATCHDOG_INTERVAL_SECONDS}"
+			continue
+		fi
+		if with_lifecycle_lock recover; then
+			backoff="${WATCHDOG_INTERVAL_SECONDS}"
+			delay="${backoff}"
+		else
+			delay="${backoff}"
+			echo "${SERVICE} watchdog recovery failed; retrying in ${delay}s" >&2
+			[ "${backoff}" -ge "${WATCHDOG_MAX_BACKOFF_SECONDS}" ] || backoff=$((backoff * 2))
+		fi
+		sleep "${delay}"
+	done
+	rm -f "${WATCHDOG_PIDFILE}"
+}
+
+do_start() {
+	with_lifecycle_lock start true || return 1
+	start_watchdog
+}
+
+do_stop() {
+	stop_watchdog || return 1
+	with_lifecycle_lock stop
+}
+
 do_status() {
 	cleanup_stale_pidfile
-	if [ ! -f "${PIDFILE}" ]; then echo "${SERVICE} stopped"; return 3; fi
+	if ! process_running; then echo "${SERVICE} stopped"; return 3; fi
+	if ! health_check; then echo "${SERVICE} running but unhealthy"; return 1; fi
+	if ! watchdog_running; then echo "${SERVICE} running but watchdog stopped"; return 1; fi
 	pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
-	if ! pid_matches_binary "${pid}"; then echo "${SERVICE} stale pidfile (${PIDFILE})"; return 1; fi
-	echo "${SERVICE} running (pid ${pid})"
+	echo "${SERVICE} running and healthy (pid ${pid}, watchdog ${watchdog_pid})"
 }
 
 case "${1:-}" in
@@ -107,6 +282,7 @@ start) do_start ;;
 stop) do_stop ;;
 restart|force-reload) do_stop; do_start ;;
 status) do_status ;;
+_watchdog) do_watchdog ;;
 *) echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2; exit 1 ;;
 esac
 

@@ -426,6 +426,42 @@ func TestServer_SystemRebootRespectsConfig(t *testing.T) {
 	}
 }
 
+func TestServer_SystemServiceRestartAcknowledgesBeforeRestart(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	runtime := &runtimeRecorder{restarted: make(chan string, 1)}
+	server.SetRuntime(runtime)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.System.Services = map[string]config.Service{
+			"companion": {Enabled: true, Exposed: true},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/services/companion/restart", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("restart response = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case service := <-runtime.restarted:
+		if service != "companion" {
+			t.Fatalf("restarted service = %q, want companion", service)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service restart was not called")
+	}
+}
+
 func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
 	t.Parallel()
 
@@ -526,6 +562,7 @@ type runtimeRecorder struct {
 	available bool
 	rebootErr error
 	rebooted  chan struct{}
+	restarted chan string
 	once      sync.Once
 }
 
@@ -557,9 +594,14 @@ func (r *runtimeRecorder) Reboot(context.Context) error {
 	return r.rebootErr
 }
 
-func (r *runtimeRecorder) RebootAvailable() bool               { return r.available || r.rebooted != nil }
-func (*runtimeRecorder) ServiceAvailable(string) bool          { return true }
-func (*runtimeRecorder) Restart(context.Context, string) error { return nil }
+func (r *runtimeRecorder) RebootAvailable() bool      { return r.available || r.rebooted != nil }
+func (*runtimeRecorder) ServiceAvailable(string) bool { return true }
+func (r *runtimeRecorder) Restart(_ context.Context, service string) error {
+	if r.restarted != nil {
+		r.restarted <- service
+	}
+	return nil
+}
 func (*runtimeRecorder) Status(context.Context, string) (system.ServiceStatus, error) {
 	return system.ServiceStatus{}, nil
 }
