@@ -66,8 +66,7 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"companion.name",
-		"companion.log_level",
+		"logging.level",
 		"companion.entrypoints",
 		"companion.entrypoints.0.id",
 		"companion.entrypoints.0.label",
@@ -75,15 +74,15 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		"companion.entrypoints.0.capabilities.stream",
 		"companion.entrypoints.0.capabilities.unlock",
 		"companion.entrypoints.0.capabilities.ring",
-		"auth.pairing_state",
-		"auth.instance_id",
-		"auth.bearer_token_hash",
-		"webui.admin_username",
-		"webui.admin_password_hash",
-		"webui.session_secret",
-		"system.reboot_enabled",
-		"system.update_enabled",
-		"system.update_exposed",
+		"auth.home_assistant.pairing_state",
+		"auth.home_assistant.instance_id",
+		"auth.home_assistant.bearer_token_hash",
+		"auth.webui.admin_username",
+		"auth.webui.admin_password_hash",
+		"auth.webui.session_secret",
+		"system.reboot.enabled",
+		"system.updates.enabled",
+		"system.updates.exposed",
 		"system.services.dropbear.enabled",
 		"system.services.dropbear.exposed",
 		"homekit.enabled",
@@ -94,15 +93,15 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"auth.bearer_token_hash", "webui.admin_username", "webui.admin_password_hash", "webui.session_secret"} {
+	for _, path := range []string{"auth.home_assistant.bearer_token_hash", "auth.webui.admin_username", "auth.webui.admin_password_hash", "auth.webui.session_secret"} {
 		if value, _ := yamlPath(document, path); value != "" {
 			t.Errorf("YAML value at %q = %#v, want empty string", path, value)
 		}
 	}
-	if value, _ := yamlPath(document, "auth.pairing_state"); value != string(PairingStateSetupRequired) {
+	if value, _ := yamlPath(document, "auth.home_assistant.pairing_state"); value != string(PairingStateSetupRequired) {
 		t.Errorf("YAML value at auth.pairing_state = %#v, want %q", value, PairingStateSetupRequired)
 	}
-	for _, path := range []string{"system.update_exposed", "homekit.enabled"} {
+	for _, path := range []string{"system.updates.exposed", "homekit.enabled"} {
 		if value, _ := yamlPath(document, path); value != false {
 			t.Errorf("YAML value at %q = %#v, want false", path, value)
 		}
@@ -188,14 +187,14 @@ func TestStoreUpdateIsAtomicAndValidated(t *testing.T) {
 	}
 
 	if err := store.Update(func(cfg *Config) error {
-		cfg.Companion.Name = "Front Door"
+		cfg.Logging.Level = "debug"
 		return nil
 	}); err != nil {
 		t.Fatalf("update store: %v", err)
 	}
 
-	if got := store.Snapshot().Companion.Name; got != "Front Door" {
-		t.Fatalf("name = %q, want Front Door", got)
+	if got := store.Snapshot().Logging.Level; got != "debug" {
+		t.Fatalf("log level = %q, want debug", got)
 	}
 
 	if err := store.Update(func(cfg *Config) error {
@@ -205,7 +204,7 @@ func TestStoreUpdateIsAtomicAndValidated(t *testing.T) {
 		t.Fatal("invalid update succeeded")
 	}
 
-	if got := store.Snapshot().Companion.Name; got != "Front Door" {
+	if got := store.Snapshot().Logging.Level; got != "debug" {
 		t.Fatalf("invalid update changed store: %q", got)
 	}
 }

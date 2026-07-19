@@ -165,6 +165,8 @@ function switchPage(pageId) {
   if (pageId === 'diagnostics') renderDiagnostics();
   if (pageId === 'configHa') renderHomeAssistantConfig();
   if (pageId === 'configEntrypoints') loadConfig().then(renderEntrypointsConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
+  if (pageId === 'configHomeKit') renderHomeKitConfig();
+  if (pageId === 'managementSystem') renderSystemConfig();
   if (pageId === 'adminUser') renderAdminUser();
   startPolling(pageId);
 }
@@ -178,23 +180,32 @@ function buildNav() {
       label: 'Config',
       children: [
         { id: 'configEntrypoints', label: 'Entrypoints' },
-        { id: 'configHa', label: 'Home Assistant' }
+        { id: 'configHa', label: 'Home Assistant' },
+        { id: 'configHomeKit', label: 'HomeKit' }
       ]
     },
     {
-      label: 'Logger',
+      label: 'Management',
       children: [
-        { id: 'logs', label: 'Logs' },
-        { id: 'busframes', label: 'BUS Frames' }
+        { id: 'managementSystem', label: 'System' },
+        { id: 'diagnostics', label: 'Diagnostics' },
+        { id: 'managementUpdates', label: 'Updates' }
+      ]
+    },
+    {
+      label: 'Logs',
+      children: [
+        { id: 'logs', label: 'Companion' },
+        { id: 'busframes', label: 'OpenWebNet' }
       ]
     },
     { id: 'about', label: 'About' },
-    { id: 'diagnostics', label: 'Diagnostics' },
     {
       label: 'Admin',
       children: [
         { id: 'adminUser', label: 'User' },
         { action: 'restartCompanion()', label: 'Restart' },
+        { action: 'rebootIntercom()', label: 'Reboot' },
         { action: 'logout()', label: 'Logout' }
       ]
     }
@@ -231,6 +242,37 @@ function buildNav() {
   /* activate first page */
   var first = document.querySelector('.nav-links a[data-page]');
   if (first) first.classList.add('active');
+}
+
+function renderHomeKitConfig() {
+  apiGet('/webui/api/config/homekit').then(function(data) {
+    document.getElementById('homeKitEnabled').checked = !!data.enabled;
+    setStatus('homeKitStatus', '');
+  }).catch(function(err) { handleApiError(err, 'Failed to load HomeKit configuration'); });
+}
+
+function saveHomeKitConfig(button) {
+  apiPut('/webui/api/config/homekit', { enabled: document.getElementById('homeKitEnabled').checked }).then(function() {
+    setStatus('homeKitStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)');
+  }).catch(function(err) { handleApiError(err); });
+}
+
+function renderSystemConfig() {
+  apiGet('/webui/api/management/system').then(function(data) {
+    document.getElementById('systemRebootEnabled').checked = !!data.reboot_enabled;
+    document.getElementById('systemUpdateEnabled').checked = !!data.update_enabled;
+    document.getElementById('systemUpdateExposed').checked = !!data.update_exposed;
+    setStatus('systemStatus', '');
+  }).catch(function(err) { handleApiError(err, 'Failed to load system configuration'); });
+}
+
+function saveSystemConfig(button) {
+  apiPut('/webui/api/management/system', {
+    reboot_enabled: document.getElementById('systemRebootEnabled').checked,
+    update_enabled: document.getElementById('systemUpdateEnabled').checked,
+    update_exposed: document.getElementById('systemUpdateExposed').checked,
+    services: { dropbear: { enabled: true, exposed: true } }
+  }).then(function() { setStatus('systemStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)'); }).catch(function(err) { handleApiError(err); });
 }
 
 function toggleVis(btn) {
@@ -429,7 +471,7 @@ function submitSetup(event) {
     return;
   }
 
-  apiPost('/webui/api/credentials', {
+  apiPost('/webui/api/bootstrap/account', {
     username: form.get('username'),
     password: form.get('password'),
     password_confirm: form.get('password_confirm'),
@@ -453,7 +495,7 @@ function submitSetup(event) {
 }
 
 function logout() {
-  apiPost('/webui/api/logout', {}).then(function() {
+  apiPost('/webui/api/admin/logout', {}).then(function() {
     checkSession('manual');
   }).catch(function(err) {
     toast.show({ kind: 'error', message: err.message || 'Logout failed' });
@@ -461,12 +503,38 @@ function logout() {
 }
 
 function restartCompanion() {
+  requestConfirmation('Restart Companion?', 'You will need to sign in again.', 'Restart', function() {
   toast.show({ kind: 'attention', message: 'Restarting Companion...' });
-  apiPost('/webui/api/restart', {}).then(function() {
+  apiPost('/webui/api/admin/restart', { confirm: true }).then(function() {
     setTimeout(pollRestartReady, 1500);
   }).catch(function(err) {
     toast.show({ kind: 'error', message: err.message || 'Restart failed' });
-  });
+  }); });
+}
+
+function rebootIntercom() {
+  requestConfirmation('Reboot intercom?', 'Companion and panel services will be unavailable until it starts again.', 'Reboot', function() {
+  apiPost('/webui/api/admin/reboot', { confirm: true }).then(function() {
+    toast.show({ kind: 'attention', message: 'Intercom reboot requested.' });
+  }).catch(function(err) { toast.show({ kind: 'error', message: err.message || 'Reboot failed' }); }); });
+}
+
+var _confirmationAction = null;
+function requestConfirmation(title, message, acceptLabel, action) {
+  _confirmationAction = action;
+  document.getElementById('confirmationTitle').textContent = title;
+  document.getElementById('confirmationMessage').textContent = message;
+  document.getElementById('confirmationAccept').textContent = acceptLabel;
+  document.getElementById('confirmationDialog').classList.remove('hidden');
+}
+function closeConfirmation() {
+  _confirmationAction = null;
+  document.getElementById('confirmationDialog').classList.add('hidden');
+}
+function acceptConfirmation() {
+  var action = _confirmationAction;
+  closeConfirmation();
+  if (action) action();
 }
 
 function pollRestartReady() {
@@ -490,7 +558,7 @@ function pollRestartReady() {
 
 /* ──── Config pages ──── */
 function loadConfig() {
-  return apiGet('/webui/api/config').then(function(data) {
+  return apiGet('/webui/api/config/entrypoints').then(function(data) {
     _configDoc = data;
     return _configDoc;
   });
@@ -498,7 +566,7 @@ function loadConfig() {
 
 function saveConfig(statusEl, saveBtn) {
   if (!_configDoc) return Promise.reject(new Error('Config is not loaded'));
-  return apiPut('/webui/api/config', _configDoc).then(function() {
+  return apiPut('/webui/api/config/entrypoints', _configDoc).then(function() {
     if (statusEl) setStatus(statusEl.id, '');
     flashSavedButton(saveBtn);
     toast.show({ kind: 'attention', message: 'Saved. Restart Companion to apply changes.' });
@@ -528,12 +596,11 @@ function flashSavedButton(btn) {
 }
 
 function ensureCompanionConfig() {
-  _configDoc.companion = _configDoc.companion || {};
-  return _configDoc.companion;
+  return _configDoc;
 }
 
 function renderHomeAssistantConfig() {
-  apiGet('/webui/api/pairing').then(function(pairing) {
+  apiGet('/webui/api/config/homeassistant').then(function(pairing) {
     renderPairingStatus(pairing);
   }).catch(function(err) { handleApiError(err, 'Failed to load pairing status'); });
 }
@@ -592,7 +659,7 @@ function renderHABadge(state) {
 }
 
 function issueRepairCode() {
-  apiPost('/webui/api/repair-code', {}).then(function(data) {
+  apiPost('/webui/api/config/homeassistant/recovery-code', {}).then(function(data) {
     toast.show({ kind: 'success', message: 'Recovery code generated.' });
     renderHomeAssistantConfig();
   }).catch(function(err) { handleApiError(err, 'Failed to issue repair code'); });
@@ -618,7 +685,7 @@ function copyPairingCode(elementID) {
 }
 
 function refreshPairingToast() {
-  apiGet('/webui/api/pairing').then(function(pairing) {
+  apiGet('/webui/api/config/homeassistant').then(function(pairing) {
     renderPairingToast(pairing);
   }).catch(function(err) { handleApiError(err); });
 }
@@ -664,9 +731,10 @@ function renderEntrypointsConfig() {
 
 function entrypointCardHTML(ep, idx) {
   ep = ep || {};
+  var removeDisabled = ensureCompanionConfig().entrypoints.length <= 1;
   return '<div class="card section entrypoint-card" data-index="' + idx + '">'
     + '<div class="flex-between mb-16"><div class="card-header" style="border:none;margin:0;padding:0">Entrypoint ' + (idx + 1) + '</div>'
-    + '<button type="button" class="btn btn-danger btn-sm" onclick="removeEntrypointCard(' + idx + ')">Remove</button></div>'
+    + '<button type="button" class="btn btn-danger btn-sm"' + (removeDisabled ? ' disabled title="At least one entrypoint is required"' : '') + ' onclick="removeEntrypointCard(' + idx + ')">Remove</button></div>'
     + '<div class="form-row">'
     + '<div class="form-group"><label class="form-label">ID</label><input class="form-input ep-id" type="text" value="' + escapeHtml(ep.id || '') + '" required></div>'
     + '<div class="form-group"><label class="form-label">Label</label><input class="form-input ep-label" type="text" value="' + escapeHtml(ep.label || '') + '" required></div>'
@@ -694,6 +762,10 @@ function addEntrypointCard() {
 function removeEntrypointCard(idx) {
   var cfg = ensureCompanionConfig();
   cfg.entrypoints = collectEntrypoints();
+  if (cfg.entrypoints.length <= 1) {
+    setStatus('entrypointsStatus', 'At least one entrypoint is required.', 'var(--danger)');
+    return;
+  }
   cfg.entrypoints.splice(idx, 1);
   renderEntrypointsConfig();
 }
@@ -719,6 +791,10 @@ function collectEntrypoints() {
 function saveEntrypointsConfig(saveBtn) {
   var cfg = ensureCompanionConfig();
   cfg.entrypoints = collectEntrypoints();
+  if (!cfg.entrypoints.length) {
+    setStatus('entrypointsStatus', 'At least one entrypoint is required.', 'var(--danger)');
+    return;
+  }
   for (var i = 0; i < cfg.entrypoints.length; i++) {
     if (!cfg.entrypoints[i].id || !cfg.entrypoints[i].label || !cfg.entrypoints[i].devaddr) {
       setStatus('entrypointsStatus', 'ID, label, and device address are required.', 'var(--danger)');
@@ -746,7 +822,7 @@ function renderAdminUser() {
 
 function saveAdminUser() {
   var form = document.getElementById('adminUserForm');
-  apiPost('/webui/api/credentials', {
+  apiPost('/webui/api/admin/account', {
     username: form.username.value.trim(),
     current_password: form.current_password.value,
     password: form.password.value
@@ -766,14 +842,14 @@ function renderAbout() {
   var cached = getCached('/webui/api/session');
   if (cached) renderAboutData(cached);
   apiGet('/webui/api/session', { cache: true }).then(renderAboutData).catch(function(err) { handleApiError(err); });
-  var cachedStatus = getCached('/webui/api/status');
+  var cachedStatus = getCached('/webui/api/management/diagnostics');
   if (cachedStatus) renderStatusData(cachedStatus);
-  apiGet('/webui/api/status', { cache: true }).then(renderStatusData).catch(function(err) { handleApiError(err); });
+  apiGet('/webui/api/management/diagnostics', { cache: true }).then(renderStatusData).catch(function(err) { handleApiError(err); });
   loadUpdateStatus();
 }
 
 function loadUpdateStatus() {
-  apiGet('/webui/api/update/status').then(function(update) {
+  apiGet('/webui/api/management/update').then(function(update) {
     renderUpdateStatus(update);
     if (update.update_available) toast.show({ id: 'update-available', kind: 'attention', message: 'Companion update ' + (update.latest_version || '') + ' is available.' });
     if (update.restart_required) toast.show({ id: 'update-restart', kind: 'attention', message: 'Companion update is staged and will activate on restart.' });
@@ -807,7 +883,7 @@ function renderUpdateStatus(update) {
 function installUpdate() {
   var button = document.getElementById('aboutUpdateInstall');
   if (button) button.disabled = true;
-  apiPost('/webui/api/update/install', {}).then(function(update) {
+  apiPost('/webui/api/management/update', {}).then(function(update) {
     if (!update.restart_required) {
       if (button) button.disabled = false;
       toast.show({ kind: 'success', message: 'No update is available.' });
@@ -840,7 +916,7 @@ function renderStatusData(status) {
 }
 
 function renderDiagnostics() {
-  apiGet('/webui/api/status').then(function(status) {
+  apiGet('/webui/api/management/diagnostics').then(function(status) {
     var diagnostic = status.diagnostics || {};
     var own = diagnostic.openwebnet || {};
     var local = diagnostic.local || {};
@@ -915,18 +991,18 @@ function stopPolling() {
 /* ──── Log viewer ──── */
 function fetchLogs() {
   if (_logPaused) return;
-  apiGet('/webui/api/logs').then(renderLogs).catch(function(err) { handleApiError(err, 'Failed to load logs'); });
+  apiGet('/webui/api/logs/companion').then(renderLogs).catch(function(err) { handleApiError(err, 'Failed to load logs'); });
 }
 
 function loadLoggingState() {
-  apiGet('/webui/api/logging').then(function(data) {
+  apiGet('/webui/api/logs/companion/level').then(function(data) {
     var runtimeLevel = document.getElementById('logRuntimeLevel');
     if (runtimeLevel && data.level) runtimeLevel.value = data.level;
   }).catch(function(err) { handleApiError(err, 'Failed to load logger state'); });
 }
 
 function setLoggingLevel(level) {
-  apiPut('/webui/api/logging', { level: level }).then(function(data) {
+  apiPut('/webui/api/logs/companion/level', { level: level }).then(function(data) {
     var runtimeLevel = document.getElementById('logRuntimeLevel');
     if (runtimeLevel && data.level) runtimeLevel.value = data.level;
     toast.show({ kind: 'success', message: 'Log level set to ' + data.level.toUpperCase() + '.' });
@@ -993,7 +1069,7 @@ document.getElementById('logSearch').addEventListener('input', function() {
 /* ──── BUS Frame viewer ──── */
 function fetchFrames() {
   if (_framePaused) return;
-  apiGet('/webui/api/frames').then(renderFrames).catch(function(err) { handleApiError(err, 'Failed to load BUS frames'); });
+  apiGet('/webui/api/logs/openwebnet').then(renderFrames).catch(function(err) { handleApiError(err, 'Failed to load BUS frames'); });
 }
 
 function renderFrames(data) {

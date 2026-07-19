@@ -211,7 +211,7 @@
       <div class="flex-between mb-16">
         <div>
           <h1 class="page-title">Entrypoints</h1>
-          <p class="page-desc" style="margin-bottom:0">Gates, addresses, and exposed capabilities</p>
+          <p class="page-desc" style="margin-bottom:0">Configure Companion entrypoints, addresses, and capabilities.</p>
         </div>
         <div class="header-actions">
           <button class="btn btn-secondary btn-sm" onclick="addEntrypointCard()">+ Add</button>
@@ -220,6 +220,32 @@
       </div>
       <div id="entrypointsList"></div>
       <div id="entrypointsStatus" class="form-status"></div>
+    </div>
+
+    <div id="configHomeKitPage" class="page hidden">
+      <h1 class="page-title">HomeKit</h1>
+      <p class="page-desc">Configure Companion HomeKit exposure.</p>
+      <div class="card section"><div class="card-header">HomeKit</div>
+        <label class="form-check"><input id="homeKitEnabled" type="checkbox"> Enable HomeKit</label>
+        <div class="flex-between"><span id="homeKitStatus" class="form-status"></span><button class="btn btn-primary" onclick="saveHomeKitConfig(this)">Save</button></div>
+      </div>
+    </div>
+
+    <div id="managementSystemPage" class="page hidden">
+      <h1 class="page-title">System</h1>
+      <p class="page-desc">Manage Companion system features.</p>
+      <div class="card section"><div class="card-header">Controls</div>
+        <label class="form-check"><input id="systemRebootEnabled" type="checkbox"> Allow intercom reboot</label>
+        <label class="form-check"><input id="systemUpdateEnabled" type="checkbox"> Enable updates</label>
+        <label class="form-check"><input id="systemUpdateExposed" type="checkbox"> Expose update control</label>
+        <div class="flex-between"><span id="systemStatus" class="form-status"></span><button class="btn btn-primary" onclick="saveSystemConfig(this)">Save</button></div>
+      </div>
+    </div>
+
+    <div id="managementUpdatesPage" class="page hidden">
+      <h1 class="page-title">Updates</h1>
+      <p class="page-desc">Companion update management will be available here.</p>
+      <div class="card section"><div class="card-header">Updates</div><p class="card-desc">This page is not implemented yet.</p></div>
     </div>
 
     <!-- Admin: User -->
@@ -263,10 +289,10 @@
         <div class="card-header">Log Viewer</div>
         <div class="toolbar-row">
           <select class="form-input filter-select" id="logRuntimeLevel" title="Log level">
-            <option value="debug">Log Level: DEBUG</option>
-            <option value="info">Log Level: INFO</option>
-            <option value="warn">Log Level: WARN</option>
-            <option value="error">Log Level: ERROR</option>
+            <option value="debug">DEBUG</option>
+            <option value="info">INFO</option>
+            <option value="warn">WARN</option>
+            <option value="error">ERROR</option>
           </select>
           <input class="form-input log-search" id="logSearch" type="text" placeholder="Search…">
           <button class="btn btn-primary btn-sm" id="logPauseBtn" onclick="toggleLogPause()">Pause</button>
@@ -287,6 +313,17 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<div id="confirmationDialog" class="confirmation-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="confirmationTitle">
+  <div class="confirmation-card">
+    <h2 id="confirmationTitle"></h2>
+    <p id="confirmationMessage"></p>
+    <div class="confirmation-actions">
+      <button type="button" class="btn btn-secondary" onclick="closeConfirmation()">Cancel</button>
+      <button id="confirmationAccept" type="button" class="btn btn-danger" onclick="acceptConfirmation()"></button>
+    </div>
   </div>
 </div>
 

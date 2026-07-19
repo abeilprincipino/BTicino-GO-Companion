@@ -57,7 +57,7 @@ func run(
 		logger.Info("created initial configuration", "path", configPath, "device_id", configStore.Snapshot().Companion.DeviceID)
 	}
 	if setLogLevel != nil {
-		if err := setLogLevel(configStore.Snapshot().Companion.LogLevel); err != nil {
+		if err := setLogLevel(configStore.Snapshot().Logging.Level); err != nil {
 			return fmt.Errorf("set log level: %w", err)
 		}
 	}
@@ -158,7 +158,7 @@ func run(
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	webUI := webui.New(configStore, authStore, logger, restartCompanion, setLogLevel)
+	webUI := webui.New(configStore, authStore, logger, restartCompanion, rt.Reboot, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
 	webUI.SetDiagnostics(diagnosticService)
 	webUI.SetUpdate(updater)

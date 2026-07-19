@@ -52,6 +52,7 @@ type Server struct {
 	auth        *auth.Store
 	logger      *slog.Logger
 	restart     RestartFunc
+	reboot      RestartFunc
 	setLogLevel func(string) error
 	frames      FrameProvider
 	diagnostics DiagnosticsProvider
@@ -72,15 +73,7 @@ type session struct {
 	lastSeen  time.Time
 }
 
-type editableConfig struct {
-	Companion editableCompanion `json:"companion"`
-	System    editableSystem    `json:"system"`
-	HomeKit   editableHomeKit   `json:"homekit"`
-}
-
-type editableCompanion struct {
-	Name        string              `json:"name"`
-	LogLevel    string              `json:"log_level"`
+type intercomConfig struct {
 	Entrypoints []config.Entrypoint `json:"entrypoints"`
 }
 
@@ -107,12 +100,16 @@ type passwordRequest struct {
 	PasswordConfirm string `json:"password_confirm"`
 }
 
-func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restart RestartFunc, setLogLevel func(string) error) *Server {
+type confirmationRequest struct {
+	Confirm bool `json:"confirm"`
+}
+
+func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restart, reboot RestartFunc, setLogLevel func(string) error) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, auth: authStore, logger: logger, restart: restart, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
+	return &Server{config: store, auth: authStore, logger: logger, restart: restart, reboot: reboot, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
 }
 
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
@@ -123,21 +120,26 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /webui/api/session", s.handleSession)
 	mux.HandleFunc("POST /webui/api/login", s.handleLogin)
-	mux.HandleFunc("POST /webui/api/logout", s.handleLogout)
-	mux.HandleFunc("POST /webui/api/password", s.handlePassword)
-	mux.HandleFunc("POST /webui/api/credentials", s.handlePassword)
-	mux.HandleFunc("GET /webui/api/pairing", s.requireReady(s.handlePairing))
-	mux.HandleFunc("POST /webui/api/repair-code", s.requireReady(s.handleRepairCode))
-	mux.HandleFunc("GET /webui/api/config", s.requireReady(s.handleConfig))
-	mux.HandleFunc("PUT /webui/api/config", s.requireReady(s.handleConfig))
-	mux.HandleFunc("POST /webui/api/restart", s.requireReady(s.handleRestart))
-	mux.HandleFunc("GET /webui/api/status", s.requireReady(s.handleStatus))
-	mux.HandleFunc("GET /webui/api/update/status", s.requireReady(s.handleUpdateStatus))
-	mux.HandleFunc("POST /webui/api/update/install", s.requireReady(s.handleUpdateInstall))
-	mux.HandleFunc("GET /webui/api/logs", s.requireReady(s.handleLogs))
-	mux.HandleFunc("GET /webui/api/logging", s.requireReady(s.handleLogging))
-	mux.HandleFunc("PUT /webui/api/logging", s.requireReady(s.handleLogging))
-	mux.HandleFunc("GET /webui/api/frames", s.requireReady(s.handleFrames))
+	mux.HandleFunc("POST /webui/api/admin/logout", s.handleLogout)
+	mux.HandleFunc("POST /webui/api/bootstrap/account", s.handlePassword)
+	mux.HandleFunc("POST /webui/api/admin/account", s.requireReady(s.handlePassword))
+	mux.HandleFunc("POST /webui/api/admin/restart", s.requireReady(s.handleRestart))
+	mux.HandleFunc("POST /webui/api/admin/reboot", s.requireReady(s.handleReboot))
+	mux.HandleFunc("GET /webui/api/config/homeassistant", s.requireReady(s.handlePairing))
+	mux.HandleFunc("POST /webui/api/config/homeassistant/recovery-code", s.requireReady(s.handleRepairCode))
+	mux.HandleFunc("GET /webui/api/config/entrypoints", s.requireReady(s.handleEntrypointsConfig))
+	mux.HandleFunc("PUT /webui/api/config/entrypoints", s.requireReady(s.handleEntrypointsConfig))
+	mux.HandleFunc("GET /webui/api/config/homekit", s.requireReady(s.handleHomeKitConfig))
+	mux.HandleFunc("PUT /webui/api/config/homekit", s.requireReady(s.handleHomeKitConfig))
+	mux.HandleFunc("GET /webui/api/management/system", s.requireReady(s.handleSystemConfig))
+	mux.HandleFunc("PUT /webui/api/management/system", s.requireReady(s.handleSystemConfig))
+	mux.HandleFunc("GET /webui/api/management/diagnostics", s.requireReady(s.handleStatus))
+	mux.HandleFunc("GET /webui/api/management/update", s.requireReady(s.handleUpdateStatus))
+	mux.HandleFunc("POST /webui/api/management/update", s.requireReady(s.handleUpdateInstall))
+	mux.HandleFunc("GET /webui/api/logs/companion", s.requireReady(s.handleLogs))
+	mux.HandleFunc("GET /webui/api/logs/companion/level", s.requireReady(s.handleLogging))
+	mux.HandleFunc("PUT /webui/api/logs/companion/level", s.requireReady(s.handleLogging))
+	mux.HandleFunc("GET /webui/api/logs/openwebnet", s.requireReady(s.handleFrames))
 	mux.Handle("/", s.staticHandler())
 
 	return logging.HTTP(s.logger, mux)
@@ -225,7 +227,7 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"level": cfg.Companion.LogLevel})
+		writeJSON(w, http.StatusOK, map[string]any{"level": cfg.Logging.Level})
 		return
 	}
 
@@ -239,7 +241,7 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid log level")
 		return
 	}
-	if err := s.config.Update(func(cfg *config.Config) error { cfg.Companion.LogLevel = body.Level; return nil }); err != nil {
+	if err := s.config.Update(func(cfg *config.Config) error { cfg.Logging.Level = body.Level; return nil }); err != nil {
 		writeError(w, http.StatusInternalServerError, "save log level failed")
 		return
 	}
@@ -467,7 +469,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleEntrypointsConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg, ok := s.snapshot()
@@ -476,26 +478,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, redactedConfig(cfg))
+		writeJSON(w, http.StatusOK, intercomConfig{Entrypoints: cfg.Companion.Entrypoints})
 	case http.MethodPut:
 		if !s.sameOrigin(w, r) {
 			return
 		}
 
-		var next editableConfig
+		var next intercomConfig
 		if !decodeJSON(w, r, &next) {
 			return
 		}
 
 		if err := s.config.Update(func(cfg *config.Config) error {
-			cfg.Companion.Name = strings.TrimSpace(next.Companion.Name)
-			cfg.Companion.LogLevel = strings.TrimSpace(next.Companion.LogLevel)
-			cfg.Companion.Entrypoints = next.Companion.Entrypoints
-			cfg.System.RebootEnabled = next.System.RebootEnabled
-			cfg.System.UpdateEnabled = next.System.UpdateEnabled
-			cfg.System.UpdateExposed = next.System.UpdateExposed
-			cfg.System.Services = next.System.Services
-			cfg.HomeKit.Enabled = next.HomeKit.Enabled
+			cfg.Companion.Entrypoints = next.Entrypoints
 
 			return nil
 		}); err != nil {
@@ -510,8 +505,70 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg, ok := s.snapshot()
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.HomeKit.Enabled})
+		return
+	}
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var next editableHomeKit
+	if !decodeJSON(w, r, &next) {
+		return
+	}
+	if err := s.config.Update(func(cfg *config.Config) error { cfg.HomeKit.Enabled = next.Enabled; return nil }); err != nil {
+		writeError(w, http.StatusBadRequest, "configuration is invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+}
+
+func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg, ok := s.snapshot()
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, Services: cfg.System.Services})
+		return
+	}
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var next editableSystem
+	if !decodeJSON(w, r, &next) {
+		return
+	}
+	if err := s.config.Update(func(cfg *config.Config) error {
+		cfg.System.RebootEnabled = next.RebootEnabled
+		cfg.System.UpdateEnabled = next.UpdateEnabled
+		cfg.System.UpdateExposed = next.UpdateExposed
+		cfg.System.Services = next.Services
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "configuration is invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+}
+
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
+		return
+	}
+	var request confirmationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if !request.Confirm {
+		writeError(w, http.StatusBadRequest, "confirmation required")
 		return
 	}
 
@@ -533,6 +590,30 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	go s.runRestart(restartCtx, cancel)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
+}
+
+func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var request confirmationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if !request.Confirm {
+		writeError(w, http.StatusBadRequest, "confirmation required")
+		return
+	}
+	if s.reboot == nil {
+		writeError(w, http.StatusServiceUnavailable, "reboot is unavailable")
+		return
+	}
+	go func() {
+		if err := s.reboot(context.WithoutCancel(r.Context())); err != nil {
+			s.logger.Error("reboot intercom", "error", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "rebooting": true})
 }
 
 func (s *Server) runRestart(ctx context.Context, cancel context.CancelFunc) {
@@ -648,14 +729,6 @@ func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func redactedConfig(cfg config.Config) editableConfig {
-	return editableConfig{
-		Companion: editableCompanion{Name: cfg.Companion.Name, LogLevel: cfg.Companion.LogLevel, Entrypoints: cfg.Companion.Entrypoints},
-		System:    editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, Services: cfg.System.Services},
-		HomeKit:   editableHomeKit{Enabled: cfg.HomeKit.Enabled},
-	}
-}
-
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer r.Body.Close() //nolint:errcheck // request body already consumed
 
@@ -715,11 +788,13 @@ func (s *Server) staticHandler() http.Handler {
 			}
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(data)
 
 			return
 		}
 
+		w.Header().Set("Cache-Control", "no-store")
 		http.FileServer(http.FS(files)).ServeHTTP(w, r)
 	})
 }

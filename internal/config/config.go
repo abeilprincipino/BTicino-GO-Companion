@@ -32,6 +32,7 @@ type Config struct {
 	Companion Companion `yaml:"companion"`
 	Auth      Auth      `yaml:"auth"`
 	WebUI     WebUI     `yaml:"webui"`
+	Logging   Logging   `yaml:"logging"`
 	System    System    `yaml:"system"`
 	HomeKit   HomeKit   `yaml:"homekit"`
 }
@@ -46,30 +47,32 @@ const (
 )
 
 type Companion struct {
-	Name        string       `yaml:"name"`
-	LogLevel    string       `yaml:"log_level"`
 	DeviceID    string       `yaml:"-"`
 	Model       string       `yaml:"-"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
 }
 
 type Entrypoint struct {
-	ID           string       `yaml:"id"`
-	Label        string       `yaml:"label"`
-	DevAddr      string       `yaml:"devaddr"`
-	Capabilities Capabilities `yaml:"capabilities"`
+	ID           string       `yaml:"id" json:"id"`
+	Label        string       `yaml:"label" json:"label"`
+	DevAddr      string       `yaml:"devaddr" json:"devaddr"`
+	Capabilities Capabilities `yaml:"capabilities" json:"capabilities"`
 }
 
 type Capabilities struct {
-	Stream bool `yaml:"stream"`
-	Unlock bool `yaml:"unlock"`
-	Ring   bool `yaml:"ring"`
+	Stream bool `yaml:"stream" json:"stream"`
+	Unlock bool `yaml:"unlock" json:"unlock"`
+	Ring   bool `yaml:"ring" json:"ring"`
 }
 
 type Auth struct {
 	PairingState    PairingState `yaml:"pairing_state"`
 	InstanceID      string       `yaml:"instance_id"`
 	BearerTokenHash string       `yaml:"bearer_token_hash"`
+}
+
+type Logging struct {
+	Level string `yaml:"level"`
 }
 
 type WebUI struct {
@@ -83,6 +86,22 @@ type System struct {
 	UpdateEnabled bool               `yaml:"update_enabled"`
 	UpdateExposed bool               `yaml:"update_exposed"`
 	Services      map[string]Service `yaml:"services"`
+}
+
+type persistedAuth struct {
+	HomeAssistant Auth  `yaml:"home_assistant"`
+	WebUI         WebUI `yaml:"webui"`
+}
+
+type persistedSystem struct {
+	Reboot struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"reboot"`
+	Updates struct {
+		Enabled bool `yaml:"enabled"`
+		Exposed bool `yaml:"exposed"`
+	} `yaml:"updates"`
+	Services map[string]Service `yaml:"services"`
 }
 
 type Service struct {
@@ -99,15 +118,13 @@ type HomeKit struct {
 // startup and must never be written to config.yaml.
 type persistedConfig struct {
 	Companion persistedCompanion `yaml:"companion"`
-	Auth      Auth               `yaml:"auth"`
-	WebUI     WebUI              `yaml:"webui"`
-	System    System             `yaml:"system"`
+	Logging   Logging            `yaml:"logging"`
+	Auth      persistedAuth      `yaml:"auth"`
+	System    persistedSystem    `yaml:"system"`
 	HomeKit   HomeKit            `yaml:"homekit"`
 }
 
 type persistedCompanion struct {
-	Name        string       `yaml:"name"`
-	LogLevel    string       `yaml:"log_level"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
 }
 
@@ -164,8 +181,6 @@ func Default(metadata Metadata) (Config, error) {
 
 	cfg := Config{
 		Companion: Companion{
-			Name:     "BTicino Companion",
-			LogLevel: defaultLogLevel,
 			Entrypoints: []Entrypoint{{
 				ID:      defaultEntrypoint,
 				Label:   "Main Gate",
@@ -182,6 +197,7 @@ func Default(metadata Metadata) (Config, error) {
 			InstanceID:      instanceID,
 			BearerTokenHash: "",
 		},
+		Logging: Logging{Level: defaultLogLevel},
 		WebUI: WebUI{
 			AdminUsername:     "",
 			AdminPasswordHash: "",
@@ -236,13 +252,12 @@ func Load(path string) (Config, error) {
 	}
 	cfg := Config{
 		Companion: Companion{
-			Name:        persisted.Companion.Name,
-			LogLevel:    persisted.Companion.LogLevel,
 			Entrypoints: persisted.Companion.Entrypoints,
 		},
-		Auth:    persisted.Auth,
-		WebUI:   persisted.WebUI,
-		System:  persisted.System,
+		Auth:    persisted.Auth.HomeAssistant,
+		WebUI:   persisted.Auth.WebUI,
+		Logging: persisted.Logging,
+		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, Services: persisted.System.Services},
 		HomeKit: persisted.HomeKit,
 	}
 	if err := ensureSingleDocument(decoder); err != nil {
@@ -294,12 +309,8 @@ func (s *Store) ApplyMetadata(metadata Metadata) error {
 }
 
 func Validate(cfg Config) error {
-	if strings.TrimSpace(cfg.Companion.Name) == "" {
-		return errors.New("companion name is required")
-	}
-
-	if cfg.Companion.LogLevel != "debug" && cfg.Companion.LogLevel != "info" && cfg.Companion.LogLevel != "warn" && cfg.Companion.LogLevel != "error" {
-		return fmt.Errorf("invalid log level %q", cfg.Companion.LogLevel)
+	if cfg.Logging.Level != "debug" && cfg.Logging.Level != "info" && cfg.Logging.Level != "warn" && cfg.Logging.Level != "error" {
+		return fmt.Errorf("invalid log level %q", cfg.Logging.Level)
 	}
 
 	if !validPairingState(cfg.Auth.PairingState) {
@@ -362,13 +373,16 @@ func saveNew(path string, cfg Config) error {
 func save(path string, cfg Config, exclusive bool) error {
 	data, err := yaml.Marshal(persistedConfig{
 		Companion: persistedCompanion{
-			Name:        cfg.Companion.Name,
-			LogLevel:    cfg.Companion.LogLevel,
 			Entrypoints: cfg.Companion.Entrypoints,
 		},
-		Auth:    cfg.Auth,
-		WebUI:   cfg.WebUI,
-		System:  cfg.System,
+		Logging: cfg.Logging,
+		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
+		System: persistedSystem{Reboot: struct {
+			Enabled bool `yaml:"enabled"`
+		}{Enabled: cfg.System.RebootEnabled}, Updates: struct {
+			Enabled bool `yaml:"enabled"`
+			Exposed bool `yaml:"exposed"`
+		}{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed}, Services: cfg.System.Services},
 		HomeKit: cfg.HomeKit,
 	})
 	if err != nil {
