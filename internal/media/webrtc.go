@@ -6,12 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -50,6 +53,7 @@ type WebRTCService struct {
 	api               *webrtc.API
 	configuration     webrtc.Configuration
 	iceConn           net.PacketConn
+	logger            *slog.Logger
 	sessions          map[string]*webRTCSession
 	pendingCandidates map[string]pendingCandidateBatch
 }
@@ -64,7 +68,38 @@ type webRTCSession struct {
 	audioTrack           *webrtc.TrackLocalStaticRTP
 	pendingRemoteICE     []webrtc.ICECandidateInit
 	remoteDescriptionSet bool
+	createdAt            time.Time
+	queuedCandidates     atomic.Uint64
+	appliedCandidates    atomic.Uint64
+	videoRTP             outboundRTPStats
+	audioRTP             outboundRTPStats
 	closeOnce            sync.Once
+}
+
+type outboundRTPStats struct {
+	packets              atomic.Uint64
+	payloadBytes         atomic.Uint64
+	writeErrors          atomic.Uint64
+	receiverReports      atomic.Uint64
+	reportedFractionLost atomic.Uint64
+	reportedTotalLost    atomic.Uint64
+	reportedLastSequence atomic.Uint64
+	nackFeedback         atomic.Uint64
+	pliFeedback          atomic.Uint64
+	firstPacket          atomic.Bool
+	firstWriteError      atomic.Bool
+}
+
+type outboundRTPStatsSnapshot struct {
+	packets              uint64
+	payloadBytes         uint64
+	writeErrors          uint64
+	receiverReports      uint64
+	reportedFractionLost uint64
+	reportedTotalLost    uint64
+	reportedLastSequence uint64
+	nackFeedback         uint64
+	pliFeedback          uint64
 }
 
 type pendingCandidateBatch struct {
@@ -100,6 +135,7 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 		coordinator:       coordinator,
 		api:               api,
 		entrypoints:       configured,
+		logger:            slog.Default().With("component", "media.webrtc"),
 		sessions:          make(map[string]*webRTCSession),
 		pendingCandidates: make(map[string]pendingCandidateBatch),
 		iceConn:           iceConn,
@@ -148,23 +184,34 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	}
 	s.mu.Unlock()
 	for _, previousSessionID := range previousSessionIDs {
-		s.closeSession(previousSessionID)
+		s.closeSession(previousSessionID, "superseded by successor session")
 	}
 
 	pc, err := s.api.NewPeerConnection(s.configuration)
 	if err != nil {
 		return "", err
 	}
-	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc}
+	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now()}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			go s.closeSession(sessionID)
+			go s.closeSession(sessionID, "peer connection "+state.String())
 		}
+	})
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		s.logger.Debug("webrtc ICE connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+	})
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
+		s.logger.Debug("webrtc ICE gathering state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+	})
+	pc.OnSignalingStateChange(func(state webrtc.SignalingState) {
+		s.logger.Debug("webrtc signaling state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 	})
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		if track == nil || track.Kind() != webrtc.RTPCodecTypeAudio || !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
+		s.logger.Debug("webrtc backchannel track received", "session_id", sessionID, "entrypoint_id", entrypointID, "codec", track.Codec().MimeType, "payload_type", track.PayloadType(), "ssrc", track.SSRC())
 		go s.forwardBackchannel(session, track)
 	})
 
@@ -181,30 +228,31 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	}
 	if pending, ok := s.pendingCandidates[sessionID]; ok {
 		session.pendingRemoteICE = append(session.pendingRemoteICE, pending.candidates...)
+		session.queuedCandidates.Add(uint64(len(pending.candidates)))
 		delete(s.pendingCandidates, sessionID)
 	}
 	s.sessions[sessionID] = session
 	s.mu.Unlock()
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "set remote description failed")
 		return "", err
 	}
 	if err := s.flushPendingRemoteCandidates(session); err != nil {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "apply remote candidates failed")
 		return "", err
 	}
 
 	// The HTTP request ends after this answer; the source must instead live
 	// until the peer or client explicitly closes the session.
 	lease, err := s.coordinator.Acquire(context.WithoutCancel(ctx), entrypoint, SourceEvents{
-		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session.videoTrack, packet) },
-		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session.audioTrack, packet) },
-		RemoteBYE: func() { s.closeSession(sessionID) },
-		Failed:    func(error) { s.closeSession(sessionID) },
+		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
+		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
+		RemoteBYE: func() { s.closeSession(sessionID, "remote SIP BYE") },
+		Failed:    func(error) { s.closeSession(sessionID, "source failure") },
 	})
 	if err != nil {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "source startup failed")
 		return "", err
 	}
 	if !session.setLease(lease) {
@@ -214,25 +262,27 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "create answer failed")
 		return "", err
 	}
 	gathered := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "set local description failed")
 		return "", err
 	}
 	select {
 	case <-gathered:
 	case <-ctx.Done():
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "answer gathering canceled")
 		return "", ctx.Err()
 	}
 	local := pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {
-		s.closeSession(sessionID)
+		s.closeSession(sessionID, "local answer unavailable")
 		return "", errors.New("media: local WebRTC answer is unavailable")
 	}
+	s.logNegotiatedMedia(ctx, session)
+	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "replaced_sessions", len(previousSessionIDs), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 	return local.SDP, nil
 }
 
@@ -259,15 +309,54 @@ func (s *WebRTCService) addOutboundTracks(session *webRTCSession, streamID strin
 	if err != nil {
 		return err
 	}
-	go drainRTCP(videoSender.Sender())
-	go drainRTCP(audioSender.Sender())
+	go s.drainRTCP(session, "video", videoSender.Sender())
+	go s.drainRTCP(session, "audio", audioSender.Sender())
 	session.videoTrack, session.audioTrack = video, audio
 	return nil
 }
 
-func (s *WebRTCService) writeRTP(track *webrtc.TrackLocalStaticRTP, packet *rtp.Packet) {
-	if track != nil && packet != nil {
-		_ = track.WriteRTP(packet)
+func (s *WebRTCService) logNegotiatedMedia(ctx context.Context, session *webRTCSession) {
+	for _, transceiver := range session.pc.GetTransceivers() {
+		sender := transceiver.Sender()
+		if sender == nil || sender.Track() == nil {
+			continue
+		}
+		parameters := sender.GetParameters()
+		codecs := make([]string, 0, len(parameters.Codecs))
+		for _, codec := range parameters.Codecs {
+			codecs = append(codecs, fmt.Sprintf("%s/%d", codec.MimeType, codec.PayloadType))
+		}
+		s.logger.DebugContext(ctx, "webrtc negotiated media", "session_id", session.id, "entrypoint_id", session.entrypointID, "kind", transceiver.Kind().String(), "direction", transceiver.Direction().String(), "sender_has_track", true, "encoding_count", len(parameters.Encodings), "codecs", codecs)
+	}
+}
+
+func (s *WebRTCService) writeRTP(session *webRTCSession, trackName string, track *webrtc.TrackLocalStaticRTP, packet *rtp.Packet) {
+	if session == nil || track == nil || packet == nil {
+		return
+	}
+	if err := track.WriteRTP(packet); err != nil {
+		if session.recordOutboundRTPWriteError(trackName) {
+			s.logger.Debug("webrtc outbound RTP write failed", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "error", err)
+		}
+		return
+	}
+	if session.recordOutboundRTP(trackName, packet) {
+		s.logger.Debug("webrtc outbound RTP started", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "payload_type", packet.PayloadType, "ssrc", packet.SSRC, "payload_bytes", len(packet.Payload))
+	}
+}
+
+func (s *WebRTCService) drainRTCP(session *webRTCSession, trackName string, sender *webrtc.RTPSender) {
+	if session == nil || sender == nil {
+		return
+	}
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, packet := range packets {
+			session.recordRTCP(trackName, packet)
+		}
 	}
 }
 
@@ -298,7 +387,7 @@ func (s *WebRTCService) Close(sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return ErrSessionIDRequired
 	}
-	s.closeSession(sessionID)
+	s.closeSession(sessionID, "client requested close")
 	return nil
 }
 
@@ -344,13 +433,18 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 	if !session.remoteDescriptionSet {
 		if len(session.pendingRemoteICE) < maxPendingSessionCandidates {
 			session.pendingRemoteICE = append(session.pendingRemoteICE, candidate)
+			session.queuedCandidates.Add(1)
 		}
 		session.mu.Unlock()
 		return nil
 	}
 	pc := session.pc
 	session.mu.Unlock()
-	return pc.AddICECandidate(candidate)
+	if err := pc.AddICECandidate(candidate); err != nil {
+		return err
+	}
+	session.appliedCandidates.Add(1)
+	return nil
 }
 
 func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) error {
@@ -365,11 +459,12 @@ func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) err
 		if err := pc.AddICECandidate(candidate); err != nil {
 			return err
 		}
+		session.appliedCandidates.Add(1)
 	}
 	return nil
 }
 
-func (s *WebRTCService) closeSession(sessionID string) {
+func (s *WebRTCService) closeSession(sessionID, reason string) {
 	s.mu.Lock()
 	session := s.sessions[sessionID]
 	if session != nil {
@@ -388,8 +483,69 @@ func (s *WebRTCService) closeSession(sessionID string) {
 		if lease != nil {
 			s.coordinator.Release(lease)
 		}
+		video := session.outboundRTPStats("video")
+		audio := session.outboundRTPStats("audio")
+		s.logger.Debug("webrtc session closing", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond), "peer_connection_state", session.pc.ConnectionState().String(), "ice_connection_state", session.pc.ICEConnectionState().String(), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load(), "video_rtp_packets", video.packets, "video_rtp_payload_bytes", video.payloadBytes, "video_rtp_write_errors", video.writeErrors, "video_rtcp_receiver_reports", video.receiverReports, "video_rtcp_reported_fraction_lost", video.reportedFractionLost, "video_rtcp_reported_total_lost", video.reportedTotalLost, "video_rtcp_reported_last_sequence", video.reportedLastSequence, "video_rtcp_nack_feedback", video.nackFeedback, "video_rtcp_pli_feedback", video.pliFeedback, "audio_rtp_packets", audio.packets, "audio_rtp_payload_bytes", audio.payloadBytes, "audio_rtp_write_errors", audio.writeErrors, "audio_rtcp_receiver_reports", audio.receiverReports, "audio_rtcp_reported_fraction_lost", audio.reportedFractionLost, "audio_rtcp_reported_total_lost", audio.reportedTotalLost, "audio_rtcp_reported_last_sequence", audio.reportedLastSequence, "audio_rtcp_nack_feedback", audio.nackFeedback, "audio_rtcp_pli_feedback", audio.pliFeedback)
 		_ = session.pc.Close()
 	})
+}
+
+func (s *webRTCSession) recordOutboundRTP(trackName string, packet *rtp.Packet) bool {
+	stats := s.outboundStats(trackName)
+	if stats == nil {
+		return false
+	}
+	stats.packets.Add(1)
+	stats.payloadBytes.Add(uint64(len(packet.Payload)))
+	return stats.firstPacket.CompareAndSwap(false, true)
+}
+
+func (s *webRTCSession) recordOutboundRTPWriteError(trackName string) bool {
+	stats := s.outboundStats(trackName)
+	if stats == nil {
+		return false
+	}
+	stats.writeErrors.Add(1)
+	return stats.firstWriteError.CompareAndSwap(false, true)
+}
+
+func (s *webRTCSession) recordRTCP(trackName string, packet rtcp.Packet) {
+	stats := s.outboundStats(trackName)
+	if stats == nil || packet == nil {
+		return
+	}
+	switch feedback := packet.(type) {
+	case *rtcp.ReceiverReport:
+		for _, report := range feedback.Reports {
+			stats.receiverReports.Add(1)
+			stats.reportedFractionLost.Store(uint64(report.FractionLost))
+			stats.reportedTotalLost.Store(uint64(report.TotalLost))
+			stats.reportedLastSequence.Store(uint64(report.LastSequenceNumber))
+		}
+	case *rtcp.TransportLayerNack:
+		stats.nackFeedback.Add(1)
+	case *rtcp.PictureLossIndication:
+		stats.pliFeedback.Add(1)
+	}
+}
+
+func (s *webRTCSession) outboundRTPStats(trackName string) outboundRTPStatsSnapshot {
+	stats := s.outboundStats(trackName)
+	if stats == nil {
+		return outboundRTPStatsSnapshot{}
+	}
+	return outboundRTPStatsSnapshot{packets: stats.packets.Load(), payloadBytes: stats.payloadBytes.Load(), writeErrors: stats.writeErrors.Load(), receiverReports: stats.receiverReports.Load(), reportedFractionLost: stats.reportedFractionLost.Load(), reportedTotalLost: stats.reportedTotalLost.Load(), reportedLastSequence: stats.reportedLastSequence.Load(), nackFeedback: stats.nackFeedback.Load(), pliFeedback: stats.pliFeedback.Load()}
+}
+
+func (s *webRTCSession) outboundStats(trackName string) *outboundRTPStats {
+	switch trackName {
+	case "video":
+		return &s.videoRTP
+	case "audio":
+		return &s.audioRTP
+	default:
+		return nil
+	}
 }
 
 func (s *WebRTCService) prunePendingCandidatesLocked(now time.Time) {
@@ -418,16 +574,4 @@ func canonicalizeSDP(raw string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
 	return strings.ReplaceAll(value, "\n", "\r\n") + "\r\n"
-}
-
-func drainRTCP(sender *webrtc.RTPSender) {
-	if sender == nil {
-		return
-	}
-	buffer := make([]byte, 1500)
-	for {
-		if _, _, err := sender.Read(buffer); err != nil {
-			return
-		}
-	}
 }

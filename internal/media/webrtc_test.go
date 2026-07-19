@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -141,6 +142,53 @@ func TestNormalizeBackchannelPayloadType(t *testing.T) {
 		t.Fatalf("payload type = %d, want %d", packet.PayloadType, audioBridgeBackchannelOpusPT)
 	}
 	normalizeBackchannelPayloadType(nil)
+}
+
+func TestWebRTCSessionTracksOutboundRTP(t *testing.T) {
+	session := &webRTCSession{}
+	video := &rtp.Packet{Payload: []byte{1, 2, 3}}
+	audio := &rtp.Packet{Payload: []byte{4, 5}}
+
+	if !session.recordOutboundRTP("video", video) {
+		t.Fatal("first video packet was not reported")
+	}
+	if session.recordOutboundRTP("video", video) {
+		t.Fatal("subsequent video packet was reported as first")
+	}
+	if !session.recordOutboundRTP("audio", audio) {
+		t.Fatal("first audio packet was not reported")
+	}
+	if !session.recordOutboundRTPWriteError("audio") {
+		t.Fatal("first audio write error was not reported")
+	}
+	if session.recordOutboundRTPWriteError("audio") {
+		t.Fatal("subsequent audio write error was reported as first")
+	}
+
+	if got := session.outboundRTPStats("video"); got != (outboundRTPStatsSnapshot{packets: 2, payloadBytes: 6}) {
+		t.Fatalf("video stats = %#v", got)
+	}
+	if got := session.outboundRTPStats("audio"); got != (outboundRTPStatsSnapshot{packets: 1, payloadBytes: 2, writeErrors: 2}) {
+		t.Fatalf("audio stats = %#v", got)
+	}
+	if session.recordOutboundRTP("unknown", video) {
+		t.Fatal("unknown track was recorded")
+	}
+}
+
+func TestWebRTCSessionTracksRTCPFeedback(t *testing.T) {
+	session := &webRTCSession{}
+	session.recordRTCP("audio", &rtcp.ReceiverReport{Reports: []rtcp.ReceptionReport{{FractionLost: 4, TotalLost: 12, LastSequenceNumber: 34}}})
+	session.recordRTCP("video", &rtcp.TransportLayerNack{})
+	session.recordRTCP("video", &rtcp.PictureLossIndication{})
+	session.recordRTCP("unknown", &rtcp.PictureLossIndication{})
+
+	if got := session.outboundRTPStats("audio"); got != (outboundRTPStatsSnapshot{receiverReports: 1, reportedFractionLost: 4, reportedTotalLost: 12, reportedLastSequence: 34}) {
+		t.Fatalf("audio RTCP stats = %#v", got)
+	}
+	if got := session.outboundRTPStats("video"); got != (outboundRTPStatsSnapshot{nackFeedback: 1, pliFeedback: 1}) {
+		t.Fatalf("video RTCP stats = %#v", got)
+	}
 }
 
 func newTestWebRTCService(t *testing.T, coordinator *StreamCoordinator, entrypoints []config.Entrypoint) *WebRTCService {
