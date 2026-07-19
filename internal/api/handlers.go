@@ -224,8 +224,18 @@ func (s *Server) systemServiceRestart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "runtime control is unavailable")
 		return
 	}
+	serviceName := r.PathValue("name")
+	if s.config == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "configuration is unavailable")
+		return
+	}
+	service, ok := s.config.Snapshot().System.Services[serviceName]
+	if !ok || !service.Enabled || !service.Exposed {
+		writeError(w, http.StatusConflict, "service_disabled", "service restart is disabled")
+		return
+	}
 
-	if err := s.runtime.Restart(r.Context(), r.PathValue("name")); err != nil {
+	if err := s.runtime.Restart(r.Context(), serviceName); err != nil {
 		writeCommandError(w, err)
 		return
 	}

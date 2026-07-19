@@ -75,6 +75,10 @@ func (r *RuntimeControl) RebootAvailable() bool {
 	return r != nil && r.rebooter != nil
 }
 
+func (r *RuntimeControl) ServiceAvailable(service string) bool {
+	return r != nil && r.services != nil && r.isAllowed(service)
+}
+
 func (r *RuntimeControl) isAllowed(service string) bool {
 	_, ok := r.allowed[service]
 	return ok

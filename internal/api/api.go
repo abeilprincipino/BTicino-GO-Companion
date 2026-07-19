@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "POST", "/api/v3/system/update/stage", s.systemUpdateStage)
 	s.handleProtected(mux, "POST", "/api/v3/system/update/install", s.systemUpdateInstall)
 	s.handleProtected(mux, "POST", "/api/v3/system/reboot", s.systemReboot)
+	s.handleProtected(mux, "POST", "/api/v3/system/services/{name}/restart", s.systemServiceRestart)
 
 	s.handleProtected(mux, "POST", "/api/v3/entrypoints/{id}/unlock", s.unlockEntrypoint)
 	s.handleProtected(mux, "POST", "/api/v3/audio/mute", s.muteAudio)
@@ -263,7 +264,7 @@ func (s *Server) currentPayload() StateDTO {
 		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil && s.runtime.RebootAvailable()
 		dto.SystemControl.Services = make(map[string]SystemServiceDTO, len(cfg.System.Services))
 		for name, service := range cfg.System.Services {
-			dto.SystemControl.Services[name] = SystemServiceDTO{Enabled: service.Enabled, Exposed: service.Exposed && s.runtime != nil}
+			dto.SystemControl.Services[name] = SystemServiceDTO{Enabled: service.Enabled, Exposed: service.Exposed && s.runtime != nil && s.runtime.ServiceAvailable(name)}
 		}
 	}
 	dto.Device.Firmware = diagnostic.OpenWebNet.Firmware

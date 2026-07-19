@@ -208,7 +208,8 @@ func Default(metadata Metadata) (Config, error) {
 			UpdateEnabled: true,
 			UpdateExposed: false,
 			Services: map[string]Service{
-				"dropbear": {Enabled: true, Exposed: true},
+				"companion": {Enabled: true, Exposed: true},
+				"dropbear":  {Enabled: true, Exposed: true},
 			},
 		},
 		HomeKit: HomeKit{

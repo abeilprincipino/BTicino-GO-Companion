@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -106,7 +105,7 @@ func run(
 		}
 	}
 
-	rt := system.NewRuntimeControl(nil, system.NewRebootAdapter(nil), allowedServices)
+	rt := system.NewRuntimeControl(system.NewInitServiceAdapter(nil), system.NewRebootAdapter(nil), allowedServices)
 
 	build := system.CurrentBuildInfo()
 	updatePolicy := func() system.UpdatePolicy {
@@ -117,9 +116,7 @@ func run(
 	if strings.TrimSpace(build.ReleaseRepo) != "" {
 		updateSource = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
 	}
-	restartCompanion := func(ctx context.Context) error {
-		return exec.CommandContext(ctx, "/etc/init.d/companion", "restart").Run()
-	}
+	restartCompanion := func(ctx context.Context) error { return rt.Restart(ctx, "companion") }
 	updater := system.NewUpdater(updateSource, build, updatePolicy, restartCompanion)
 
 	webrtc, err := media.NewWebRTCService(rtspServer.Coordinator(), initialConfig.Companion.Entrypoints)

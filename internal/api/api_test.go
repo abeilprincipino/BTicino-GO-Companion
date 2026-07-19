@@ -558,6 +558,7 @@ func (r *runtimeRecorder) Reboot(context.Context) error {
 }
 
 func (r *runtimeRecorder) RebootAvailable() bool               { return r.available || r.rebooted != nil }
+func (*runtimeRecorder) ServiceAvailable(string) bool          { return true }
 func (*runtimeRecorder) Restart(context.Context, string) error { return nil }
 func (*runtimeRecorder) Status(context.Context, string) (system.ServiceStatus, error) {
 	return system.ServiceStatus{}, nil

@@ -271,7 +271,10 @@ function saveSystemConfig(button) {
     reboot_enabled: document.getElementById('systemRebootEnabled').checked,
     update_enabled: document.getElementById('systemUpdateEnabled').checked,
     update_exposed: document.getElementById('systemUpdateExposed').checked,
-    services: { dropbear: { enabled: true, exposed: true } }
+    services: {
+      companion: { enabled: true, exposed: true },
+      dropbear: { enabled: true, exposed: true }
+    }
   }).then(function() { setStatus('systemStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)'); }).catch(function(err) { handleApiError(err); });
 }
 

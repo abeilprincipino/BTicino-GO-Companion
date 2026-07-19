@@ -83,6 +83,8 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		"system.reboot.enabled",
 		"system.updates.enabled",
 		"system.updates.exposed",
+		"system.services.companion.enabled",
+		"system.services.companion.exposed",
 		"system.services.dropbear.enabled",
 		"system.services.dropbear.exposed",
 		"homekit.enabled",
