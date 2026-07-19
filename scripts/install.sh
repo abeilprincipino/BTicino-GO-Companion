@@ -190,7 +190,7 @@ register_service() {
 	for runlevel in 2 3 4 5; do
 		dir="/etc/rc${runlevel}.d"
 		link="${dir}/S99zz${SERVICE_NAME}"
-		[ ! -d "${dir}" ] || ln -s "../init.d/${SERVICE_NAME}" "${link}"
+		[ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }
 	done
 	for runlevel in 0 1 6; do dir="/etc/rc${runlevel}.d"; link="${dir}/K55${SERVICE_NAME}"; [ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }; done
 	ensure_persistent_firewall_ports

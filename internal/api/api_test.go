@@ -196,19 +196,27 @@ func TestServer_WebSocket(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	connection, _, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/ws")
+	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer connection.Close() //nolint:errcheck // test cleanup
+	reader := io.Reader(connection)
+	if bufferedReader != nil {
+		reader = bufferedReader
+	}
+	transport := struct {
+		io.Reader
+		io.Writer
+	}{Reader: reader, Writer: connection}
 
-	assertMessage(t, connection, "state", "")
+	assertMessage(t, transport, "state", "")
 
 	if wsutil.WriteClientText(connection, []byte(`{"type":"ping","id":"ping-1"}`)) != nil {
 		t.Fatal("write ping")
 	}
 
-	assertMessage(t, connection, "pong", "ping-1")
+	assertMessage(t, transport, "pong", "ping-1")
 
 }
 
@@ -474,10 +482,10 @@ func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
 	}
 }
 
-func assertMessage(t *testing.T, connection net.Conn, expectedType, expectedID string) {
+func assertMessage(t *testing.T, reader io.ReadWriter, expectedType, expectedID string) {
 	t.Helper()
 
-	data, _, err := wsutil.ReadServerData(connection)
+	data, _, err := wsutil.ReadServerData(reader)
 	if err != nil {
 		t.Fatal(err)
 	}

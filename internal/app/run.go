@@ -374,16 +374,22 @@ func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func()
 		}
 
 		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		_, err := updater.Check(checkCtx)
+		status, err := updater.Check(checkCtx)
 		cancel()
 		if errors.Is(err, system.ErrUpdateUnavailable) {
+			logger.Info("companion update checks unavailable")
 			return
 		}
 		if err != nil {
-			logger.Debug("check companion update", "error", err)
+			logger.Warn("companion update check failed", "error", err, "retry_in", backoff)
 			delay = backoff
 			backoff = min(backoff*2, time.Hour)
 		} else {
+			logger.Info("companion update check completed",
+				"current_version", status.CurrentVersion,
+				"latest_version", status.LatestVersion,
+				"update_available", status.UpdateAvailable,
+			)
 			delay = 3 * time.Hour
 			backoff = 2 * time.Minute
 		}

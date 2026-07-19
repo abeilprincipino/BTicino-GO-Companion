@@ -1,12 +1,14 @@
 package system
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,8 +19,9 @@ import (
 var ErrUpdateUnavailable = errors.New("system: update control is unavailable")
 
 const (
-	companionAssetName = "companion"
-	CompanionDataDir   = "/home/bticino/cfg/extra/companion"
+	companionAssetName  = "companion.tar.gz"
+	companionBundlePath = "companion/companion"
+	CompanionDataDir    = "/home/bticino/cfg/extra/companion"
 )
 
 var (
@@ -54,7 +57,7 @@ type UpdateStatus struct {
 	Enabled         bool   `json:"enabled"`
 	Exposed         bool   `json:"exposed"`
 	CurrentVersion  string `json:"current_version"`
-	LatestVersion   string `json:"latest,omitempty"`
+	LatestVersion   string `json:"latest_version,omitempty"`
 	UpdateAvailable bool   `json:"update_available"`
 	StagedVersion   string `json:"staged_version,omitempty"`
 	RestartRequired bool   `json:"restart_required"`
@@ -102,6 +105,9 @@ func (u *Updater) Status(_ context.Context) (UpdateStatus, error) {
 		status.Error = u.err.Error()
 	}
 	u.mu.RUnlock()
+	if status.LatestVersion == "" {
+		status.LatestVersion = status.CurrentVersion
+	}
 	status.UpdateAvailable = newerVersion(status.LatestVersion, status.CurrentVersion)
 	status.RestartRequired = status.StagedVersion != ""
 	switch {
@@ -164,7 +170,7 @@ func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
 	defer body.Close() //nolint:errcheck // read error is returned below
 
 	policy := u.currentPolicy()
-	if err := stageBinary(body, asset.Digest, policy.DataDir); err != nil {
+	if err := stageArchive(ctx, body, asset.Digest, policy.DataDir); err != nil {
 		u.setError(err)
 		return UpdateStatus{}, err
 	}
@@ -220,7 +226,7 @@ func (u *Updater) setError(err error) {
 	u.mu.Unlock()
 }
 
-func stageBinary(source io.Reader, digest, dataDir string) error {
+func stageArchive(ctx context.Context, source io.Reader, digest, dataDir string) error {
 	if strings.TrimSpace(dataDir) == "" {
 		return ErrUpdateUnavailable
 	}
@@ -231,33 +237,56 @@ func stageBinary(source io.Reader, digest, dataDir string) error {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("create update directory: %w", err)
 	}
-	temporary, err := os.CreateTemp(dataDir, ".companion-*")
+	temporary, err := os.CreateTemp("", "companion-*.tar.gz")
 	if err != nil {
-		return fmt.Errorf("create staged binary: %w", err)
+		return fmt.Errorf("create update archive: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath) //nolint:errcheck // successful rename removes the source
+	defer os.Remove(temporaryPath) //nolint:errcheck // temporary archive cleanup
 
 	hash := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(temporary, hash), source); err != nil {
 		temporary.Close() //nolint:errcheck // original copy error is primary
-		return fmt.Errorf("write staged binary: %w", err)
-	}
-	if err := temporary.Chmod(0755); err != nil {
-		temporary.Close() //nolint:errcheck // chmod error is primary
-		return fmt.Errorf("chmod staged binary: %w", err)
+		return fmt.Errorf("write update archive: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close() //nolint:errcheck // sync error is primary
-		return fmt.Errorf("sync staged binary: %w", err)
+		return fmt.Errorf("sync update archive: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close staged binary: %w", err)
+		return fmt.Errorf("close update archive: %w", err)
 	}
-	if string(hash.Sum(nil)) != string(expected) {
+	if !bytes.Equal(hash.Sum(nil), expected) {
 		return ErrArtifactDigestMismatch
 	}
-	if err := os.Rename(temporaryPath, filepath.Join(dataDir, "companion.new")); err != nil {
+
+	stagingDir, err := os.MkdirTemp(dataDir, ".companion-update-*")
+	if err != nil {
+		return fmt.Errorf("create update staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingDir) //nolint:errcheck // temporary staging cleanup
+
+	if err := exec.CommandContext(ctx, "/bin/tar", "-xzf", temporaryPath, "-C", stagingDir, companionBundlePath).Run(); err != nil {
+		return fmt.Errorf("extract update archive: %w", err)
+	}
+
+	binaryPath := filepath.Join(stagingDir, companionBundlePath)
+	binary, err := os.Open(binaryPath)
+	if err != nil {
+		return fmt.Errorf("open extracted companion: %w", err)
+	}
+	if err := binary.Chmod(0755); err != nil {
+		binary.Close() //nolint:errcheck // chmod error is primary
+		return fmt.Errorf("chmod extracted companion: %w", err)
+	}
+	if err := binary.Sync(); err != nil {
+		binary.Close() //nolint:errcheck // sync error is primary
+		return fmt.Errorf("sync extracted companion: %w", err)
+	}
+	if err := binary.Close(); err != nil {
+		return fmt.Errorf("close extracted companion: %w", err)
+	}
+	if err := os.Rename(binaryPath, filepath.Join(dataDir, "companion.new")); err != nil {
 		return fmt.Errorf("stage binary: %w", err)
 	}
 	return nil
