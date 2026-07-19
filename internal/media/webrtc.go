@@ -200,6 +200,9 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	})
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		s.logger.Debug("webrtc ICE connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+		if state == webrtc.ICEConnectionStateConnected {
+			s.logger.Info("webrtc lifecycle", "event", "ice_connected", "session_id", sessionID, "entrypoint_id", entrypointID)
+		}
 	})
 	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
 		s.logger.Debug("webrtc ICE gathering state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
@@ -243,7 +246,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		return "", err
 	}
 
-	// The HTTP request ends after this answer; the source must instead live
+	// The signaling request ends after this answer; the source must instead live
 	// until the peer or client explicitly closes the session.
 	lease, err := s.coordinator.Acquire(context.WithoutCancel(ctx), entrypoint, SourceEvents{
 		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
@@ -259,6 +262,8 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.coordinator.Release(lease)
 		return "", context.Canceled
 	}
+	s.logger.InfoContext(ctx, "webrtc lifecycle", "event", "source_lease_acquired", "session_id", sessionID, "entrypoint_id", entrypointID)
+	s.logger.InfoContext(ctx, "webrtc lifecycle", "event", "sip_source_started", "session_id", sessionID, "entrypoint_id", entrypointID)
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
@@ -341,7 +346,7 @@ func (s *WebRTCService) writeRTP(session *webRTCSession, trackName string, track
 		return
 	}
 	if session.recordOutboundRTP(trackName, packet) {
-		s.logger.Debug("webrtc outbound RTP started", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "payload_type", packet.PayloadType, "ssrc", packet.SSRC, "payload_bytes", len(packet.Payload))
+		s.logger.Info("webrtc lifecycle", "event", "first_rtp", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "payload_type", packet.PayloadType, "ssrc", packet.SSRC, "payload_bytes", len(packet.Payload))
 	}
 }
 

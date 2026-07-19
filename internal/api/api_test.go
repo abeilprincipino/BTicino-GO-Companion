@@ -284,61 +284,52 @@ func TestServer_WebRTCContract(t *testing.T) {
 	server, _ := newTestServer(t)
 	control := &webRTCRecorder{answer: "answer-sdp"}
 	server.SetWebRTC(control)
-	unauthorizedCandidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{"candidate":"candidate"}}`))
-	unauthorizedCandidateResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unauthorizedCandidateResponse, unauthorizedCandidate)
-	if unauthorizedCandidateResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthorized candidate response = %d: %s", unauthorizedCandidateResponse.Code, unauthorizedCandidateResponse.Body.String())
-	}
-
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	offer := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/offer", strings.NewReader(`{"session_id":"session-1","entrypoint_id":"main","offer_sdp":"offer-sdp"}`))
-	offer.Header.Set("Authorization", "Bearer "+token)
-	offer.Header.Set("Content-Type", "application/json")
-	offerResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(offerResponse, offer)
-	var offerBody struct {
-		OK           bool   `json:"ok"`
-		SessionID    string `json:"session_id"`
-		EntrypointID string `json:"entrypoint_id"`
-		AnswerSDP    string `json:"answer_sdp"`
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/webrtc/ws")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if offerResponse.Code != http.StatusOK || json.Unmarshal(offerResponse.Body.Bytes(), &offerBody) != nil || !offerBody.OK || offerBody.SessionID != "session-1" || offerBody.EntrypointID != "main" || offerBody.AnswerSDP != "answer-sdp" {
-		t.Fatalf("offer response = %d: %s", offerResponse.Code, offerResponse.Body.String())
+	defer connection.Close() //nolint:errcheck // test cleanup
+	reader := io.Reader(connection)
+	if bufferedReader != nil {
+		reader = bufferedReader
 	}
-	if control.sessionID != "session-1" || control.entrypointID != "main" || control.offerSDP != "offer-sdp" {
-		t.Fatalf("offer call = %#v", control)
+	transport := struct {
+		io.Reader
+		io.Writer
+	}{Reader: reader, Writer: connection}
+	write := func(message string) map[string]any {
+		t.Helper()
+		if err := wsutil.WriteClientText(connection, []byte(message)); err != nil {
+			t.Fatal(err)
+		}
+		data, err := wsutil.ReadServerText(transport)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		if err := json.Unmarshal(data, &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
 	}
-
-	candidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{"candidate":"candidate:1 1 udp 1 192.0.2.1 12345 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}}`))
-	candidate.Header.Set("Authorization", "Bearer "+token)
-	candidateResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(candidateResponse, candidate)
-	if candidateResponse.Code != http.StatusOK || !strings.Contains(candidateResponse.Body.String(), `"action":"candidate"`) || control.candidateSessionID != "session-1" || control.candidate.Candidate == "" || control.candidate.SDPMid == nil || *control.candidate.SDPMid != "0" || control.candidate.SDPMLineIndex == nil || *control.candidate.SDPMLineIndex != 0 || control.candidate.UsernameFragment == nil || *control.candidate.UsernameFragment != "ufrag" {
-		t.Fatalf("candidate response = %d: %s, call = %#v", candidateResponse.Code, candidateResponse.Body.String(), control)
+	offer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
+	if offer["type"] != "answer" || control.sessionID != "session-1" || control.entrypointID != "main" || control.offerSDP != "offer-sdp" {
+		t.Fatalf("offer response = %#v, call = %#v", offer, control)
 	}
-
-	invalidCandidate := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/candidate", strings.NewReader(`{"session_id":"session-1","candidate":{}}`))
-	invalidCandidate.Header.Set("Authorization", "Bearer "+token)
-	invalidCandidateResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(invalidCandidateResponse, invalidCandidate)
-	if invalidCandidateResponse.Code != http.StatusBadRequest {
-		t.Fatalf("invalid candidate response = %d: %s", invalidCandidateResponse.Code, invalidCandidateResponse.Body.String())
+	candidate := write(`{"type":"candidate","id":"session-1","payload":{"session_id":"session-1","candidate":{"candidate":"candidate:1 1 udp 1 192.0.2.1 12345 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}}}`)
+	if candidate["type"] != "ack" || control.candidateSessionID != "session-1" || control.candidate.Candidate == "" {
+		t.Fatalf("candidate response = %#v, call = %#v", candidate, control)
 	}
-
-	close := httptest.NewRequest(http.MethodPost, "/api/v3/webrtc/close", strings.NewReader(`{"session_id":"session-1"}`))
-	close.Header.Set("Authorization", "Bearer "+token)
-	close.Header.Set("Content-Type", "application/json")
-	closeResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(closeResponse, close)
-	if closeResponse.Code != http.StatusOK || !strings.Contains(closeResponse.Body.String(), `"action":"close"`) || control.closed != "session-1" {
-		t.Fatalf("close response = %d: %s", closeResponse.Code, closeResponse.Body.String())
+	close := write(`{"type":"close","id":"session-1","payload":{"session_id":"session-1","reason":"test"}}`)
+	if close["type"] != "ack" || control.closed != "session-1" {
+		t.Fatalf("close response = %#v, call = %#v", close, control)
 	}
-
 }
 
 func TestServer_SnapshotLatest(t *testing.T) {

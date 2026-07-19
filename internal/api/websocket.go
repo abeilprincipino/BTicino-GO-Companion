@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bticino-go-companion/internal/media"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,4 +197,126 @@ func mustJSON(value any) json.RawMessage {
 	}
 
 	return data
+}
+
+type webrtcOfferPayload struct {
+	SessionID    string `json:"session_id"`
+	EntrypointID string `json:"entrypoint_id"`
+	Origin       string `json:"origin"`
+	OfferSDP     string `json:"offer_sdp"`
+}
+
+type webrtcCandidatePayload struct {
+	SessionID string             `json:"session_id"`
+	Candidate media.ICECandidate `json:"candidate"`
+}
+
+type webrtcClosePayload struct {
+	SessionID string `json:"session_id"`
+	Reason    string `json:"reason"`
+}
+
+func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
+	if s.webrtc == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "webrtc control is unavailable")
+		return
+	}
+
+	conn, _, _, err := ws.UpgradeHTTP(r, w)
+	if err != nil {
+		return
+	}
+	client := &client{conn: conn}
+	var sessionID string
+	defer func() {
+		if sessionID != "" {
+			_ = s.webrtc.Close(sessionID)
+			s.logger.InfoContext(r.Context(), "webrtc session closed", "session_id", sessionID, "reason", "socket_disconnected")
+		}
+		_ = conn.Close()
+	}()
+
+	for {
+		data, opcode, err := readClientFrame(conn)
+		if err != nil || opcode == ws.OpClose {
+			return
+		}
+		if opcode == ws.OpPing {
+			if client.writeFrame(ws.OpPong, data) != nil {
+				return
+			}
+			continue
+		}
+		if opcode != ws.OpText {
+			return
+		}
+
+		message, err := parseWebRTCMessage(data)
+		if err != nil {
+			if client.write(Message{Type: "error", Payload: mustJSON(map[string]string{"code": "invalid_message", "message": "message is invalid"})}) != nil {
+				return
+			}
+			continue
+		}
+
+		var response Message
+		switch message.Type {
+		case "offer":
+			var payload webrtcOfferPayload
+			if json.Unmarshal(message.Payload, &payload) != nil || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.EntrypointID) == "" || strings.TrimSpace(payload.Origin) == "" || strings.TrimSpace(payload.OfferSDP) == "" || sessionID != "" {
+				response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
+				break
+			}
+			answer, offerErr := s.webrtc.Offer(r.Context(), payload.SessionID, payload.EntrypointID, payload.OfferSDP)
+			if offerErr != nil {
+				response = webrtcError(message.ID, "offer_failed", offerErr.Error())
+				break
+			}
+			sessionID = payload.SessionID
+			s.logger.InfoContext(r.Context(), "webrtc offer received", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin, "event", "offer_received")
+			response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
+		case "candidate":
+			var payload webrtcCandidatePayload
+			if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {
+				response = webrtcError(message.ID, "invalid_candidate", "candidate is invalid")
+				break
+			}
+			if candidateErr := s.webrtc.AddICECandidate(sessionID, payload.Candidate); candidateErr != nil {
+				response = webrtcError(message.ID, "candidate_failed", candidateErr.Error())
+				break
+			}
+			s.logger.InfoContext(r.Context(), "webrtc candidate received", "session_id", sessionID, "event", "candidate_received")
+			response = Message{Type: "ack", ID: message.ID}
+		case "close":
+			var payload webrtcClosePayload
+			if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID {
+				response = webrtcError(message.ID, "invalid_close", "close is invalid")
+				break
+			}
+			_ = s.webrtc.Close(sessionID)
+			s.logger.InfoContext(r.Context(), "webrtc session closed", "session_id", sessionID, "reason", payload.Reason, "event", "close_requested")
+			response = Message{Type: "ack", ID: message.ID}
+			sessionID = ""
+		default:
+			response = webrtcError(message.ID, "invalid_message", "message is invalid")
+		}
+		if client.write(response) != nil {
+			return
+		}
+	}
+}
+
+func parseWebRTCMessage(data []byte) (Message, error) {
+	var message Message
+	if json.Unmarshal(data, &message) != nil || message.ID == "" || len(message.Payload) == 0 {
+		return Message{}, ErrInvalidMessage
+	}
+	if message.Type != "offer" && message.Type != "candidate" && message.Type != "close" {
+		return Message{}, ErrInvalidMessage
+	}
+	return message, nil
+}
+
+func webrtcError(id, code, message string) Message {
+	return Message{Type: "error", ID: id, Payload: mustJSON(map[string]string{"code": code, "message": message})}
 }
