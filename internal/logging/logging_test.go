@@ -88,3 +88,31 @@ func TestHTTPSuppressesWebUIAPIRequests(t *testing.T) {
 		t.Fatalf("web UI API request logged: %q", output.String())
 	}
 }
+
+func TestHTTPSuppressesSuccessfulHealthChecks(t *testing.T) {
+	var output bytes.Buffer
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v3/health", nil))
+
+	if output.Len() != 0 {
+		t.Fatalf("successful health check logged: %q", output.String())
+	}
+}
+
+func TestHTTPLogsFailedHealthChecks(t *testing.T) {
+	var output bytes.Buffer
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v3/health", nil))
+
+	if !strings.Contains(output.String(), "http request failed") {
+		t.Fatalf("failed health check was not logged: %q", output.String())
+	}
+}

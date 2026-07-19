@@ -82,6 +82,9 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/webui/api/") {
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v3/health" && response.status < http.StatusBadRequest {
+			return
+		}
 
 		attributes := []any{"method", r.Method, "route", route, "status", response.status, "duration", time.Since(started), "remote_addr", r.RemoteAddr}
 		if response.status >= http.StatusBadRequest {
