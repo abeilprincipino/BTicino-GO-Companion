@@ -9,11 +9,22 @@ INIT_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 LOCAL_INIT_TEMPLATE="${SCRIPT_DIR}/init.d/companion"
 
-REPO="${COMPANION_RELEASE_REPO:-}"
+DEFAULT_RELEASE_REPO="r0bb10/BTicino-GO-Companion"
+REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
+RELEASE_TAG="${COMPANION_RELEASE_TAG:-}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"
 HEALTHCHECK_TIMEOUT_SEC="${COMPANION_HEALTHCHECK_TIMEOUT_SEC:-45}"
-BASE_URL="${COMPANION_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/latest/download}"
-RELEASE_API="${COMPANION_RELEASE_API:-https://api.github.com/repos/${REPO}/releases/latest}"
+
+if [ -n "${RELEASE_TAG}" ]; then
+	DEFAULT_BASE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+	DEFAULT_RELEASE_API="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
+else
+	DEFAULT_BASE_URL="https://github.com/${REPO}/releases/latest/download"
+	DEFAULT_RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
+fi
+
+BASE_URL="${COMPANION_RELEASE_BASE_URL:-${DEFAULT_BASE_URL}}"
+RELEASE_API="${COMPANION_RELEASE_API:-${DEFAULT_RELEASE_API}}"
 
 ROOT=""
 ROOT_WAS_REMOUNTED=0
