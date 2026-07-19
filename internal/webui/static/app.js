@@ -210,7 +210,7 @@ function buildNav() {
       ]
     }
   ];
-  var html = '<span class="nav-brand"><img src="/bticino-logo.svg" height="24" alt=""> BTicino Companion</span><ul class="nav-links">';
+  var html = '<span class="nav-brand"><img src="/logo.svg" height="24" alt=""> BTicino Companion</span><ul class="nav-links">';
   for (var i = 0; i < pages.length; i++) {
     var pg = pages[i];
     if (pg.children) {

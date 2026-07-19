@@ -7,7 +7,6 @@ import (
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
 	"bticino-go-companion/internal/system"
-	"bticino-go-companion/web"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -769,7 +768,7 @@ func clearSessionCookie(w http.ResponseWriter) {
 }
 
 func (s *Server) staticHandler() http.Handler {
-	files, err := fs.Sub(web.Files, ".")
+	files, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return http.NotFoundHandler()
 	}
