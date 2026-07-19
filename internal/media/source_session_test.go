@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -97,6 +98,30 @@ func TestSourceSessionCloseCancelsStartupAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestSourceSessionCloseCancelsPendingSIPInvite(t *testing.T) {
+	sip := &blockingInviteSIP{started: make(chan struct{})}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, &fakeSourceAV{}, video, audio)
+
+	startResult := make(chan error, 1)
+	go func() { startResult <- session.Start(context.Background()) }()
+	select {
+	case <-sip.started:
+	case <-time.After(time.Second):
+		t.Fatal("source session did not reach SIP invite")
+	}
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-startResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context cancellation", err)
+	}
+	if video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("receivers after canceled invite: video=%#v audio=%#v", video, audio)
+	}
+}
+
 func TestSourceSessionRemoteDialogEndedDuringStartupDoesNotSendBYE(t *testing.T) {
 	sip := &fakeSourceSIP{}
 	av := &blockingSourceAV{started: make(chan struct{})}
@@ -127,6 +152,16 @@ type fakeSourceSIP struct {
 
 func (s *fakeSourceSIP) StartStream(context.Context, string) error { s.startCalls++; return nil }
 func (s *fakeSourceSIP) Hangup(context.Context) error              { s.hangups++; return nil }
+
+type blockingInviteSIP struct{ started chan struct{} }
+
+func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) error {
+	close(s.started)
+	<-ctx.Done()
+	return fmt.Errorf("wait for invite answer: %w", ctx.Err())
+}
+
+func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
 
 type fakeSourceAV struct {
 	calls   int

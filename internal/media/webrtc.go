@@ -44,6 +44,7 @@ type ICECandidate struct {
 // used by RTSP. The intercom permits only one active source at a time.
 type WebRTCService struct {
 	mu                sync.Mutex
+	offerMu           sync.Mutex
 	coordinator       *StreamCoordinator
 	entrypoints       map[string]config.Entrypoint
 	api               *webrtc.API
@@ -56,6 +57,7 @@ type WebRTCService struct {
 type webRTCSession struct {
 	mu                   sync.Mutex
 	id                   string
+	entrypointID         string
 	pc                   *webrtc.PeerConnection
 	lease                *StreamLease
 	videoTrack           *webrtc.TrackLocalStaticRTP
@@ -122,6 +124,8 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	if s.coordinator == nil {
 		return "", ErrStreamBusy
 	}
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
 
 	s.mu.Lock()
 	s.prunePendingCandidatesLocked(time.Now())
@@ -134,13 +138,24 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.mu.Unlock()
 		return "", ErrSessionExists
 	}
+	// HA may create a successor player before its prior player has finished
+	// closing. One intercom source cannot serve both independent leases.
+	previousSessionIDs := make([]string, 0, len(s.sessions))
+	for id, session := range s.sessions {
+		if session.entrypointID == entrypointID {
+			previousSessionIDs = append(previousSessionIDs, id)
+		}
+	}
 	s.mu.Unlock()
+	for _, previousSessionID := range previousSessionIDs {
+		s.closeSession(previousSessionID)
+	}
 
 	pc, err := s.api.NewPeerConnection(s.configuration)
 	if err != nil {
 		return "", err
 	}
-	session := &webRTCSession{id: sessionID, pc: pc}
+	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			go s.closeSession(sessionID)

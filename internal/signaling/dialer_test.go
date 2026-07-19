@@ -78,3 +78,21 @@ func TestRegistrationLoopRefreshesAndStopsOnCancellation(t *testing.T) {
 		t.Fatal("registration loop did not stop after cancellation")
 	}
 }
+
+func TestWaitForDialogEnd(t *testing.T) {
+	t.Run("dialog ended", func(t *testing.T) {
+		done := make(chan struct{})
+		close(done)
+		if err := waitForDialogEnd(context.Background(), done); err != nil {
+			t.Fatalf("waitForDialogEnd() error = %v", err)
+		}
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := waitForDialogEnd(ctx, make(chan struct{})); err != context.Canceled {
+			t.Fatalf("waitForDialogEnd() error = %v, want context.Canceled", err)
+		}
+	})
+}

@@ -52,6 +52,37 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 	}
 }
 
+func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
+	source := &remoteBYESource{}
+	coordinator := NewStreamCoordinator(nil, func(_ config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
+		source.callback = events.RemoteBYE
+		return source, nil, nil
+	})
+	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
+	firstOffer, firstClient := testWebRTCOffer(t)
+	defer firstClient.Close() //nolint:errcheck // test cleanup
+	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer); err != nil {
+		t.Fatalf("offer first session: %v", err)
+	}
+
+	secondOffer, secondClient := testWebRTCOffer(t)
+	defer secondClient.Close() //nolint:errcheck // test cleanup
+	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer); err != nil {
+		t.Fatalf("offer replacement session: %v", err)
+	}
+
+	service.mu.Lock()
+	_, firstExists := service.sessions["session-1"]
+	_, secondExists := service.sessions["session-2"]
+	service.mu.Unlock()
+	if firstExists || !secondExists {
+		t.Fatalf("sessions after replacement: first=%t second=%t", firstExists, secondExists)
+	}
+	if source.closes != 1 || coordinator.Snapshot().Owner != StreamOwnerCompanion {
+		t.Fatalf("closes=%d snapshot=%#v", source.closes, coordinator.Snapshot())
+	}
+}
+
 func TestWebRTCServiceRejectsUnknownEntrypointWithoutLease(t *testing.T) {
 	coordinator := NewStreamCoordinator(nil, testManagedSourceFactory())
 	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})

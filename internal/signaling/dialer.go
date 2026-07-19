@@ -267,12 +267,24 @@ type outgoingDialog struct {
 
 func (d outgoingDialog) Bye(ctx context.Context) error {
 	d.logger.InfoContext(ctx, "sip stream bye starting")
-	err := d.dialog.Bye(ctx)
-	_ = d.dialog.Close()
-	if err == nil {
-		d.logger.InfoContext(ctx, "sip stream bye completed")
+	defer func() { _ = d.dialog.Close() }()
+	if err := d.dialog.Bye(ctx); err != nil {
+		return err
 	}
-	return err
+	if err := waitForDialogEnd(ctx, d.dialog.Context().Done()); err != nil {
+		return err
+	}
+	d.logger.InfoContext(ctx, "sip stream bye completed")
+	return nil
+}
+
+func waitForDialogEnd(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type inviteTarget struct {
