@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -181,6 +182,33 @@ func run(
 		server.BroadcastState()
 		server.BroadcastEvent(map[string]any{"type": event.Type()})
 	}
+	var voicemailRefreshMu sync.Mutex
+	refreshVoicemail := func(refreshCtx context.Context) (bool, error) {
+		voicemailRefreshMu.Lock()
+		defer voicemailRefreshMu.Unlock()
+		status, err := openWebNetControl.VoicemailStatus(refreshCtx)
+		if err != nil {
+			if errors.Is(err, openwebnet.ErrVoicemailUnavailable) {
+				if projector.Snapshot().Voicemail != nil {
+					applyEvent(core.VoicemailUnavailable{})
+				}
+				return false, nil
+			}
+			return false, fmt.Errorf("read voicemail status: %w", err)
+		}
+
+		current := projector.Snapshot().Voicemail
+		if current != nil && current.Enabled == status.Enabled {
+			return true, nil
+		}
+		if status.Enabled {
+			applyEvent(core.VoicemailEnabled{})
+		} else {
+			applyEvent(core.VoicemailDisabled{})
+		}
+		return true, nil
+	}
+	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(func(snapshot media.StreamSnapshot) {
 		streamID := core.StreamID(fmt.Sprintf("media-%d", snapshot.LeaseID))
 		switch {
@@ -204,6 +232,49 @@ func run(
 			rtspServer.ObserveControlStop()
 		}
 	})
+	voicemailRefreshRequests := make(chan struct{}, 1)
+	requestVoicemailRefresh := func() {
+		select {
+		case voicemailRefreshRequests <- struct{}{}:
+		default:
+		}
+	}
+	listener.SetMessageObserver(func(message openwebnet.Message) {
+		if !strings.EqualFold(strings.TrimSpace(message.System), "aswm") || strings.TrimSpace(message.Raw) != openwebnet.FrameACK {
+			return
+		}
+		requestVoicemailRefresh()
+	})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-voicemailRefreshRequests:
+			}
+			timer := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			draining := true
+			for draining {
+				select {
+				case <-voicemailRefreshRequests:
+				default:
+					draining = false
+				}
+			}
+			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, err := refreshVoicemail(refreshCtx)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				logger.Debug("openwebnet voicemail refresh failed", "error", err)
+			}
+		}
+	}()
 	go func() {
 		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
@@ -212,12 +283,15 @@ func run(
 	go func() {
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		events, err := openWebNetControl.InitialEvents(probeCtx)
-		if err != nil {
-			logger.Debug("openwebnet initial state incomplete", "error", err)
+		if muted, err := openWebNetControl.AudioMutedStatus(probeCtx); err != nil {
+			logger.Debug("openwebnet initial audio state unavailable", "error", err)
+		} else if muted {
+			applyEvent(core.AudioMuted{})
+		} else {
+			applyEvent(core.AudioUnmuted{})
 		}
-		for _, event := range events {
-			applyEvent(event)
+		if _, err := refreshVoicemail(probeCtx); err != nil {
+			logger.Debug("openwebnet initial voicemail state unavailable", "error", err)
 		}
 	}()
 	diagnosticService.Start(ctx)

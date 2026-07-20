@@ -25,19 +25,20 @@ type (
 )
 
 type Server struct {
-	auth          *auth.Store
-	config        *config.Store
-	state         StateProvider
-	entrypoints   EntrypointControl
-	audio         AudioControl
-	voicemail     VoicemailControl
-	clients       clientSet
-	webrtcClients clientSet
-	webrtc        WebRTCControl
-	snapshot      SnapshotControl
-	runtime       RuntimeControl
-	update        UpdateControl
-	diagnostics   interface {
+	auth             *auth.Store
+	config           *config.Store
+	state            StateProvider
+	entrypoints      EntrypointControl
+	audio            AudioControl
+	voicemail        VoicemailControl
+	refreshVoicemail func(context.Context) (bool, error)
+	clients          clientSet
+	webrtcClients    clientSet
+	webrtc           WebRTCControl
+	snapshot         SnapshotControl
+	runtime          RuntimeControl
+	update           UpdateControl
+	diagnostics      interface {
 		Snapshot() diagnostics.Snapshot
 		Refresh(context.Context)
 	}
@@ -55,10 +56,13 @@ func NewServer(authStore *auth.Store, configStore *config.Store, state StateProv
 func (s *Server) SetEntrypoints(v EntrypointControl) { s.entrypoints = v }
 func (s *Server) SetAudio(v AudioControl)            { s.audio = v }
 func (s *Server) SetVoicemail(v VoicemailControl)    { s.voicemail = v }
-func (s *Server) SetWebRTC(v WebRTCControl)          { s.webrtc = v }
-func (s *Server) SetSnapshot(v SnapshotControl)      { s.snapshot = v }
-func (s *Server) SetRuntime(v RuntimeControl)        { s.runtime = v }
-func (s *Server) SetUpdate(v UpdateControl)          { s.update = v }
+func (s *Server) SetVoicemailRefresh(refresh func(context.Context) (bool, error)) {
+	s.refreshVoicemail = refresh
+}
+func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
+func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
+func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
+func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
@@ -90,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "POST", "/api/v3/audio/unmute", s.unmuteAudio)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/enable", s.enableVoicemail)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/disable", s.disableVoicemail)
+	s.handleProtected(mux, "POST", "/api/v3/voicemail/refresh", s.voicemailRefresh)
 	s.handleProtected(mux, "GET", "/api/v3/ws", s.websocket)
 	s.handleProtected(mux, "GET", "/api/v3/webrtc/ws", s.webrtcWebsocket)
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/latest.jpg", s.snapshotLatest)

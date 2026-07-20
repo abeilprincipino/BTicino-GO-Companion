@@ -18,17 +18,19 @@ const (
 
 // Listener converts device multicast frames into projector events.
 type Listener struct {
-	group  string
-	port   int
-	buffer int
-	parser Parser
-	mapper *Mapper
-	logger *slog.Logger
-	trace  *Trace
-	frameObserver func(string)
+	group           string
+	port            int
+	buffer          int
+	parser          Parser
+	mapper          *Mapper
+	logger          *slog.Logger
+	trace           *Trace
+	frameObserver   func(string)
+	messageObserver func(Message)
 }
 
-func (l *Listener) SetFrameObserver(observer func(string)) { l.frameObserver = observer }
+func (l *Listener) SetFrameObserver(observer func(string))    { l.frameObserver = observer }
+func (l *Listener) SetMessageObserver(observer func(Message)) { l.messageObserver = observer }
 
 func NewListener(entrypoints []config.Entrypoint, logger *slog.Logger, trace *Trace) *Listener {
 	if logger == nil {
@@ -70,6 +72,9 @@ func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
 		}
 		if l.frameObserver != nil {
 			l.frameObserver(message.Raw)
+		}
+		if l.messageObserver != nil {
+			l.messageObserver(message)
 		}
 		events := l.mapper.Map(message)
 		l.trace.Record(message, len(events))

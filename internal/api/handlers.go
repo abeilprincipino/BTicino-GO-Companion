@@ -90,6 +90,20 @@ func (s *Server) setVoicemail(w http.ResponseWriter, r *http.Request, enabled bo
 	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
 }
 
+func (s *Server) voicemailRefresh(w http.ResponseWriter, r *http.Request) {
+	if s.refreshVoicemail == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "voicemail refresh is unavailable")
+		return
+	}
+	available, err := s.refreshVoicemail(r.Context())
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "voicemail refresh failed", "error", err)
+		writeCommandError(w, err)
+		return
+	}
+	writeOK(w, http.StatusOK, map[string]any{"available": available, "state": s.currentPayload()})
+}
+
 func (s *Server) entrypoint(id string) (config.Entrypoint, error) {
 	if s.config != nil {
 		for _, entrypoint := range s.config.Snapshot().Companion.Entrypoints {

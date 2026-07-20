@@ -373,6 +373,30 @@ func TestServer_WebRTCLocalCandidatesFollowAnswerInOrder(t *testing.T) {
 	}
 }
 
+func TestServer_VoicemailRefresh(t *testing.T) {
+	server, _ := newTestServer(t)
+	called := false
+	server.SetVoicemailRefresh(func(context.Context) (bool, error) {
+		called = true
+		return false, nil
+	})
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/voicemail/refresh", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	var body struct {
+		OK        bool `json:"ok"`
+		Available bool `json:"available"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || !body.OK || body.Available || !called {
+		t.Fatalf("refresh response = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestServer_SnapshotLatest(t *testing.T) {
 	server, _ := newTestServer(t)
 	server.SetSnapshot(snapshotRecorder{image: []byte{0xff, 0xd8, 1, 0xff, 0xd9}})

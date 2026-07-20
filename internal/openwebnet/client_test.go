@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -97,7 +98,7 @@ func TestControlEnableVoicemailChecksAvailabilityFirst(t *testing.T) {
 			return
 		}
 		command <- frame
-		_, _ = conn.Write([]byte(FrameNACK))
+		_, _ = conn.Write([]byte(FrameACK + FrameNACK))
 		done <- nil
 	}()
 
@@ -107,8 +108,8 @@ func TestControlEnableVoicemailChecksAvailabilityFirst(t *testing.T) {
 	control.host = host
 	control.port = port
 	control.timeout = time.Second
-	if err := control.Enable(context.Background()); err == nil {
-		t.Fatal("Enable() succeeded although voicemail status was unavailable")
+	if err := control.Enable(context.Background()); !errors.Is(err, ErrVoicemailUnavailable) {
+		t.Fatalf("Enable() error = %v, want voicemail unavailable", err)
 	}
 	if frame := <-command; frame != FrameVoicemailStatusCmd {
 		t.Fatalf("first command = %q, want voicemail status query", frame)

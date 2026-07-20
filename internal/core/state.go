@@ -183,6 +183,8 @@ func apply(state *State, event Event) error {
 		state.Voicemail = &VoicemailState{Enabled: true}
 	case VoicemailDisabled:
 		state.Voicemail = &VoicemailState{Enabled: false}
+	case VoicemailUnavailable:
+		state.Voicemail = nil
 	default:
 		return transitionError("unsupported event %T", event)
 	}

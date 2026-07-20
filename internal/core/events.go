@@ -9,19 +9,20 @@ type StreamID string
 type EventType string
 
 const (
-	EventRingStarted         EventType = "ring.started"
-	EventRingCleared         EventType = "ring.cleared"
-	EventIncomingCallStarted EventType = "call.incoming"
-	EventIncomingCallEnded   EventType = "call.incoming_ended"
-	EventCallAnswered        EventType = "call.answered"
-	EventCallDeclined        EventType = "call.declined"
-	EventCallHungUp          EventType = "call.hung_up"
-	EventPreviewStarted      EventType = "preview.started"
-	EventPreviewStopped      EventType = "preview.stopped"
-	EventAudioMuted          EventType = "audio.muted"
-	EventAudioUnmuted        EventType = "audio.unmuted"
-	EventVoicemailEnabled    EventType = "voicemail.enabled"
-	EventVoicemailDisabled   EventType = "voicemail.disabled"
+	EventRingStarted          EventType = "ring.started"
+	EventRingCleared          EventType = "ring.cleared"
+	EventIncomingCallStarted  EventType = "call.incoming"
+	EventIncomingCallEnded    EventType = "call.incoming_ended"
+	EventCallAnswered         EventType = "call.answered"
+	EventCallDeclined         EventType = "call.declined"
+	EventCallHungUp           EventType = "call.hung_up"
+	EventPreviewStarted       EventType = "preview.started"
+	EventPreviewStopped       EventType = "preview.stopped"
+	EventAudioMuted           EventType = "audio.muted"
+	EventAudioUnmuted         EventType = "audio.unmuted"
+	EventVoicemailEnabled     EventType = "voicemail.enabled"
+	EventVoicemailDisabled    EventType = "voicemail.disabled"
+	EventVoicemailUnavailable EventType = "voicemail.unavailable"
 )
 
 type Event interface {
@@ -113,3 +114,8 @@ type VoicemailDisabled struct{}
 
 func (VoicemailDisabled) Type() EventType { return EventVoicemailDisabled }
 func (VoicemailDisabled) event()          {}
+
+type VoicemailUnavailable struct{}
+
+func (VoicemailUnavailable) Type() EventType { return EventVoicemailUnavailable }
+func (VoicemailUnavailable) event()          {}

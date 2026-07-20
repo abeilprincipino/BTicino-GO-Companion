@@ -148,6 +148,10 @@ func TestProjectorVoicemailStateIsPresentOnlyAfterStatusEvent(t *testing.T) {
 	if voicemail := projector.Snapshot().Voicemail; voicemail == nil || voicemail.Enabled {
 		t.Fatalf("voicemail = %#v, want disabled state", voicemail)
 	}
+	applyEvent(t, projector, VoicemailUnavailable{})
+	if projector.Snapshot().Voicemail != nil {
+		t.Fatal("voicemail state remains present after an unavailable status")
+	}
 }
 
 func TestProjector_SnapshotDoesNotExposeInternalState(t *testing.T) {

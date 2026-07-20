@@ -18,7 +18,9 @@ import (
 
 var (
 	ErrAuthenticationNeeded = errors.New("openwebnet authentication required")
+	ErrCommandRejected      = errors.New("openwebnet command rejected")
 	ErrUnexpectedReply      = errors.New("openwebnet unexpected reply")
+	ErrVoicemailUnavailable = errors.New("openwebnet voicemail unavailable")
 	frameRegexp             = regexp.MustCompile(`\*#?.*?##`)
 )
 
@@ -135,6 +137,9 @@ func (c *Control) AudioMutedStatus(ctx context.Context) (bool, error) {
 func (c *Control) VoicemailStatus(ctx context.Context) (VoicemailStatus, error) {
 	frame, err := c.status(ctx, FrameVoicemailStatusCmd)
 	if err != nil {
+		if errors.Is(err, ErrCommandRejected) {
+			return VoicemailStatus{}, fmt.Errorf("%w: %w", ErrVoicemailUnavailable, err)
+		}
 		return VoicemailStatus{}, err
 	}
 	enabled, _, ok := ParseVoicemailStatus(frame)
@@ -260,7 +265,7 @@ func (c *Control) sendStatus(reader *frameReader, command string, accepted ...st
 		return "", err
 	}
 	if frame == FrameNACK {
-		return "", fmt.Errorf("%w: %s", ErrUnexpectedReply, frame)
+		return "", fmt.Errorf("%w: %s", ErrCommandRejected, frame)
 	}
 	if len(accepted) == 0 && frame != FrameACK {
 		return frame, nil
@@ -281,7 +286,7 @@ func (c *Control) sendStatus(reader *frameReader, command string, accepted ...st
 			continue
 		}
 		if next == FrameNACK {
-			return "", fmt.Errorf("%w: %s", ErrUnexpectedReply, next)
+			return "", fmt.Errorf("%w: %s", ErrCommandRejected, next)
 		}
 		if len(accepted) == 0 && next != FrameACK {
 			return next, nil
