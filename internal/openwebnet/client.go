@@ -91,9 +91,15 @@ func (c *Control) Unmute(ctx context.Context) error {
 	return c.command(ctx, FrameAudioUnmuteCmd, FrameACK, FrameAudioUnmuted)
 }
 func (c *Control) Enable(ctx context.Context) error {
+	if _, err := c.VoicemailStatus(ctx); err != nil {
+		return fmt.Errorf("check voicemail availability: %w", err)
+	}
 	return c.command(ctx, FrameVoicemailEnableCmd, FrameACK)
 }
 func (c *Control) Disable(ctx context.Context) error {
+	if _, err := c.VoicemailStatus(ctx); err != nil {
+		return fmt.Errorf("check voicemail availability: %w", err)
+	}
 	return c.command(ctx, FrameVoicemailDisableCmd, FrameACK)
 }
 func (c *Control) InitialEvents(ctx context.Context) ([]core.Event, error) {

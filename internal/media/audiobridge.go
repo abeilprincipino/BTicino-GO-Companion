@@ -56,6 +56,7 @@ type AudioBridge struct {
 	logger      *slog.Logger
 	failure     func(error)
 	pipeline    AudioPipeline
+	lifecycle   context.Context
 	cancel      context.CancelFunc
 	done        chan struct{}
 	active      bool
@@ -95,6 +96,7 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 	}
 	b.active = true
 	b.restarts = 0
+	b.lifecycle = ctx
 	b.mu.Unlock()
 
 	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink")
@@ -172,7 +174,13 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 	_ = failed.Close()
 	<-done
 
-	pipeline, err := b.gstreamer.StartAudioBridge(context.Background())
+	b.mu.Lock()
+	lifecycle := b.lifecycle
+	b.mu.Unlock()
+	if lifecycle == nil {
+		lifecycle = context.Background()
+	}
+	pipeline, err := b.gstreamer.StartAudioBridge(lifecycle)
 	if err != nil || pipeline == nil {
 		if err == nil {
 			err = ErrAudioBridgeUnavailable
@@ -255,6 +263,7 @@ func (b *AudioBridge) StopContext(ctx context.Context) error {
 	b.logger.Info("audio bridge stopping")
 
 	b.pipeline = nil
+	b.lifecycle = nil
 	cancel := b.cancel
 	done := b.done
 	b.cancel = nil
@@ -333,7 +342,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		_ = opusConn.Close()
 		return nil, fmt.Errorf("listen bridge speex output: %w", err)
 	}
-	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4), closeDone: make(chan struct{})}
+	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4), stop: make(chan struct{}), closeDone: make(chan struct{})}
 	bundle := filepath.Join(g.bundleRoot, "bin", "gst-launch-1.0")
 	p.commands = []*exec.Cmd{
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51060", "caps=application/x-rtp,media=audio,encoding-name=SPEEX,clock-rate=8000,payload=110", "!", "rtpspeexdepay", "!", "speexdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51062"),
@@ -355,6 +364,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		p.waiters.Add(1)
 		go p.wait(command, audioPipelineName(index))
 	}
+	p.readers.Add(2)
 	go p.read(p.opusConn, audioBridgeOpusPT, p.opusOut)
 	go p.read(p.speexConn, 97, p.speexOut)
 	return p, nil
@@ -369,6 +379,8 @@ type gstreamerAudioPipeline struct {
 	errors                               chan error
 	waiters                              sync.WaitGroup
 	closeDone                            chan struct{}
+	stop                                 chan struct{}
+	readers                              sync.WaitGroup
 	closeErr                             error
 	closed                               bool
 }
@@ -445,6 +457,9 @@ func (p *gstreamerAudioPipeline) Close() error {
 		return p.closeErr
 	}
 	p.closed = true
+	if p.stop != nil {
+		close(p.stop)
+	}
 	p.logger.Info("audio bridge pipeline stopping")
 	for _, conn := range []*net.UDPConn{p.opusConn, p.speexConn, p.speexIn, p.opusIn} {
 		if conn != nil {
@@ -462,6 +477,7 @@ func (p *gstreamerAudioPipeline) Close() error {
 	// Wait must be called exactly once per started command. The waiter goroutines
 	// do that work and Close does not return until every child has been reaped.
 	p.waiters.Wait()
+	p.readers.Wait()
 
 	p.mu.Lock()
 	close(p.closeDone)
@@ -469,6 +485,7 @@ func (p *gstreamerAudioPipeline) Close() error {
 	return p.closeErr
 }
 func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, output chan<- *rtp.Packet) {
+	defer p.readers.Done()
 	defer close(output)
 	buffer := make([]byte, 1500)
 	for {
@@ -478,7 +495,11 @@ func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, outp
 		}
 		packet := &rtp.Packet{}
 		if packet.Unmarshal(buffer[:n]) == nil && packet.PayloadType == payloadType {
-			output <- packet
+			select {
+			case output <- packet:
+			case <-p.stop:
+				return
+			}
 		}
 	}
 }

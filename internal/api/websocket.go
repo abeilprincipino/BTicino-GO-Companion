@@ -2,6 +2,7 @@ package api
 
 import (
 	"bticino-go-companion/internal/media"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 const (
 	maxWebSocketFrame = 64 << 10
 	heartbeatTimeout  = 90 * time.Second
+	heartbeatInterval = 20 * time.Second
 	writeTimeout      = 5 * time.Second
 )
 
@@ -51,9 +53,9 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.DebugContext(r.Context(), "websocket ready", "channel", "state", "client_ip", sourceIP(r))
 
-	lastPing := time.Now()
+	lastActivity := time.Now()
 	for {
-		if conn.SetReadDeadline(lastPing.Add(heartbeatTimeout)) != nil {
+		if conn.SetReadDeadline(lastActivity.Add(heartbeatTimeout)) != nil {
 			return
 		}
 
@@ -72,6 +74,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if opcode == ws.OpPing {
+			lastActivity = time.Now()
 			if client.writeFrame(ws.OpPong, data) != nil {
 				disconnectReason = "pong_write_failed"
 				return
@@ -81,6 +84,10 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if opcode != ws.OpText {
+			if opcode == ws.OpPong {
+				lastActivity = time.Now()
+				continue
+			}
 			disconnectReason = "unsupported_frame"
 			return
 		}
@@ -95,9 +102,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if message.Type == "ping" {
-			lastPing = time.Now()
-		}
+		lastActivity = time.Now()
 
 		s.handleMessage(client, r, message)
 	}
@@ -235,6 +240,11 @@ type webrtcCandidatePayload struct {
 	Candidate media.ICECandidate `json:"candidate"`
 }
 
+type webrtcLocalCandidatePayload struct {
+	SessionID string              `json:"session_id"`
+	Candidate *media.ICECandidate `json:"candidate"`
+}
+
 type webrtcClosePayload struct {
 	SessionID string `json:"session_id"`
 	Reason    string `json:"reason"`
@@ -253,6 +263,8 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 	client := &client{conn: conn}
 	s.webrtcClients.add(client)
 	var sessionID string
+	lastActivity := time.Now()
+	nextPing := lastActivity.Add(heartbeatInterval)
 	defer func() {
 		s.webrtcClients.remove(client)
 		if sessionID != "" {
@@ -262,14 +274,39 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
+		deadline := lastActivity.Add(heartbeatTimeout)
+		if nextPing.Before(deadline) {
+			deadline = nextPing
+		}
+		if conn.SetReadDeadline(deadline) != nil {
+			return
+		}
 		data, opcode, err := readClientFrame(conn)
-		if err != nil || opcode == ws.OpClose {
+		if err != nil {
+			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+				now := time.Now()
+				if now.Sub(lastActivity) >= heartbeatTimeout || client.writeFrame(ws.OpPing, nil) != nil {
+					return
+				}
+				nextPing = now.Add(heartbeatInterval)
+				continue
+			}
+			return
+		}
+		if opcode == ws.OpClose {
 			return
 		}
 		if opcode == ws.OpPing {
+			lastActivity = time.Now()
+			nextPing = lastActivity.Add(heartbeatInterval)
 			if client.writeFrame(ws.OpPong, data) != nil {
 				return
 			}
+			continue
+		}
+		if opcode == ws.OpPong {
+			lastActivity = time.Now()
+			nextPing = lastActivity.Add(heartbeatInterval)
 			continue
 		}
 		if opcode != ws.OpText {
@@ -283,6 +320,8 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		lastActivity = time.Now()
+		nextPing = lastActivity.Add(heartbeatInterval)
 
 		var response Message
 		switch message.Type {
@@ -293,7 +332,21 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 				response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
 				break
 			}
-			answer, offerErr := s.webrtc.Offer(r.Context(), payload.SessionID, payload.EntrypointID, payload.OfferSDP)
+			var candidateMu sync.Mutex
+			answerWritten := false
+			pendingCandidates := make([]*media.ICECandidate, 0)
+			sendCandidate := func(candidate *media.ICECandidate) {
+				candidateMu.Lock()
+				defer candidateMu.Unlock()
+				if !answerWritten {
+					pendingCandidates = append(pendingCandidates, candidate)
+					return
+				}
+				_ = client.write(Message{Type: "candidate", Payload: mustJSON(webrtcLocalCandidatePayload{SessionID: payload.SessionID, Candidate: candidate})})
+			}
+			offerCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, sendCandidate)
+			cancel()
 			if offerErr != nil {
 				s.logger.WarnContext(r.Context(), "webrtc offer failed", "session_id", payload.SessionID, "entrypoint_id", payload.EntrypointID, "error", offerErr)
 				response = webrtcError(message.ID, "offer_failed", offerErr.Error())
@@ -302,6 +355,21 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 			sessionID = payload.SessionID
 			s.logger.DebugContext(r.Context(), "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin)
 			response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
+			if client.write(response) != nil {
+				return
+			}
+			candidateMu.Lock()
+			answerWritten = true
+			candidates := append([]*media.ICECandidate(nil), pendingCandidates...)
+			pendingCandidates = nil
+			for _, candidate := range candidates {
+				if client.write(Message{Type: "candidate", Payload: mustJSON(webrtcLocalCandidatePayload{SessionID: sessionID, Candidate: candidate})}) != nil {
+					candidateMu.Unlock()
+					return
+				}
+			}
+			candidateMu.Unlock()
+			continue
 		case "candidate":
 			var payload webrtcCandidatePayload
 			if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {

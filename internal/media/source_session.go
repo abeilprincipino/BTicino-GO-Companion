@@ -191,9 +191,9 @@ func (s *SourceSession) RemoteDialogEnded() {
 	}
 
 	s.started = false
+	s.mu.Unlock()
 	s.logger.Info("source session stopped by remote sip dialog")
 	s.closeReceivers()
-	s.mu.Unlock()
 }
 
 func (s *SourceSession) closeReceivers() {

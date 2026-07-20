@@ -11,6 +11,7 @@ var (
 	ErrNoIncomingDialog = errors.New("sip: no incoming dialog")
 	ErrIncomingDialog   = errors.New("sip: an incoming dialog exists")
 	ErrNoActiveDialog   = errors.New("sip: no active dialog")
+	ErrActiveDialog     = errors.New("sip: an active dialog exists")
 )
 
 type IncomingDialog interface {
@@ -52,6 +53,9 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog, entrypoin
 
 	if m.incoming != nil {
 		return ErrIncomingDialog
+	}
+	if m.active != nil {
+		return dialog.Respond(ctx, 486, "Busy Here", "")
 	}
 
 	if err := dialog.Respond(ctx, 180, "Ringing", ""); err != nil {
@@ -138,6 +142,9 @@ func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
 
 	if m.incoming != nil {
 		return ErrIncomingDialog
+	}
+	if m.active != nil {
+		return ErrActiveDialog
 	}
 
 	dialog, err := m.dialer.StartStream(ctx, devAddr, BuildOffer(m.host, devAddr))

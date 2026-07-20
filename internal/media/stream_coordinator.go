@@ -127,15 +127,25 @@ func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *St
 }
 
 func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
+	return c.acquire(ctx, ctx, entrypoint, events)
+}
+
+// AcquireWithStartup bounds source initialization without tying the live lease
+// to the caller's short-lived startup deadline.
+func (c *StreamCoordinator) AcquireWithStartup(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events)
+}
+
+func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
 	c.mu.Lock()
 	if c.snapshot.Owner == StreamOwnerExternal {
 		c.mu.Unlock()
-		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
+		c.logger.DebugContext(lifecycleCtx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 		return nil, ErrExternalStream
 	}
 	if c.leaseID != 0 || c.factory == nil {
 		c.mu.Unlock()
-		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
+		c.logger.DebugContext(lifecycleCtx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
 		return nil, ErrStreamBusy
 	}
 	c.nextID++
@@ -145,7 +155,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
+	c.logger.InfoContext(lifecycleCtx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
 
 	source, cleanup, err := c.factory(entrypoint, SourceEvents{
 		VideoRTP: func(packet *rtp.Packet) {
@@ -177,10 +187,10 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	if err != nil || source == nil {
 		c.finishStop(lease, nil, cleanup, "source creation failed")
 		if err != nil {
-			c.logger.ErrorContext(ctx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
+			c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
 			return nil, err
 		}
-		c.logger.ErrorContext(ctx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "factory returned nil")
+		c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "factory returned nil")
 		return nil, ErrStreamBusy
 	}
 	c.mu.Lock()
@@ -194,10 +204,22 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	}
 	c.source, c.cleanup = source, cleanup
 	c.mu.Unlock()
-	if err := source.Start(ctx); err != nil {
-		c.logger.ErrorContext(ctx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
-		c.stop(lease, "source startup failed")
-		return nil, err
+	startResult := make(chan error, 1)
+	go func() {
+		startResult <- source.Start(lifecycleCtx)
+	}()
+	select {
+	case err := <-startResult:
+		if err != nil {
+			c.logger.ErrorContext(lifecycleCtx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
+			c.stop(lease, "source startup failed")
+			return nil, err
+		}
+	case <-startupCtx.Done():
+		// Teardown may need to wait for a cooperative source startup, but the
+		// signaling request must not remain blocked beyond its startup budget.
+		go c.stop(lease, "source startup timed out")
+		return nil, startupCtx.Err()
 	}
 	c.mu.Lock()
 	var snapshot StreamSnapshot
@@ -211,7 +233,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	if observer != nil {
 		observer(snapshot)
 	}
-	go c.watch(ctx, lease)
+	go c.watch(lifecycleCtx, lease)
 	return lease, nil
 }
 
@@ -265,14 +287,16 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.leaseID != lease.id || c.starting || c.stopping {
+		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
 	backchannel, ok := c.source.(ManagedSourceBackchannel)
 	if !ok || backchannel == nil {
+		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
+	c.mu.Unlock()
 	return backchannel.WriteBackchannelRTP(packet)
 }
 

@@ -23,6 +23,7 @@ const (
 	pendingCandidateTTL         = 45 * time.Second
 	maxPendingSessionCandidates = 64
 	webrtcICEPort               = 8555
+	webrtcSourceStartupTimeout  = 15 * time.Second
 )
 
 var (
@@ -33,6 +34,7 @@ var (
 	ErrSessionExists      = errors.New("media: WebRTC session already exists")
 	ErrSessionNotFound    = errors.New("media: WebRTC session not found")
 	ErrEntrypointNotFound = errors.New("media: WebRTC entrypoint not found")
+	ErrWebRTCClosed       = errors.New("media: WebRTC service is closed")
 )
 
 // ICECandidate is a remote ICE candidate supplied by a WebRTC client.
@@ -56,6 +58,7 @@ type WebRTCService struct {
 	logger            *slog.Logger
 	sessions          map[string]*webRTCSession
 	pendingCandidates map[string]pendingCandidateBatch
+	closed            bool
 }
 
 type webRTCSession struct {
@@ -74,6 +77,7 @@ type webRTCSession struct {
 	videoRTP             outboundRTPStats
 	audioRTP             outboundRTPStats
 	closeOnce            sync.Once
+	onLocalCandidate     func(*ICECandidate)
 }
 
 type outboundRTPStats struct {
@@ -142,9 +146,8 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 	}, nil
 }
 
-// Offer creates a non-trickle answer. The returned SDP contains all gathered
-// local candidates, so clients do not need a candidate endpoint.
-func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string) (string, error) {
+// Offer creates an answer and delivers gathered local candidates as they arrive.
+func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*ICECandidate)) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
@@ -164,6 +167,10 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	defer s.offerMu.Unlock()
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return "", ErrWebRTCClosed
+	}
 	s.prunePendingCandidatesLocked(time.Now())
 	entrypoint, found := s.entrypoints[entrypointID]
 	if !found {
@@ -191,7 +198,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	if err != nil {
 		return "", err
 	}
-	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now()}
+	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now(), onLocalCandidate: onLocalCandidate}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
@@ -216,6 +223,22 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		}
 		s.logger.Debug("webrtc backchannel track received", "session_id", sessionID, "entrypoint_id", entrypointID, "codec", track.Codec().MimeType, "payload_type", track.PayloadType(), "ssrc", track.SSRC())
 		go s.forwardBackchannel(session, track)
+	})
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if session.onLocalCandidate == nil {
+			return
+		}
+		if candidate == nil {
+			session.onLocalCandidate(nil)
+			return
+		}
+		candidateJSON := candidate.ToJSON()
+		session.onLocalCandidate(&ICECandidate{
+			Candidate:        candidateJSON.Candidate,
+			SDPMid:           candidateJSON.SDPMid,
+			SDPMLineIndex:    candidateJSON.SDPMLineIndex,
+			UsernameFragment: candidateJSON.UsernameFragment,
+		})
 	})
 
 	if err := s.addOutboundTracks(session, entrypoint.ID); err != nil {
@@ -248,12 +271,15 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 
 	// The signaling request ends after this answer; the source must instead live
 	// until the peer or client explicitly closes the session.
-	lease, err := s.coordinator.Acquire(context.WithoutCancel(ctx), entrypoint, SourceEvents{
+	lifecycleCtx := context.WithoutCancel(ctx)
+	startupCtx, startupCancel := context.WithTimeout(ctx, webrtcSourceStartupTimeout)
+	lease, err := s.coordinator.AcquireWithStartup(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
 		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
 		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
 		RemoteBYE: func() { s.closeSession(sessionID, "remote SIP BYE") },
 		Failed:    func(error) { s.closeSession(sessionID, "source failure") },
 	})
+	startupCancel()
 	if err != nil {
 		s.closeSession(sessionID, "source startup failed")
 		return "", err
@@ -269,16 +295,9 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.closeSession(sessionID, "create answer failed")
 		return "", err
 	}
-	gathered := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		s.closeSession(sessionID, "set local description failed")
 		return "", err
-	}
-	select {
-	case <-gathered:
-	case <-ctx.Done():
-		s.closeSession(sessionID, "answer gathering canceled")
-		return "", ctx.Err()
 	}
 	local := pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {
@@ -288,6 +307,33 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	s.logNegotiatedMedia(ctx, session)
 	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "replaced_sessions", len(previousSessionIDs), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 	return local.SDP, nil
+}
+
+// Shutdown closes every active peer and releases the shared ICE UDP socket.
+func (s *WebRTCService) Shutdown() error {
+	if s == nil {
+		return nil
+	}
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	sessionIDs := make([]string, 0, len(s.sessions))
+	for sessionID := range s.sessions {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	s.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		s.closeSession(sessionID, "service shutdown")
+	}
+	if s.iceConn == nil {
+		return nil
+	}
+	return s.iceConn.Close()
 }
 
 func (s *WebRTCService) addOutboundTracks(session *webRTCSession, streamID string) error {

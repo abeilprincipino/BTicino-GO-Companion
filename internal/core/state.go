@@ -45,14 +45,14 @@ type VoicemailState struct {
 }
 
 type State struct {
-	Revision      uint64         `json:"revision"`
-	CallState     CallState      `json:"call_state"`
-	PhysicalRing  *PhysicalRing  `json:"physical_ring,omitempty"`
-	IncomingCall  *IncomingCall  `json:"incoming_call,omitempty"`
-	ActiveCall    *ActiveCall    `json:"active_call,omitempty"`
-	PreviewStream *PreviewStream `json:"preview_stream,omitempty"`
-	Audio         AudioState     `json:"audio"`
-	Voicemail     VoicemailState `json:"voicemail"`
+	Revision      uint64          `json:"revision"`
+	CallState     CallState       `json:"call_state"`
+	PhysicalRing  *PhysicalRing   `json:"physical_ring,omitempty"`
+	IncomingCall  *IncomingCall   `json:"incoming_call,omitempty"`
+	ActiveCall    *ActiveCall     `json:"active_call,omitempty"`
+	PreviewStream *PreviewStream  `json:"preview_stream,omitempty"`
+	Audio         AudioState      `json:"audio"`
+	Voicemail     *VoicemailState `json:"voicemail,omitempty"`
 }
 
 type Projector struct {
@@ -180,9 +180,9 @@ func apply(state *State, event Event) error {
 	case AudioUnmuted:
 		state.Audio.Muted = false
 	case VoicemailEnabled:
-		state.Voicemail.Enabled = true
+		state.Voicemail = &VoicemailState{Enabled: true}
 	case VoicemailDisabled:
-		state.Voicemail.Enabled = false
+		state.Voicemail = &VoicemailState{Enabled: false}
 	default:
 		return transitionError("unsupported event %T", event)
 	}
@@ -258,6 +258,10 @@ func cloneState(state State) State {
 	if state.PreviewStream != nil {
 		previewStream := *state.PreviewStream
 		stateCopy.PreviewStream = &previewStream
+	}
+	if state.Voicemail != nil {
+		voicemail := *state.Voicemail
+		stateCopy.Voicemail = &voicemail
 	}
 
 	return stateCopy

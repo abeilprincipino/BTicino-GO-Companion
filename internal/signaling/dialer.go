@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	registerExpires         = 600 * time.Second
 	registerRefreshSkew     = 10 * time.Second
 	registerRefreshInterval = registerExpires - registerRefreshSkew
+	registerRetryMaximum    = 2 * time.Minute
 )
 
 var (
@@ -161,7 +163,7 @@ func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	callback := d.remoteDialogEnded
 	d.callbackMu.RUnlock()
 	if callback != nil {
-		callback()
+		go callback()
 	}
 }
 
@@ -199,20 +201,32 @@ func (d *streamDialer) Register(ctx context.Context) error {
 
 func (d *streamDialer) registrationLoop(ctx context.Context) {
 	defer d.registerWG.Done()
-	var lastSuccess time.Time
+	delay := time.Duration(0)
 	failed := false
-	tryRegister := func() {
-		if !lastSuccess.IsZero() && time.Since(lastSuccess) < registerRefreshInterval {
-			return
+	for {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
-
 		registerCtx, cancel := context.WithTimeout(ctx, registerTimeout)
 		err := d.Register(registerCtx)
 		cancel()
 		if err != nil {
-			d.logger.Warn("sip registration failed", "error", err, "retry_in", registerCheckInterval)
+			if delay == 0 {
+				delay = registerCheckInterval
+			} else {
+				delay = min(delay*2, registerRetryMaximum)
+			}
+			retryIn := jitter(delay)
+			d.logger.Warn("sip registration failed", "error", err, "retry_in", retryIn)
 			failed = true
-			return
+			delay = retryIn
+			continue
 		}
 		if failed {
 			d.logger.Info("sip registration recovered")
@@ -220,20 +234,12 @@ func (d *streamDialer) registrationLoop(ctx context.Context) {
 			d.logger.Debug("sip registration succeeded")
 		}
 		failed = false
-		lastSuccess = time.Now()
+		delay = registerRefreshInterval
 	}
+}
 
-	tryRegister()
-	ticker := time.NewTicker(registerCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryRegister()
-		}
-	}
+func jitter(delay time.Duration) time.Duration {
+	return min(delay*time.Duration(80+rand.IntN(41))/100, registerRetryMaximum)
 }
 
 func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeout time.Duration, register func(context.Context) error) {

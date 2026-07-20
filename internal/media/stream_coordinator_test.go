@@ -39,6 +39,28 @@ func TestStreamCoordinatorRejectsExternalStream(t *testing.T) {
 	}
 }
 
+func TestStreamCoordinatorStartupUsesLifecycleContext(t *testing.T) {
+	source := &contextManagedSource{started: make(chan context.Context, 1)}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	defer lifecycleCancel()
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), time.Second)
+	defer startupCancel()
+
+	lease, err := c.AcquireWithStartup(lifecycleCtx, startupCtx, config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startCtx := <-source.started; startCtx.Err() != nil {
+		t.Fatalf("source start context ended: %v", startCtx.Err())
+	}
+	if !c.Release(lease) {
+		t.Fatal("release source lease")
+	}
+}
+
 func TestStreamCoordinatorRemoteBYEReleasesLeaseOnce(t *testing.T) {
 	source := &remoteBYESource{}
 	c := NewStreamCoordinator(nil, func(_ config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
@@ -237,6 +259,17 @@ func (s *remoteBYESource) remote()                     { s.callback() }
 type backchannelManagedSource struct {
 	packet *rtp.Packet
 }
+
+type contextManagedSource struct {
+	started chan context.Context
+}
+
+func (s *contextManagedSource) Start(ctx context.Context) error {
+	s.started <- ctx
+	return nil
+}
+
+func (*contextManagedSource) Close(context.Context) error { return nil }
 
 func (*backchannelManagedSource) Start(context.Context) error { return nil }
 func (*backchannelManagedSource) Close(context.Context) error { return nil }

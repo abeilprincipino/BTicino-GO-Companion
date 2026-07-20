@@ -125,6 +125,11 @@ func run(
 	if err != nil {
 		return fmt.Errorf("create WebRTC service: %w", err)
 	}
+	defer func() {
+		if err := webrtc.Shutdown(); err != nil {
+			appLogger.Warn("webrtc service shutdown failed", "error", err)
+		}
+	}()
 
 	authStore := auth.NewStore(configStore)
 	authStore.SetLogger(logger.With("component", "auth"))
@@ -356,6 +361,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	)
 	source.SetStartedCallback(func() { sourceLive.Store(true) })
 	return source, func() {
+		sourceLive.Store(false)
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := source.Close(closeCtx); err != nil {

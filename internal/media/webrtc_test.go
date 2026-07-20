@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -29,12 +30,26 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 		t.Fatalf("AddICECandidate() before offer error = %v", err)
 	}
 
-	answer, err := service.Offer(context.Background(), "session-1", "main", offer)
+	candidates := make(chan ICECandidate, 8)
+	answer, err := service.Offer(context.Background(), "session-1", "main", offer, func(candidate *ICECandidate) {
+		if candidate == nil {
+			return
+		}
+		candidates <- *candidate
+	})
 	if err != nil {
 		t.Fatalf("Offer() error = %v, offer = %q", err, offer)
 	}
-	if !strings.Contains(answer, "candidate:") {
-		t.Fatalf("answer does not contain gathered ICE candidates: %q", answer)
+	if strings.TrimSpace(answer) == "" {
+		t.Fatal("answer is empty")
+	}
+	select {
+	case candidate := <-candidates:
+		if candidate.Candidate == "" {
+			t.Fatal("local ICE candidate is empty")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local ICE candidate was not delivered")
 	}
 	if coordinator.Snapshot().Owner != StreamOwnerCompanion {
 		t.Fatalf("owner = %q, want companion", coordinator.Snapshot().Owner)
@@ -53,6 +68,16 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 	}
 }
 
+func TestWebRTCServiceShutdownClosesICEAndRejectsOffers(t *testing.T) {
+	service := newTestWebRTCService(t, NewStreamCoordinator(nil, testManagedSourceFactory()), []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
+	if err := service.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if _, err := service.Offer(context.Background(), "session-1", "main", "offer", nil); !errors.Is(err, ErrWebRTCClosed) {
+		t.Fatalf("Offer() error = %v, want %v", err, ErrWebRTCClosed)
+	}
+}
+
 func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
 	source := &remoteBYESource{}
 	coordinator := NewStreamCoordinator(nil, func(_ config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
@@ -62,13 +87,13 @@ func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
 	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
 	firstOffer, firstClient := testWebRTCOffer(t)
 	defer firstClient.Close() //nolint:errcheck // test cleanup
-	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer); err != nil {
+	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer, nil); err != nil {
 		t.Fatalf("offer first session: %v", err)
 	}
 
 	secondOffer, secondClient := testWebRTCOffer(t)
 	defer secondClient.Close() //nolint:errcheck // test cleanup
-	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer); err != nil {
+	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer, nil); err != nil {
 		t.Fatalf("offer replacement session: %v", err)
 	}
 
@@ -87,7 +112,7 @@ func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
 func TestWebRTCServiceRejectsUnknownEntrypointWithoutLease(t *testing.T) {
 	coordinator := NewStreamCoordinator(nil, testManagedSourceFactory())
 	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
-	_, err := service.Offer(context.Background(), "session-1", "missing", "offer")
+	_, err := service.Offer(context.Background(), "session-1", "missing", "offer", nil)
 	if !errors.Is(err, ErrEntrypointNotFound) {
 		t.Fatalf("Offer() error = %v", err)
 	}
@@ -101,7 +126,7 @@ func TestWebRTCServiceAddICECandidate(t *testing.T) {
 	offer, client := testWebRTCOffer(t)
 	defer client.Close() //nolint:errcheck // test cleanup
 
-	if _, err := service.Offer(context.Background(), "session-1", "main", offer); err != nil {
+	if _, err := service.Offer(context.Background(), "session-1", "main", offer, nil); err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close("session-1") //nolint:errcheck // test cleanup
@@ -197,7 +222,7 @@ func newTestWebRTCService(t *testing.T, coordinator *StreamCoordinator, entrypoi
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = service.iceConn.Close() })
+	t.Cleanup(func() { _ = service.Shutdown() })
 	return service
 }
 

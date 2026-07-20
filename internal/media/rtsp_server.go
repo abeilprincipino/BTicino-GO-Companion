@@ -185,6 +185,15 @@ func (s *RTSPServer) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respon
 		}
 		return &base.Response{StatusCode: base.StatusOK}, nil
 	}
+	for _, reader := range s.readers {
+		if reader.route.entrypoint.ID == route.entrypoint.ID {
+			s.readers[ctx.Session] = rtspReader{route: route, lease: reader.lease}
+			readers := len(s.readers)
+			s.mu.Unlock()
+			s.logger.Info("rtsp reader started", "entrypoint_id", route.entrypoint.ID, "readers", readers, "shared_source", true)
+			return &base.Response{StatusCode: base.StatusOK}, nil
+		}
+	}
 	if _, exists := s.starting[ctx.Session]; exists {
 		s.mu.Unlock()
 		return &base.Response{StatusCode: base.StatusBadRequest}, ErrStreamBusy
@@ -266,21 +275,26 @@ func (s *RTSPServer) ensureStreamLocked() error {
 }
 
 func (s *RTSPServer) writeVideoRTP(packet *rtp.Packet) {
-	s.writeRTP(s.video, packet)
+	s.writeRTP(true, packet)
 }
 
 func (s *RTSPServer) writeAudioRTP(packet *rtp.Packet) {
-	s.writeRTP(s.audio, packet)
+	s.writeRTP(false, packet)
 }
 
-func (s *RTSPServer) writeRTP(media *description.Media, packet *rtp.Packet) {
+func (s *RTSPServer) writeRTP(video bool, packet *rtp.Packet) {
 	if packet == nil {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stream != nil && media != nil {
-		s.stream.WritePacketRTP(media, packet)
+	stream := s.stream
+	media := s.audio
+	if video {
+		media = s.video
+	}
+	s.mu.Unlock()
+	if stream != nil && media != nil {
+		stream.WritePacketRTP(media, packet)
 	}
 }
 

@@ -133,6 +133,23 @@ func TestProjector_HangupRejectsIncomingDialog(t *testing.T) {
 	assertState(t, projector.Snapshot(), State{Revision: 2, CallState: CallStateIdle})
 }
 
+func TestProjectorVoicemailStateIsPresentOnlyAfterStatusEvent(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	if projector.Snapshot().Voicemail != nil {
+		t.Fatal("voicemail state is present before the intercom confirms support")
+	}
+	applyEvent(t, projector, VoicemailEnabled{})
+	if voicemail := projector.Snapshot().Voicemail; voicemail == nil || !voicemail.Enabled {
+		t.Fatalf("voicemail = %#v, want enabled state", voicemail)
+	}
+	applyEvent(t, projector, VoicemailDisabled{})
+	if voicemail := projector.Snapshot().Voicemail; voicemail == nil || voicemail.Enabled {
+		t.Fatalf("voicemail = %#v, want disabled state", voicemail)
+	}
+}
+
 func TestProjector_SnapshotDoesNotExposeInternalState(t *testing.T) {
 	t.Parallel()
 
