@@ -146,7 +146,7 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 	}, nil
 }
 
-// Offer creates an answer and delivers gathered local candidates as they arrive.
+// Offer creates an answer that includes every gathered local ICE candidate.
 func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*ICECandidate)) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
@@ -295,9 +295,16 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.closeSession(sessionID, "create answer failed")
 		return "", err
 	}
+	gatheringComplete := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		s.closeSession(sessionID, "set local description failed")
 		return "", err
+	}
+	select {
+	case <-gatheringComplete:
+	case <-ctx.Done():
+		s.closeSession(sessionID, "local ICE gathering timed out")
+		return "", ctx.Err()
 	}
 	local := pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {

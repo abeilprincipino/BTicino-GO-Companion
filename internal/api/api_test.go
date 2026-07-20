@@ -332,7 +332,7 @@ func TestServer_WebRTCContract(t *testing.T) {
 	}
 }
 
-func TestServer_WebRTCLocalCandidatesFollowAnswerInOrder(t *testing.T) {
+func TestServer_WebRTCDoesNotSendLocalCandidatesOutOfBand(t *testing.T) {
 	server, _ := newTestServer(t)
 	server.SetWebRTC(&webRTCRecorder{answer: "answer-sdp", localCandidates: []*media.ICECandidate{{Candidate: "candidate:1"}, nil}})
 	token, err := server.auth.RotateBearer()
@@ -354,22 +354,28 @@ func TestServer_WebRTCLocalCandidatesFollowAnswerInOrder(t *testing.T) {
 		io.Reader
 		io.Writer
 	}{Reader: reader, Writer: connection}
-	if err := wsutil.WriteClientText(connection, []byte(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)); err != nil {
-		t.Fatal(err)
-	}
-
-	for i, wantType := range []string{"answer", "candidate", "candidate"} {
+	write := func(payload string) map[string]any {
+		t.Helper()
+		if err := wsutil.WriteClientText(connection, []byte(payload)); err != nil {
+			t.Fatal(err)
+		}
 		data, err := wsutil.ReadServerText(transport)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var message map[string]any
-		if err := json.Unmarshal(data, &message); err != nil {
+		var response map[string]any
+		if err := json.Unmarshal(data, &response); err != nil {
 			t.Fatal(err)
 		}
-		if message["type"] != wantType {
-			t.Fatalf("message %d type = %q, want %q", i, message["type"], wantType)
-		}
+		return response
+	}
+	answer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
+	if answer["type"] != "answer" {
+		t.Fatalf("offer response type = %q, want answer", answer["type"])
+	}
+	ack := write(`{"type":"candidate","id":"session-1","payload":{"session_id":"session-1","candidate":{"candidate":"candidate:1"}}}`)
+	if ack["type"] != "ack" {
+		t.Fatalf("candidate response type = %q, want ack", ack["type"])
 	}
 }
 
@@ -624,8 +630,10 @@ type webRTCRecorder struct {
 
 func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*media.ICECandidate)) (string, error) {
 	r.sessionID, r.entrypointID, r.offerSDP = sessionID, entrypointID, offerSDP
-	for _, candidate := range r.localCandidates {
-		onLocalCandidate(candidate)
+	if onLocalCandidate != nil {
+		for _, candidate := range r.localCandidates {
+			onLocalCandidate(candidate)
+		}
 	}
 	return r.answer, nil
 }

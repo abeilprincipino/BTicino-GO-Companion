@@ -332,20 +332,10 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 				response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
 				break
 			}
-			var candidateMu sync.Mutex
-			answerWritten := false
-			pendingCandidates := make([]*media.ICECandidate, 0)
-			sendCandidate := func(candidate *media.ICECandidate) {
-				candidateMu.Lock()
-				defer candidateMu.Unlock()
-				if !answerWritten {
-					pendingCandidates = append(pendingCandidates, candidate)
-					return
-				}
-				_ = client.write(Message{Type: "candidate", Payload: mustJSON(webrtcLocalCandidatePayload{SessionID: payload.SessionID, Candidate: candidate})})
-			}
 			offerCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-			answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, sendCandidate)
+			// Home Assistant's signaling client expects one response for every
+			// request, so server candidates must be part of the SDP answer.
+			answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, nil)
 			cancel()
 			if offerErr != nil {
 				s.logger.WarnContext(r.Context(), "webrtc offer failed", "session_id", payload.SessionID, "entrypoint_id", payload.EntrypointID, "error", offerErr)
@@ -358,17 +348,6 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 			if client.write(response) != nil {
 				return
 			}
-			candidateMu.Lock()
-			answerWritten = true
-			candidates := append([]*media.ICECandidate(nil), pendingCandidates...)
-			pendingCandidates = nil
-			for _, candidate := range candidates {
-				if client.write(Message{Type: "candidate", Payload: mustJSON(webrtcLocalCandidatePayload{SessionID: sessionID, Candidate: candidate})}) != nil {
-					candidateMu.Unlock()
-					return
-				}
-			}
-			candidateMu.Unlock()
 			continue
 		case "candidate":
 			var payload webrtcCandidatePayload

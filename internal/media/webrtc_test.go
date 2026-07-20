@@ -43,6 +43,9 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 	if strings.TrimSpace(answer) == "" {
 		t.Fatal("answer is empty")
 	}
+	if !strings.Contains(answer, "a=candidate:") {
+		t.Fatalf("answer does not contain a local ICE candidate: %q", answer)
+	}
 	select {
 	case candidate := <-candidates:
 		if candidate.Candidate == "" {
