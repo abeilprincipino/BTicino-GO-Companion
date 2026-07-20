@@ -15,7 +15,7 @@ import (
 
 const (
 	maxWebSocketFrame = 64 << 10
-	heartbeatTimeout  = 60 * time.Second
+	heartbeatTimeout  = 90 * time.Second
 	writeTimeout      = 5 * time.Second
 )
 
@@ -35,18 +35,21 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &client{conn: conn}
+	disconnectReason := "client_closed"
 
 	s.clients.add(client)
-	s.logger.InfoContext(r.Context(), "websocket connected", "remote_addr", r.RemoteAddr)
+	s.logger.DebugContext(r.Context(), "state websocket connected", "remote_addr", r.RemoteAddr)
 	defer func() {
 		s.clients.remove(client)
 		_ = conn.Close()
-		s.logger.InfoContext(r.Context(), "websocket disconnected", "remote_addr", r.RemoteAddr)
+		s.logger.DebugContext(r.Context(), "state websocket disconnected", "remote_addr", r.RemoteAddr, "reason", disconnectReason)
 	}()
 
 	if client.write(Message{Type: "state", Payload: mustJSON(s.currentPayload())}) != nil {
+		disconnectReason = "initial_state_write_failed"
 		return
 	}
+	s.logger.DebugContext(r.Context(), "state websocket ready", "remote_addr", r.RemoteAddr)
 
 	lastPing := time.Now()
 	for {
@@ -55,12 +58,22 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		data, opcode, err := readClientFrame(conn)
-		if err != nil || opcode == ws.OpClose {
+		if err != nil {
+			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+				disconnectReason = "heartbeat_timeout"
+			} else {
+				disconnectReason = "read_failed"
+			}
+			return
+		}
+		if opcode == ws.OpClose {
+			disconnectReason = "client_closed"
 			return
 		}
 
 		if opcode == ws.OpPing {
 			if client.writeFrame(ws.OpPong, data) != nil {
+				disconnectReason = "pong_write_failed"
 				return
 			}
 
@@ -68,6 +81,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if opcode != ws.OpText {
+			disconnectReason = "unsupported_frame"
 			return
 		}
 
@@ -107,6 +121,16 @@ func (s *Server) BroadcastEvent(payload any) {
 
 func (s *Server) BroadcastTrace(payload any) {
 	s.broadcast(Message{Type: "trace", Payload: mustJSON(payload)})
+}
+
+// CloseWebSockets unblocks upgraded handlers before HTTP server shutdown waits for them.
+func (s *Server) CloseWebSockets() {
+	for _, client := range s.clients.all() {
+		_ = client.conn.Close()
+	}
+	for _, client := range s.webrtcClients.all() {
+		_ = client.conn.Close()
+	}
 }
 
 func (s *Server) broadcast(message Message) {
@@ -227,8 +251,10 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := &client{conn: conn}
+	s.webrtcClients.add(client)
 	var sessionID string
 	defer func() {
+		s.webrtcClients.remove(client)
 		if sessionID != "" {
 			_ = s.webrtc.Close(sessionID)
 			s.logger.InfoContext(r.Context(), "webrtc session closed", "session_id", sessionID, "reason", "socket_disconnected")

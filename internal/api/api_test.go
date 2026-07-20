@@ -473,6 +473,26 @@ func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
 	}
 }
 
+func TestServer_CloseWebSocketsClosesStateAndWebRTCConnections(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	stateConn, statePeer := net.Pipe()
+	webrtcConn, webrtcPeer := net.Pipe()
+	defer statePeer.Close()  //nolint:errcheck // test cleanup
+	defer webrtcPeer.Close() //nolint:errcheck // test cleanup
+	server.clients.add(&client{conn: stateConn})
+	server.webrtcClients.add(&client{conn: webrtcConn})
+
+	server.CloseWebSockets()
+
+	for _, peer := range []net.Conn{statePeer, webrtcPeer} {
+		if _, err := peer.Write([]byte("x")); err == nil {
+			t.Fatal("websocket peer remained connected")
+		}
+	}
+}
+
 func assertMessage(t *testing.T, reader io.ReadWriter, expectedType, expectedID string) {
 	t.Helper()
 

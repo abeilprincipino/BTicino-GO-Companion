@@ -155,6 +155,7 @@ func run(
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	apiServer.RegisterOnShutdown(server.CloseWebSockets)
 	webUI := webui.New(configStore, authStore, logger, restartCompanion, rt.Reboot, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
 	webUI.SetDiagnostics(diagnosticService)

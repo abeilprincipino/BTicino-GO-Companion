@@ -25,18 +25,19 @@ type (
 )
 
 type Server struct {
-	auth        *auth.Store
-	config      *config.Store
-	state       StateProvider
-	entrypoints EntrypointControl
-	audio       AudioControl
-	voicemail   VoicemailControl
-	clients     clientSet
-	webrtc      WebRTCControl
-	snapshot    SnapshotControl
-	runtime     RuntimeControl
-	update      UpdateControl
-	diagnostics interface {
+	auth          *auth.Store
+	config        *config.Store
+	state         StateProvider
+	entrypoints   EntrypointControl
+	audio         AudioControl
+	voicemail     VoicemailControl
+	clients       clientSet
+	webrtcClients clientSet
+	webrtc        WebRTCControl
+	snapshot      SnapshotControl
+	runtime       RuntimeControl
+	update        UpdateControl
+	diagnostics   interface {
 		Snapshot() diagnostics.Snapshot
 		Refresh(context.Context)
 	}
