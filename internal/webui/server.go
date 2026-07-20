@@ -108,7 +108,7 @@ func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restar
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, auth: authStore, logger: logger, restart: restart, reboot: reboot, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
+	return &Server{config: store, auth: authStore, logger: logger.With("component", "webui"), restart: restart, reboot: reboot, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
 }
 
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
@@ -241,9 +241,11 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.config.Update(func(cfg *config.Config) error { cfg.Logging.Level = body.Level; return nil }); err != nil {
+		s.logger.ErrorContext(r.Context(), "logging level save failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "save log level failed")
 		return
 	}
+	s.logger.InfoContext(r.Context(), "logging level changed", "level", body.Level)
 	writeJSON(w, http.StatusOK, map[string]any{"level": body.Level})
 }
 

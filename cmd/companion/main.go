@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/logging"
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -18,7 +19,8 @@ func main() {
 
 	runtime, err := logging.New("info")
 	if err != nil {
-		panic(err)
+		_, _ = fmt.Fprintf(os.Stderr, "companion logging initialization failed: %v\n", err)
+		os.Exit(1)
 	}
 	defer runtime.Close()
 	slog.SetDefault(runtime.Logger)
@@ -27,7 +29,7 @@ func main() {
 	defer cancel()
 
 	if err := app.Run(ctx, configPath, runtime.Logger, runtime.SetLevel); err != nil {
-		runtime.Logger.Error("companion stopped", "error", err)
+		runtime.Logger.Error("application stopped unexpectedly", "component", "app", "error", err)
 		os.Exit(1)
 	}
 }

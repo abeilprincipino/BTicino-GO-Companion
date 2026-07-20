@@ -79,24 +79,35 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 		if route == "" {
 			route = r.URL.Path
 		}
-		if strings.HasPrefix(r.URL.Path, "/webui/api/") {
-			return
-		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v3/health" && response.status < http.StatusBadRequest {
+		if response.status < http.StatusBadRequest {
 			return
 		}
 
-		attributes := []any{"method", r.Method, "route", route, "status", response.status, "duration", time.Since(started), "remote_addr", r.RemoteAddr}
-		if response.status >= http.StatusBadRequest {
-			if response.status == http.StatusUnauthorized || response.status == http.StatusForbidden {
-				logger.DebugContext(r.Context(), "http request rejected", attributes...)
-				return
-			}
-			logger.WarnContext(r.Context(), "http request failed", attributes...)
+		attributes := []any{
+			"method", r.Method,
+			"route", route,
+			"status", response.status,
+			"duration", time.Since(started),
+			"client_ip", clientIP(r.RemoteAddr),
+		}
+		if response.status >= http.StatusInternalServerError {
+			logger.ErrorContext(r.Context(), "http request failed", attributes...)
 			return
 		}
-		logger.DebugContext(r.Context(), "http request", attributes...)
+		if response.status == http.StatusTooManyRequests {
+			logger.WarnContext(r.Context(), "http request rejected", attributes...)
+			return
+		}
+		logger.DebugContext(r.Context(), "http request rejected", attributes...)
 	})
+}
+
+func clientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 type humanHandler struct {

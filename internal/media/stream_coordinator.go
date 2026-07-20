@@ -130,12 +130,12 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	c.mu.Lock()
 	if c.snapshot.Owner == StreamOwnerExternal {
 		c.mu.Unlock()
-		c.logger.WarnContext(ctx, "stream lease rejected; external stream active", "entrypoint_id", entrypoint.ID, "dev_addr", entrypoint.DevAddr)
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 		return nil, ErrExternalStream
 	}
 	if c.leaseID != 0 || c.factory == nil {
 		c.mu.Unlock()
-		c.logger.WarnContext(ctx, "stream lease rejected; source unavailable", "entrypoint_id", entrypoint.ID, "dev_addr", entrypoint.DevAddr, "owner", c.snapshot.Owner)
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
 		return nil, ErrStreamBusy
 	}
 	c.nextID++
@@ -145,7 +145,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "dev_addr", entrypoint.DevAddr, "health", StreamHealthStarting)
+	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
 
 	source, cleanup, err := c.factory(entrypoint, SourceEvents{
 		VideoRTP: func(packet *rtp.Packet) {
@@ -167,7 +167,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 			}
 		},
 		Failed: func(err error) {
-			c.logger.Error("managed source failed", "lease_id", lease.id, "error", err)
+			c.logger.Error("media source failed", "lease_id", lease.id, "error", err)
 			c.stop(lease, "managed source failure")
 			if events.Failed != nil {
 				events.Failed(err)
@@ -177,10 +177,10 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	if err != nil || source == nil {
 		c.finishStop(lease, nil, cleanup, "source creation failed")
 		if err != nil {
-			c.logger.ErrorContext(ctx, "create managed source", "lease_id", lease.id, "error", err)
+			c.logger.ErrorContext(ctx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
 			return nil, err
 		}
-		c.logger.ErrorContext(ctx, "create managed source returned nil", "lease_id", lease.id)
+		c.logger.ErrorContext(ctx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "factory returned nil")
 		return nil, ErrStreamBusy
 	}
 	c.mu.Lock()
@@ -195,7 +195,7 @@ func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entry
 	c.source, c.cleanup = source, cleanup
 	c.mu.Unlock()
 	if err := source.Start(ctx); err != nil {
-		c.logger.ErrorContext(ctx, "start managed source", "lease_id", lease.id, "error", err)
+		c.logger.ErrorContext(ctx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
 		c.stop(lease, "source startup failed")
 		return nil, err
 	}
@@ -328,7 +328,7 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.logger.Error("stream teardown failed", "lease_id", lease.id, "reason", reason, "error", fmt.Errorf("close managed source: %w", closeErr))
 		return
 	}
-	c.logger.Info("stream teardown complete", "lease_id", lease.id, "reason", reason)
+	c.logger.Info("stream teardown completed", "lease_id", lease.id, "reason", reason)
 }
 
 // ObserveControlTrack marks a requested track from an OpenWebNet AV start frame.

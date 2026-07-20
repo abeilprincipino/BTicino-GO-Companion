@@ -201,7 +201,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		s.logger.Debug("webrtc ICE connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 		if state == webrtc.ICEConnectionStateConnected {
-			s.logger.Info("webrtc lifecycle", "event", "ice_connected", "session_id", sessionID, "entrypoint_id", entrypointID)
+			s.logger.Info("webrtc ICE connected", "session_id", sessionID, "entrypoint_id", entrypointID)
 		}
 	})
 	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
@@ -262,8 +262,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.coordinator.Release(lease)
 		return "", context.Canceled
 	}
-	s.logger.InfoContext(ctx, "webrtc lifecycle", "event", "source_lease_acquired", "session_id", sessionID, "entrypoint_id", entrypointID)
-	s.logger.InfoContext(ctx, "webrtc lifecycle", "event", "sip_source_started", "session_id", sessionID, "entrypoint_id", entrypointID)
+	s.logger.DebugContext(ctx, "webrtc source started", "session_id", sessionID, "entrypoint_id", entrypointID)
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
@@ -346,7 +345,7 @@ func (s *WebRTCService) writeRTP(session *webRTCSession, trackName string, track
 		return
 	}
 	if session.recordOutboundRTP(trackName, packet) {
-		s.logger.Info("webrtc lifecycle", "event", "first_rtp", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "payload_type", packet.PayloadType, "ssrc", packet.SSRC, "payload_bytes", len(packet.Payload))
+		s.logger.Info("webrtc first RTP packet", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName)
 	}
 }
 
@@ -490,7 +489,8 @@ func (s *WebRTCService) closeSession(sessionID, reason string) {
 		}
 		video := session.outboundRTPStats("video")
 		audio := session.outboundRTPStats("audio")
-		s.logger.Debug("webrtc session closing", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond), "peer_connection_state", session.pc.ConnectionState().String(), "ice_connection_state", session.pc.ICEConnectionState().String(), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load(), "video_rtp_packets", video.packets, "video_rtp_payload_bytes", video.payloadBytes, "video_rtp_write_errors", video.writeErrors, "video_rtcp_receiver_reports", video.receiverReports, "video_rtcp_reported_fraction_lost", video.reportedFractionLost, "video_rtcp_reported_total_lost", video.reportedTotalLost, "video_rtcp_reported_last_sequence", video.reportedLastSequence, "video_rtcp_nack_feedback", video.nackFeedback, "video_rtcp_pli_feedback", video.pliFeedback, "audio_rtp_packets", audio.packets, "audio_rtp_payload_bytes", audio.payloadBytes, "audio_rtp_write_errors", audio.writeErrors, "audio_rtcp_receiver_reports", audio.receiverReports, "audio_rtcp_reported_fraction_lost", audio.reportedFractionLost, "audio_rtcp_reported_total_lost", audio.reportedTotalLost, "audio_rtcp_reported_last_sequence", audio.reportedLastSequence, "audio_rtcp_nack_feedback", audio.nackFeedback, "audio_rtcp_pli_feedback", audio.pliFeedback)
+		s.logger.Info("webrtc session closed", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond))
+		s.logger.Debug("webrtc session statistics", "session_id", session.id, "entrypoint_id", session.entrypointID, "peer_connection_state", session.pc.ConnectionState().String(), "ice_connection_state", session.pc.ICEConnectionState().String(), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load(), "video_rtp_packets", video.packets, "video_rtp_payload_bytes", video.payloadBytes, "video_rtp_write_errors", video.writeErrors, "video_rtcp_receiver_reports", video.receiverReports, "video_rtcp_reported_fraction_lost", video.reportedFractionLost, "video_rtcp_reported_total_lost", video.reportedTotalLost, "video_rtcp_reported_last_sequence", video.reportedLastSequence, "video_rtcp_nack_feedback", video.nackFeedback, "video_rtcp_pli_feedback", video.pliFeedback, "audio_rtp_packets", audio.packets, "audio_rtp_payload_bytes", audio.payloadBytes, "audio_rtp_write_errors", audio.writeErrors, "audio_rtcp_receiver_reports", audio.receiverReports, "audio_rtcp_reported_fraction_lost", audio.reportedFractionLost, "audio_rtcp_reported_total_lost", audio.reportedTotalLost, "audio_rtcp_reported_last_sequence", audio.reportedLastSequence, "audio_rtcp_nack_feedback", audio.nackFeedback, "audio_rtcp_pli_feedback", audio.pliFeedback)
 		_ = session.pc.Close()
 	})
 }

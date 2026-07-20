@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,7 @@ type Updater struct {
 	build   BuildInfo
 	policy  func() UpdatePolicy
 	restart RestartFunc
+	logger  *slog.Logger
 
 	mu     sync.RWMutex
 	latest string
@@ -83,7 +85,7 @@ type Updater struct {
 }
 
 func NewUpdater(source ReleaseSource, build BuildInfo, policy func() UpdatePolicy, restart RestartFunc) *Updater {
-	return &Updater{source: source, build: build, policy: policy, restart: restart}
+	return &Updater{source: source, build: build, policy: policy, restart: restart, logger: slog.Default().With("component", "system.update")}
 }
 
 func (u *Updater) Status(_ context.Context) (UpdateStatus, error) {
@@ -137,18 +139,25 @@ func (u *Updater) Check(ctx context.Context) (UpdateStatus, error) {
 	}
 	u.mu.Unlock()
 	if err != nil {
+		u.logger.WarnContext(ctx, "update check failed", "error", err)
 		return UpdateStatus{}, err
 	}
-	return u.Status(ctx)
+	status, err := u.Status(ctx)
+	if err == nil {
+		u.logger.DebugContext(ctx, "update check completed", "current_version", status.CurrentVersion, "latest_version", status.LatestVersion, "update_available", status.UpdateAvailable)
+	}
+	return status, err
 }
 
 func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
 	if err := u.available(); err != nil {
 		return UpdateStatus{}, err
 	}
+	u.logger.InfoContext(ctx, "update staging started", "current_version", u.build.Version)
 	manifest, err := u.source.Latest(ctx)
 	if err != nil {
 		u.setError(err)
+		u.logger.ErrorContext(ctx, "update staging failed", "error", err)
 		return UpdateStatus{}, err
 	}
 	if !newerVersion(manifest.TagName, u.build.Version) {
@@ -160,11 +169,13 @@ func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
 	asset, err := manifest.Asset(companionAssetName)
 	if err != nil {
 		u.setError(err)
+		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
 		return UpdateStatus{}, err
 	}
 	body, err := u.source.Download(ctx, asset)
 	if err != nil {
 		u.setError(err)
+		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
 		return UpdateStatus{}, err
 	}
 	defer body.Close() //nolint:errcheck // read error is returned below
@@ -172,12 +183,17 @@ func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
 	policy := u.currentPolicy()
 	if err := stageArchive(ctx, body, asset.Digest, policy.DataDir); err != nil {
 		u.setError(err)
+		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
 		return UpdateStatus{}, err
 	}
 	u.mu.Lock()
 	u.latest, u.staged, u.err = manifest.TagName, manifest.TagName, nil
 	u.mu.Unlock()
-	return u.Status(ctx)
+	status, err := u.Status(ctx)
+	if err == nil {
+		u.logger.InfoContext(ctx, "update staged", "target_version", manifest.TagName)
+	}
+	return status, err
 }
 
 // Install stages the newest release and restarts after the caller receives its response.
@@ -200,7 +216,10 @@ func (u *Updater) Install(ctx context.Context) (UpdateStatus, error) {
 		defer cancel()
 		if err := u.restart(restartCtx); err != nil {
 			u.setError(fmt.Errorf("restart companion: %w", err))
+			u.logger.Error("update restart failed", "staged_version", status.StagedVersion, "error", err)
+			return
 		}
+		u.logger.Info("update restart dispatched", "staged_version", status.StagedVersion)
 	}()
 
 	return status, nil

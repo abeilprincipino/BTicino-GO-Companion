@@ -144,8 +144,9 @@ func (d *streamDialer) Close() error {
 }
 
 func (d *streamDialer) listen(ctx context.Context, addr string) {
+	d.logger.Info("sip listener started", "listen_addr", addr)
 	if err := d.server.ListenAndServe(ctx, d.transport, addr); err != nil && ctx.Err() == nil {
-		d.logger.Warn("sip listener stopped", "error", err)
+		d.logger.Error("sip listener stopped", "listen_addr", addr, "error", err)
 	}
 }
 
@@ -193,14 +194,46 @@ func (d *streamDialer) Register(ctx context.Context) error {
 		}
 		return fmt.Errorf("sip: register response status=%d", response.StatusCode)
 	}
-	d.logger.InfoContext(ctx, "sip registration succeeded", "domain", d.target.URI.Host)
 	return nil
 }
 
 func (d *streamDialer) registrationLoop(ctx context.Context) {
 	defer d.registerWG.Done()
+	var lastSuccess time.Time
+	failed := false
+	tryRegister := func() {
+		if !lastSuccess.IsZero() && time.Since(lastSuccess) < registerRefreshInterval {
+			return
+		}
 
-	registrationLoop(ctx, registerRefreshInterval, registerCheckInterval, registerTimeout, d.Register)
+		registerCtx, cancel := context.WithTimeout(ctx, registerTimeout)
+		err := d.Register(registerCtx)
+		cancel()
+		if err != nil {
+			d.logger.Warn("sip registration failed", "error", err, "retry_in", registerCheckInterval)
+			failed = true
+			return
+		}
+		if failed {
+			d.logger.Info("sip registration recovered")
+		} else {
+			d.logger.Debug("sip registration succeeded")
+		}
+		failed = false
+		lastSuccess = time.Now()
+	}
+
+	tryRegister()
+	ticker := time.NewTicker(registerCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tryRegister()
+		}
+	}
 }
 
 func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeout time.Duration, register func(context.Context) error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -54,6 +55,7 @@ type Service struct {
 	registrar Registrar
 	refresh   time.Duration
 	retryMax  time.Duration
+	logger    *slog.Logger
 }
 
 func NewService(registrar Registrar) *Service {
@@ -61,7 +63,7 @@ func NewService(registrar Registrar) *Service {
 		registrar = zeroconfRegistrar{}
 	}
 
-	return &Service{registrar: registrar, refresh: refreshEvery, retryMax: retryMaximum}
+	return &Service{registrar: registrar, refresh: refreshEvery, retryMax: retryMaximum, logger: slog.Default().With("component", "discovery.mdns")}
 }
 
 func (s *Service) Advertise(advertisement Advertisement) (Registration, error) {
@@ -93,7 +95,9 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 			if err == nil {
 				current = next
 				backoff = retryInitial
+				s.logger.Info("mDNS advertisement registered", "port", next.Port)
 			} else {
+				s.logger.Warn("mDNS advertisement failed", "error", err, "retry_in", backoff)
 				if err := wait(ctx, backoff); err != nil {
 					return err
 				}
@@ -105,6 +109,7 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 		select {
 		case <-ctx.Done():
 			registration.Shutdown()
+			s.logger.Info("mDNS advertisement stopped")
 			return nil
 		case <-ticker.C:
 			next, err := snapshot()
@@ -112,6 +117,7 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 				continue
 			}
 			registration.Shutdown()
+			s.logger.Info("mDNS advertisement changed", "port", next.Port)
 			registration = nil
 		}
 	}

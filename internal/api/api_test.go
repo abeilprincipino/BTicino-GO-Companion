@@ -381,12 +381,11 @@ func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("reboot was not called")
 	}
-	select {
-	case <-logs.written:
-	case <-time.After(time.Second):
-		t.Fatal("reboot error was not logged")
+	deadline := time.Now().Add(time.Second)
+	for strings.Count(logs.String(), "system reboot failed") != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
-	if strings.Count(logs.String(), "reboot system") != 1 {
+	if strings.Count(logs.String(), "system reboot failed") != 1 {
 		t.Fatalf("reboot logs = %q", logs.String())
 	}
 }

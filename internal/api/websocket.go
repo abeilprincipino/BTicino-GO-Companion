@@ -38,18 +38,18 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	disconnectReason := "client_closed"
 
 	s.clients.add(client)
-	s.logger.DebugContext(r.Context(), "state websocket connected", "remote_addr", r.RemoteAddr)
+	s.logger.DebugContext(r.Context(), "websocket connected", "channel", "state", "client_ip", sourceIP(r))
 	defer func() {
 		s.clients.remove(client)
 		_ = conn.Close()
-		s.logger.DebugContext(r.Context(), "state websocket disconnected", "remote_addr", r.RemoteAddr, "reason", disconnectReason)
+		s.logger.DebugContext(r.Context(), "websocket disconnected", "channel", "state", "client_ip", sourceIP(r), "reason", disconnectReason)
 	}()
 
 	if client.write(Message{Type: "state", Payload: mustJSON(s.currentPayload())}) != nil {
 		disconnectReason = "initial_state_write_failed"
 		return
 	}
-	s.logger.DebugContext(r.Context(), "state websocket ready", "remote_addr", r.RemoteAddr)
+	s.logger.DebugContext(r.Context(), "websocket ready", "channel", "state", "client_ip", sourceIP(r))
 
 	lastPing := time.Now()
 	for {
@@ -87,7 +87,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 
 		message, err := ParseMessage(data)
 		if err != nil {
-			s.logger.WarnContext(r.Context(), "invalid websocket message", "remote_addr", r.RemoteAddr)
+			s.logger.DebugContext(r.Context(), "websocket message rejected", "channel", "state", "client_ip", sourceIP(r), "reason", "invalid_message")
 			if client.write(Message{Type: "error", Payload: mustJSON(map[string]string{"code": "invalid_message", "message": "message is invalid"})}) != nil {
 				return
 			}
@@ -257,7 +257,6 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 		s.webrtcClients.remove(client)
 		if sessionID != "" {
 			_ = s.webrtc.Close(sessionID)
-			s.logger.InfoContext(r.Context(), "webrtc session closed", "session_id", sessionID, "reason", "socket_disconnected")
 		}
 		_ = conn.Close()
 	}()
@@ -290,16 +289,18 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 		case "offer":
 			var payload webrtcOfferPayload
 			if json.Unmarshal(message.Payload, &payload) != nil || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.EntrypointID) == "" || strings.TrimSpace(payload.Origin) == "" || strings.TrimSpace(payload.OfferSDP) == "" || sessionID != "" {
+				s.logger.DebugContext(r.Context(), "webrtc offer rejected", "reason", "invalid_offer")
 				response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
 				break
 			}
 			answer, offerErr := s.webrtc.Offer(r.Context(), payload.SessionID, payload.EntrypointID, payload.OfferSDP)
 			if offerErr != nil {
+				s.logger.WarnContext(r.Context(), "webrtc offer failed", "session_id", payload.SessionID, "entrypoint_id", payload.EntrypointID, "error", offerErr)
 				response = webrtcError(message.ID, "offer_failed", offerErr.Error())
 				break
 			}
 			sessionID = payload.SessionID
-			s.logger.InfoContext(r.Context(), "webrtc offer received", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin, "event", "offer_received")
+			s.logger.DebugContext(r.Context(), "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin)
 			response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
 		case "candidate":
 			var payload webrtcCandidatePayload
@@ -308,10 +309,10 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			if candidateErr := s.webrtc.AddICECandidate(sessionID, payload.Candidate); candidateErr != nil {
+				s.logger.DebugContext(r.Context(), "webrtc candidate rejected", "session_id", sessionID, "error", candidateErr)
 				response = webrtcError(message.ID, "candidate_failed", candidateErr.Error())
 				break
 			}
-			s.logger.InfoContext(r.Context(), "webrtc candidate received", "session_id", sessionID, "event", "candidate_received")
 			response = Message{Type: "ack", ID: message.ID}
 		case "close":
 			var payload webrtcClosePayload
@@ -320,7 +321,6 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			_ = s.webrtc.Close(sessionID)
-			s.logger.InfoContext(r.Context(), "webrtc session closed", "session_id", sessionID, "reason", payload.Reason, "event", "close_requested")
 			response = Message{Type: "ack", ID: message.ID}
 			sessionID = ""
 		default:

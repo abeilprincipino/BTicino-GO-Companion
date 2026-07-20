@@ -73,7 +73,7 @@ func (c *AVClient) Start(ctx context.Context, highRes bool, video, audio media.F
 
 func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe media.FlowProbe) error {
 	if probe.RecentlyFlowing(c.flowWindow) {
-		c.logger.InfoContext(ctx, "av stream already flowing", "stream", kind)
+		c.logger.DebugContext(ctx, "av stream already flowing", "stream", kind)
 		return nil
 	}
 	var lastErr error
@@ -98,8 +98,9 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 			}
 			lastErr = ErrAVFlowTimeout
 		}
-		c.logger.WarnContext(ctx, "av stream attempt failed", "stream", kind, "attempt", attempt, "error", lastErr)
+		c.logger.DebugContext(ctx, "av stream attempt failed", "stream", kind, "attempt", attempt, "error", lastErr)
 	}
+	c.logger.WarnContext(ctx, "av stream start failed", "stream", kind, "attempts", c.attempts, "error", lastErr)
 	return fmt.Errorf("start %s stream after %d attempts: %w", kind, c.attempts, lastErr)
 }
 

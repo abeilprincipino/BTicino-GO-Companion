@@ -352,12 +352,12 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.repair.value == "" || !constantTimeStringEqual(code, s.repair.value) {
-		s.logger.Warn("repair code rejected")
+		s.logger.Debug("repair code rejected")
 		return "", ErrInvalidRepairCode
 	}
 	if !s.repair.expiresAt.After(s.now()) {
 		s.repair = repairCode{}
-		s.logger.Info("repair code expired")
+		s.logger.Debug("repair code expired")
 		return "", ErrRepairCodeExpired
 	}
 
@@ -376,8 +376,6 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 	}
 
 	s.repair = repairCode{}
-	s.logger.Info("repair code consumed")
-	s.logger.Info("bearer recovery completed")
 	return token, nil
 }
 
@@ -402,7 +400,7 @@ func (s *Store) removeExpiredChallenges(now time.Time) {
 	for id, challenge := range s.challenges {
 		if !challenge.expiresAt.After(now) {
 			delete(s.challenges, id)
-			s.logger.Info("pairing challenge expired")
+			s.logger.Debug("pairing challenge expired")
 		}
 	}
 }

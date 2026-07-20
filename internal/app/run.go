@@ -43,6 +43,7 @@ func run(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	appLogger := logger.With("component", "app")
 	if configPath == "" {
 		configPath = config.DefaultPath
 	}
@@ -53,8 +54,9 @@ func run(
 	}
 
 	if created {
-		logger.Info("created initial configuration", "path", configPath, "device_id", configStore.Snapshot().Companion.DeviceID)
+		appLogger.Info("configuration created", "path", configPath)
 	}
+	appLogger.Info("application starting", "config_path", configPath)
 	if setLogLevel != nil {
 		if err := setLogLevel(configStore.Snapshot().Logging.Level); err != nil {
 			return fmt.Errorf("set log level: %w", err)
@@ -79,7 +81,7 @@ func run(
 	}
 	defer func() {
 		if err := dialer.Close(); err != nil {
-			logger.Warn("close sip runtime", "error", err)
+			appLogger.Warn("sip runtime close failed", "error", err)
 		}
 	}()
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
@@ -93,7 +95,7 @@ func run(
 	}
 	defer func() {
 		if err := rtspServer.Close(); err != nil {
-			logger.Warn("close rtsp server", "error", err)
+			appLogger.Warn("RTSP server close failed", "error", err)
 		}
 	}()
 
@@ -125,7 +127,7 @@ func run(
 	}
 
 	authStore := auth.NewStore(configStore)
-	authStore.SetLogger(logger)
+	authStore.SetLogger(logger.With("component", "auth"))
 	mdns := discovery.NewService(nil)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
@@ -168,7 +170,7 @@ func run(
 
 	applyEvent := func(event core.Event) {
 		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
-			logger.Warn("apply openwebnet event", "event", event.Type(), "error", err)
+			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
 			return
 		}
 		server.BroadcastState()
@@ -199,7 +201,7 @@ func run(
 	})
 	go func() {
 		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
-			logger.Error("openwebnet listener stopped", "error", err)
+			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
 		}
 	}()
 	go func() {
@@ -231,10 +233,10 @@ func run(
 			}, nil
 		})
 		if err != nil && ctx.Err() == nil {
-			logger.Error("mDNS stopped", "error", err)
+			logger.Error("mDNS service stopped", "component", "discovery.mdns", "error", err)
 		}
 	}()
-	return serve(ctx, logger, apiListener, apiServer, webUIListener, webUIServer)
+	return serve(ctx, appLogger, apiListener, apiServer, webUIListener, webUIServer)
 }
 
 func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
@@ -254,7 +256,7 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 		}
 	}, func(packet *rtp.Packet) {
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
-			logger.Warn("bridge intercom speex", "error", err)
+			logger.Warn("intercom audio bridge write failed", "error", err)
 		}
 	}, events.RemoteBYE)
 	if err != nil {
@@ -311,7 +313,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
 	}
-	logger.Info("media source configuration resolved",
+	logger.Debug("media source configuration resolved",
 		"component", "media.source",
 		"model", sourceConfig.Model,
 		"entrypoint_id", entrypoint.ID,
@@ -357,7 +359,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := source.Close(closeCtx); err != nil {
-			logger.Warn("close media source", "error", err)
+			logger.Warn("media source close failed", "error", err)
 		}
 	}, nil
 }
@@ -375,22 +377,16 @@ func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func()
 		}
 
 		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		status, err := updater.Check(checkCtx)
+		_, err := updater.Check(checkCtx)
 		cancel()
 		if errors.Is(err, system.ErrUpdateUnavailable) {
 			logger.Info("companion update checks unavailable")
 			return
 		}
 		if err != nil {
-			logger.Warn("companion update check failed", "error", err, "retry_in", backoff)
 			delay = backoff
 			backoff = min(backoff*2, time.Hour)
 		} else {
-			logger.Info("companion update check completed",
-				"current_version", status.CurrentVersion,
-				"latest_version", status.LatestVersion,
-				"update_available", status.UpdateAvailable,
-			)
 			delay = 3 * time.Hour
 			backoff = 2 * time.Minute
 		}
@@ -446,10 +442,18 @@ func serve(
 
 	serveServer(logger, "api", apiListener, apiServer, errs)
 	serveServer(logger, "webui", webUIListener, webUIServer, errs)
+	logger.Info("application ready")
 
 	select {
 	case <-ctx.Done():
-		return shutdown(apiServer, webUIServer)
+		logger.Info("application stopping", "reason", "context canceled")
+		err := shutdown(apiServer, webUIServer)
+		if err != nil {
+			logger.Error("application shutdown failed", "error", err)
+			return err
+		}
+		logger.Info("application stopped")
+		return nil
 	case err := <-errs:
 		return errors.Join(err, shutdown(apiServer, webUIServer))
 	}
@@ -457,7 +461,7 @@ func serve(
 
 func serveServer(logger *slog.Logger, name string, listener net.Listener, server *http.Server, errs chan<- error) {
 	go func() {
-		logger.Info(name+" listening", "addr", listener.Addr().String())
+		logger.Info("server listening", "server", name, "address", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("serve %s: %w", name, err)
 		}

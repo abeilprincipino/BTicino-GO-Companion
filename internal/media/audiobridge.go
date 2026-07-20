@@ -97,13 +97,12 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 	b.restarts = 0
 	b.mu.Unlock()
 
-	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink", "input_codec", "Speex/8000", "output_codec", "Opus/48000")
+	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink")
 	pipeline, err := b.gstreamer.StartAudioBridge(ctx)
 	if err != nil {
 		b.mu.Lock()
 		b.active = false
 		b.mu.Unlock()
-		b.logger.ErrorContext(ctx, "audio bridge start failed", "error", err)
 		return err
 	}
 
@@ -178,7 +177,7 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 		if err == nil {
 			err = ErrAudioBridgeUnavailable
 		}
-		b.logger.Error("audio bridge restart failed", "generation", generation, "attempt", attempt, "error", err)
+		b.logger.Warn("audio bridge restart failed", "generation", generation, "attempt", attempt, "error", err)
 		b.restartFailure(failed, err)
 		return
 	}
@@ -196,7 +195,7 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 
 func (b *AudioBridge) restartFailure(failed AudioPipeline, err error) {
 	_ = failed
-	b.logger.Error("audio bridge restart budget exhausted", "attempts", audioBridgeRestartLimit, "error", err)
+	b.logger.Error("audio bridge restart exhausted", "attempts", audioBridgeRestartLimit, "error", err)
 	if b.failure != nil {
 		b.failure(err)
 	}
@@ -273,7 +272,6 @@ func (b *AudioBridge) StopContext(ctx context.Context) error {
 	}
 
 	if err != nil {
-		b.logger.Error("audio bridge stop failed", "error", err)
 		return err
 	}
 	b.logger.Info("audio bridge stopped")
@@ -353,7 +351,7 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 			_ = p.Close()
 			return nil, fmt.Errorf("start audio bridge pipeline: %w", err)
 		}
-		g.logger.Debug("audio bridge pipeline started", "pipeline", audioPipelineName(index), "generation", 1)
+		g.logger.Debug("audio bridge pipeline started", "pipeline", audioPipelineName(index))
 		p.waiters.Add(1)
 		go p.wait(command, audioPipelineName(index))
 	}
@@ -382,7 +380,6 @@ func (p *gstreamerAudioPipeline) wait(command *exec.Cmd, name string) {
 	closed := p.closed
 	p.mu.Unlock()
 	if !closed {
-		p.logger.Error("audio bridge pipeline exited", "pipeline", name, "error", err)
 		if err == nil {
 			err = fmt.Errorf("audio bridge pipeline %s exited unexpectedly", name)
 		}

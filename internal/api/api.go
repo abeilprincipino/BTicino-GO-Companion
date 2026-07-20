@@ -49,7 +49,7 @@ func NewServer(authStore *auth.Store, configStore *config.Store, state StateProv
 		logger = slog.Default()
 	}
 
-	return &Server{auth: authStore, config: configStore, state: state, logger: logger}
+	return &Server{auth: authStore, config: configStore, state: state, logger: logger.With("component", "api")}
 }
 
 func (s *Server) SetEntrypoints(v EntrypointControl) { s.entrypoints = v }
@@ -130,11 +130,11 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) pairChallenge(w http.ResponseWriter, r *http.Request) {
 	challenge, err := s.auth.CreateChallenge(sourceIP(r))
 	if err != nil {
-		s.logger.WarnContext(r.Context(), "pairing challenge rejected", "source_ip", sourceIP(r), "error", err)
+		s.logger.DebugContext(r.Context(), "pairing challenge rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
-	s.logger.InfoContext(r.Context(), "pairing challenge created", "source_ip", sourceIP(r))
+	s.logger.InfoContext(r.Context(), "pairing challenge created", "client_ip", sourceIP(r))
 
 	writeOK(w, http.StatusCreated, map[string]any{"challenge_id": challenge.ID, "expires_at": challenge.ExpiresAt.Format(time.RFC3339)})
 }
@@ -150,11 +150,11 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 
 	token, err := s.auth.Claim(sourceIP(r), body.ChallengeID, body.ClaimCode)
 	if err != nil {
-		s.logger.WarnContext(r.Context(), "pairing claim rejected", "source_ip", sourceIP(r), "error", err)
+		s.logger.DebugContext(r.Context(), "pairing claim rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
-	s.logger.InfoContext(r.Context(), "companion pairing completed", "source_ip", sourceIP(r))
+	s.logger.InfoContext(r.Context(), "pairing completed", "client_ip", sourceIP(r))
 
 	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
 }
@@ -162,7 +162,7 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rotateBearer(w http.ResponseWriter, r *http.Request) {
 	token, err := s.auth.RotateBearer()
 	if err != nil {
-		s.logger.WarnContext(r.Context(), "bearer recovery rejected", "source_ip", sourceIP(r), "error", err)
+		s.logger.DebugContext(r.Context(), "bearer rotation rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
 		return
 	}
@@ -193,7 +193,7 @@ func (s *Server) recoverBearer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.InfoContext(r.Context(), "companion bearer recovered", "source_ip", sourceIP(r))
+	s.logger.InfoContext(r.Context(), "bearer recovered", "client_ip", sourceIP(r))
 	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
 }
 
@@ -226,7 +226,7 @@ func (s *Server) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || token == "" || s.auth == nil || !s.auth.ValidateBearer(token) {
-			s.logger.WarnContext(r.Context(), "bearer authentication rejected", "route", r.Method+" "+r.URL.Path, "source_ip", sourceIP(r))
+			s.logger.DebugContext(r.Context(), "bearer authentication rejected", "route", r.Pattern, "client_ip", sourceIP(r))
 			writeError(w, http.StatusUnauthorized, "unauthorized", "a valid bearer token is required")
 			return
 		}

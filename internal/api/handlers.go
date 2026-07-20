@@ -122,7 +122,7 @@ func writeCommandError(w http.ResponseWriter, err error) {
 		code = "unavailable"
 	}
 
-	writeError(w, status, code, err.Error())
+	writeError(w, status, code, "command could not be completed")
 }
 
 func (s *Server) systemReboot(w http.ResponseWriter, r *http.Request) {
@@ -136,9 +136,10 @@ func (s *Server) systemReboot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, http.StatusOK, nil)
+	s.logger.InfoContext(r.Context(), "system reboot requested")
 	go func() {
 		if err := s.runtime.Reboot(context.WithoutCancel(r.Context())); err != nil {
-			s.logger.Error("reboot system", "error", err)
+			s.logger.Error("system reboot failed", "error", err)
 		}
 	}()
 }
@@ -160,9 +161,10 @@ func (s *Server) systemServiceRestart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, http.StatusAccepted, nil)
+	s.logger.InfoContext(r.Context(), "service restart requested", "service_name", serviceName)
 	go func() {
 		if err := s.runtime.Restart(context.WithoutCancel(r.Context()), serviceName); err != nil {
-			s.logger.Error("restart service", "service", serviceName, "error", err)
+			s.logger.Error("service restart failed", "service_name", serviceName, "error", err)
 		}
 	}()
 }
