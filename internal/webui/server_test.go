@@ -318,6 +318,32 @@ func TestUpdateInstallRequiresConfiguredSessionAndInvokesUpdater(t *testing.T) {
 	}
 }
 
+func TestUpdateCheckRequiresConfiguredSessionAndInvokesUpdater(t *testing.T) {
+	t.Parallel()
+
+	checked := make(chan struct{}, 1)
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{check: func(context.Context) (system.UpdateStatus, error) {
+		checked <- struct{}{}
+		return system.UpdateStatus{CurrentVersion: "v1.2.3", LatestVersion: "v1.2.4", UpdateAvailable: true, Stage: "available"}, nil
+	}})
+
+	response := request(t, server, http.MethodPost, "/webui/api/management/update/check", map[string]string{}, nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated check status = %d", response.Code)
+	}
+
+	response = request(t, server, http.MethodPost, "/webui/api/management/update/check", map[string]string{}, configuredSession(t, server))
+	if response.Code != http.StatusOK {
+		t.Fatalf("check status = %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-checked:
+	case <-time.After(time.Second):
+		t.Fatal("update check was not requested")
+	}
+}
+
 func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -450,11 +476,19 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, dst any) 
 
 type fakeUpdateProvider struct {
 	status  system.UpdateStatus
+	check   func(context.Context) (system.UpdateStatus, error)
 	install func(context.Context) (system.UpdateStatus, error)
 }
 
 func (f fakeUpdateProvider) Status(context.Context) (system.UpdateStatus, error) {
 	return f.status, nil
+}
+
+func (f fakeUpdateProvider) Check(ctx context.Context) (system.UpdateStatus, error) {
+	if f.check == nil {
+		return f.status, nil
+	}
+	return f.check(ctx)
 }
 
 func (f fakeUpdateProvider) Install(ctx context.Context) (system.UpdateStatus, error) {

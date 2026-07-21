@@ -167,6 +167,7 @@ function switchPage(pageId) {
   if (pageId === 'configEntrypoints') loadConfig().then(renderEntrypointsConfig).catch(function(err) { handleApiError(err, 'Failed to load config'); });
   if (pageId === 'configHomeKit') renderHomeKitConfig();
   if (pageId === 'managementSystem') renderSystemConfig();
+  if (pageId === 'managementUpdates') renderUpdatesPage();
   if (pageId === 'adminUser') renderAdminUser();
   startPolling(pageId);
 }
@@ -855,43 +856,72 @@ function renderAbout() {
   var cachedStatus = getCached('/webui/api/management/diagnostics');
   if (cachedStatus) renderStatusData(cachedStatus);
   apiGet('/webui/api/management/diagnostics', { cache: true }).then(renderStatusData).catch(function(err) { handleApiError(err); });
+}
+
+function renderUpdatesPage() {
   loadUpdateStatus();
 }
 
 function loadUpdateStatus() {
   apiGet('/webui/api/management/update').then(function(update) {
     renderUpdateStatus(update);
-    if (update.update_available) toast.show({ id: 'update-available', kind: 'attention', message: 'Companion update ' + (update.latest_version || '') + ' is available.' });
-    if (update.restart_required) toast.show({ id: 'update-restart', kind: 'attention', message: 'Companion update is staged and will activate on restart.' });
-  }).catch(function(err) { handleApiError(err); });
+  }).catch(function(err) { handleApiError(err, 'Failed to load update status'); });
 }
 
 function renderUpdateStatus(update) {
-  var badge = document.getElementById('aboutUpdateBadge');
+  var badge = document.getElementById('updatesStageBadge');
   if (!badge) return;
   var label = update.stage;
+  var description = '';
   if (update.stage === 'available') {
     label = update.latest_version || 'Available';
     badge.className = 'badge badge-info';
+    description = 'A newer release is available. Install it to stage the update and restart Companion.';
   } else if (update.stage === 'idle') {
     label = 'Up-to-date';
     badge.className = 'badge badge-success';
+    description = 'Companion is running the latest detected release.';
   } else if (update.stage === 'staged') {
     label = 'Restart required';
     badge.className = 'badge badge-info';
+    description = 'Update ' + (update.staged_version || '') + ' is staged and will activate when Companion restarts.';
   } else if (update.stage === 'failed') {
     label = 'Update failed';
     badge.className = 'badge badge-danger';
+    description = update.error || 'The last update check or installation failed.';
+  } else if (update.stage === 'unavailable') {
+    label = 'Unavailable';
+    badge.className = 'badge badge-info';
+    description = 'Updates are unavailable because this build has no configured release source.';
   } else {
     badge.className = 'badge badge-info';
+    description = 'Update status is not available yet.';
   }
   badge.textContent = label;
-  var install = document.getElementById('aboutUpdateInstall');
+  document.getElementById('updatesCurrentVersion').textContent = update.current_version || '-';
+  document.getElementById('updatesLatestVersion').textContent = update.latest_version || '-';
+  document.getElementById('updatesDescription').textContent = description;
+  var install = document.getElementById('updatesInstall');
   if (install) install.classList.toggle('hidden', !update.update_available);
 }
 
+function checkForUpdates() {
+  var button = document.getElementById('updatesCheck');
+  if (button) button.disabled = true;
+  setStatus('updatesStatus', 'Checking for updates...');
+  apiPost('/webui/api/management/update/check', {}).then(function(update) {
+    renderUpdateStatus(update);
+    setStatus('updatesStatus', update.update_available ? 'An update is available.' : 'Companion is up-to-date.', update.update_available ? 'var(--info)' : 'var(--success)');
+  }).catch(function(err) {
+    setStatus('updatesStatus', err.message || 'Update check failed.', 'var(--danger)');
+    handleApiError(err);
+  }).finally(function() {
+    if (button) button.disabled = false;
+  });
+}
+
 function installUpdate() {
-  var button = document.getElementById('aboutUpdateInstall');
+  var button = document.getElementById('updatesInstall');
   if (button) button.disabled = true;
   apiPost('/webui/api/management/update', {}).then(function(update) {
     if (!update.restart_required) {

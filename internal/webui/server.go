@@ -43,6 +43,7 @@ type FrameProvider interface {
 type DiagnosticsProvider interface{ Snapshot() diagnostics.Snapshot }
 type UpdateProvider interface {
 	Status(context.Context) (system.UpdateStatus, error)
+	Check(context.Context) (system.UpdateStatus, error)
 	Install(context.Context) (system.UpdateStatus, error)
 }
 
@@ -137,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /webui/api/management/system", s.requireReady(s.handleSystemConfig))
 	mux.HandleFunc("GET /webui/api/management/diagnostics", s.requireReady(s.handleStatus))
 	mux.HandleFunc("GET /webui/api/management/update", s.requireReady(s.handleUpdateStatus))
+	mux.HandleFunc("POST /webui/api/management/update/check", s.requireReady(s.handleUpdateCheck))
 	mux.HandleFunc("POST /webui/api/management/update", s.requireReady(s.handleUpdateInstall))
 	mux.HandleFunc("GET /webui/api/logs/companion", s.requireReady(s.handleLogs))
 	mux.HandleFunc("GET /webui/api/logs/companion/level", s.requireReady(s.handleLogging))
@@ -189,6 +191,23 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, status)
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
+		return
+	}
+
+	status, err := s.update.Check(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "update check failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func readMemAvailableKB() int64 {

@@ -93,10 +93,6 @@
             <span class="info-label">Git SHA</span>
             <span class="info-value mono" id="aboutGitSHA">-</span>
           </div>
-          <div class="info-row">
-            <span class="info-label">Update</span>
-            <span class="info-value"><span id="aboutUpdateBadge" class="badge badge-info">-</span> <button id="aboutUpdateInstall" class="btn btn-primary btn-sm hidden" onclick="installUpdate()">Update</button></span>
-          </div>
         </div>
         <div class="card">
           <div class="card-header">Status</div>
@@ -249,8 +245,24 @@
 
     <div id="managementUpdatesPage" class="page hidden">
       <h1 class="page-title">Updates</h1>
-      <p class="page-desc">Companion update management will be available here.</p>
-      <div class="card section"><div class="card-header">Updates</div><p class="card-desc">This page is not implemented yet.</p></div>
+      <p class="page-desc">Check for signed Companion releases, install an available update, and review the active release state.</p>
+      <div class="grid grid-2 section">
+        <div class="card">
+          <div class="card-header">Release</div>
+          <div class="info-row"><span class="info-label">Current version</span><span id="updatesCurrentVersion" class="info-value mono">-</span></div>
+          <div class="info-row"><span class="info-label">Latest version</span><span id="updatesLatestVersion" class="info-value mono">-</span></div>
+          <div class="info-row"><span class="info-label">Status</span><span class="info-value"><span id="updatesStageBadge" class="badge badge-info">-</span></span></div>
+        </div>
+        <div class="card">
+          <div class="card-header">Actions</div>
+          <p id="updatesDescription" class="card-desc">Loading update status.</p>
+          <div class="header-actions">
+            <button id="updatesCheck" class="btn btn-secondary btn-sm" type="button" onclick="checkForUpdates()">Check for Updates</button>
+            <button id="updatesInstall" class="btn btn-primary btn-sm hidden" type="button" onclick="installUpdate()">Install Update</button>
+          </div>
+          <div id="updatesStatus" class="form-status" aria-live="polite"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Admin: User -->
