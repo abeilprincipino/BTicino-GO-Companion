@@ -159,6 +159,35 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 	}
 }
 
+func TestHomeKitConfigExposesPairingDetailsAndSavesBridgeSettings(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServer(t, nil)
+	cookie := configuredSession(t, server)
+
+	response := request(t, server, http.MethodGet, "/webui/api/config/homekit", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("get homekit config status = %d: %s", response.Code, response.Body.String())
+	}
+	var current editableHomeKit
+	decodeResponse(t, response, &current)
+	if current.PIN == "" || current.Name == "" || current.Port == 0 {
+		t.Fatalf("homekit config = %#v, want PIN, name, and port", current)
+	}
+
+	response = request(t, server, http.MethodPut, "/webui/api/config/homekit", editableHomeKit{
+		Enabled: true,
+		Name:    "Front Door",
+		Port:    12345,
+	}, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save homekit config status = %d: %s", response.Code, response.Body.String())
+	}
+	if got := store.Snapshot().HomeKit; !got.Enabled || got.Name != "Front Door" || got.Port != 12345 {
+		t.Fatalf("saved homekit config = %#v", got)
+	}
+}
+
 func TestStatusIncludesRuntimeMetrics(t *testing.T) {
 	server, _ := testServer(t, nil)
 	cookie := configuredSession(t, server)

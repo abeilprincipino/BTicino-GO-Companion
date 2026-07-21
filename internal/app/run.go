@@ -7,6 +7,7 @@ import (
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/discovery"
+	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
 	"bticino-go-companion/internal/signaling"
@@ -135,6 +136,11 @@ func run(
 	authStore := auth.NewStore(configStore)
 	authStore.SetLogger(logger.With("component", "auth"))
 	mdns := discovery.NewService(nil)
+	homeKit, err := homekit.NewManager(configStore)
+	if err != nil {
+		return fmt.Errorf("create homekit manager: %w", err)
+	}
+	homeKit.SetControllers(openWebNetControl, openWebNetControl, openWebNetControl)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
 	server.SetEntrypoints(openWebNetControl)
@@ -173,12 +179,12 @@ func run(
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go checkUpdates(ctx, updater, server.BroadcastState, logger)
-
 	applyEvent := func(event core.Event) {
 		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
 			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
 			return
 		}
+		homeKit.Sync(projector.Snapshot())
 		server.BroadcastState()
 		server.BroadcastEvent(map[string]any{"type": event.Type()})
 	}
@@ -292,6 +298,9 @@ func run(
 		}
 		if _, err := refreshVoicemail(probeCtx); err != nil {
 			logger.Debug("openwebnet initial voicemail state unavailable", "error", err)
+		}
+		if err := homeKit.Run(ctx, system.CompanionDataDir, logger); err != nil && ctx.Err() == nil {
+			logger.Error("homekit bridge stopped", "component", "homekit", "error", err)
 		}
 	}()
 	diagnosticService.Start(ctx)

@@ -227,6 +227,11 @@
       <p class="page-desc">Configure Companion HomeKit exposure.</p>
       <div class="card section"><div class="card-header">HomeKit</div>
         <label class="form-check"><input id="homeKitEnabled" type="checkbox"> Enable HomeKit</label>
+        <label class="form-label" for="homeKitName">Bridge name</label>
+        <input id="homeKitName" class="form-input" type="text" maxlength="64">
+        <label class="form-label" for="homeKitPort">Port</label>
+        <input id="homeKitPort" class="form-input" type="number" min="1" max="65535">
+        <p class="card-desc">Pairing code: <code id="homeKitPIN">-</code></p>
         <div class="flex-between"><span id="homeKitStatus" class="form-status"></span><button class="btn btn-primary" onclick="saveHomeKitConfig(this)">Save</button></div>
       </div>
     </div>

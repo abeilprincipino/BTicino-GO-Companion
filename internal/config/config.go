@@ -112,6 +112,8 @@ type Service struct {
 type HomeKit struct {
 	Enabled bool   `yaml:"enabled"`
 	PIN     string `yaml:"pin"`
+	Name    string `yaml:"name"`
+	Port    uint16 `yaml:"port"`
 }
 
 // persistedConfig defines the on-disk boundary. Device metadata is refreshed at
@@ -215,6 +217,8 @@ func Default(metadata Metadata) (Config, error) {
 		HomeKit: HomeKit{
 			Enabled: false,
 			PIN:     homeKitPIN,
+			Name:    "BTicino Companion",
+			Port:    51826,
 		},
 	}
 	if err := ApplyMetadata(&cfg, metadata); err != nil {
@@ -355,7 +359,6 @@ func Validate(cfg Config) error {
 	if cfg.HomeKit.PIN != "" && !validHomeKitPIN(cfg.HomeKit.PIN) {
 		return ErrInvalidHomeKitPIN
 	}
-
 	return nil
 }
 

@@ -245,14 +245,21 @@ function buildNav() {
 }
 
 function renderHomeKitConfig() {
-  apiGet('/webui/api/config/homekit').then(function(data) {
-    document.getElementById('homeKitEnabled').checked = !!data.enabled;
-    setStatus('homeKitStatus', '');
+   apiGet('/webui/api/config/homekit').then(function(data) {
+     document.getElementById('homeKitEnabled').checked = !!data.enabled;
+     document.getElementById('homeKitName').value = data.name || 'BTicino Companion';
+     document.getElementById('homeKitPort').value = data.port || 51826;
+     document.getElementById('homeKitPIN').textContent = data.pin || '-';
+     setStatus('homeKitStatus', '');
   }).catch(function(err) { handleApiError(err, 'Failed to load HomeKit configuration'); });
 }
 
 function saveHomeKitConfig(button) {
-  apiPut('/webui/api/config/homekit', { enabled: document.getElementById('homeKitEnabled').checked }).then(function() {
+  apiPut('/webui/api/config/homekit', {
+    enabled: document.getElementById('homeKitEnabled').checked,
+    name: document.getElementById('homeKitName').value,
+    port: Number(document.getElementById('homeKitPort').value)
+  }).then(function() {
     setStatus('homeKitStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)');
   }).catch(function(err) { handleApiError(err); });
 }

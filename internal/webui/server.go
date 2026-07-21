@@ -84,7 +84,10 @@ type editableSystem struct {
 }
 
 type editableHomeKit struct {
-	Enabled bool `json:"enabled"`
+	Enabled bool   `json:"enabled"`
+	PIN     string `json:"pin"`
+	Name    string `json:"name"`
+	Port    uint16 `json:"port"`
 }
 
 type loginRequest struct {
@@ -513,7 +516,7 @@ func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
-		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.HomeKit.Enabled})
+		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.HomeKit.Enabled, PIN: cfg.HomeKit.PIN, Name: cfg.HomeKit.Name, Port: cfg.HomeKit.Port})
 		return
 	}
 	if !s.sameOrigin(w, r) {
@@ -523,7 +526,16 @@ func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &next) {
 		return
 	}
-	if err := s.config.Update(func(cfg *config.Config) error { cfg.HomeKit.Enabled = next.Enabled; return nil }); err != nil {
+	if err := s.config.Update(func(cfg *config.Config) error {
+		cfg.HomeKit.Enabled = next.Enabled
+		if strings.TrimSpace(next.Name) != "" {
+			cfg.HomeKit.Name = strings.TrimSpace(next.Name)
+		}
+		if next.Port != 0 {
+			cfg.HomeKit.Port = next.Port
+		}
+		return nil
+	}); err != nil {
 		writeError(w, http.StatusBadRequest, "configuration is invalid")
 		return
 	}
