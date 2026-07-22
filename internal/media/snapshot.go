@@ -64,6 +64,7 @@ func NewSnapshotManager(dir string, logger *slog.Logger) *SnapshotManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return newSnapshotManager(dir, logger, gstreamerSnapshotRunner{})
 }
 
@@ -71,6 +72,7 @@ func newSnapshotManager(dir string, logger *slog.Logger, runner snapshotRunner) 
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &SnapshotManager{dir: dir, logger: logger, runner: runner}
 }
 
@@ -79,6 +81,7 @@ func (s *SnapshotManager) SetOnCaptured(callback func()) {
 	if s == nil {
 		return
 	}
+
 	s.mu.Lock()
 	s.onCaptured = callback
 	s.mu.Unlock()
@@ -94,8 +97,9 @@ func (s *SnapshotManager) Arm(entrypointID string) *snapshotAttempt {
 	if s.active != nil {
 		s.active.Close()
 	}
+
 	s.nextID++
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- snapshotAttempt.Close owns cancellation.
 	attempt := &snapshotAttempt{
 		manager: s, entrypointID: entrypointID, id: s.nextID,
 		ctx: ctx, cancel: cancel, packets: make(chan []byte, snapshotPacketBufferSize),
@@ -104,6 +108,7 @@ func (s *SnapshotManager) Arm(entrypointID string) *snapshotAttempt {
 	s.mu.Unlock()
 
 	go attempt.run()
+
 	return attempt
 }
 
@@ -112,20 +117,25 @@ func (s *SnapshotManager) Latest(entrypointID string) ([]byte, error) {
 	if s == nil || s.dir == "" {
 		return nil, ErrSnapshotUnavailable
 	}
+
 	path, ok := s.path(entrypointID)
 	if !ok {
 		return nil, ErrSnapshotUnavailable
 	}
+
 	image, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrSnapshotNotFound
 	}
+
 	if err != nil {
 		return nil, fmt.Errorf("read latest snapshot: %w", err)
 	}
+
 	if _, ok := firstJPEG(image); !ok {
 		return nil, ErrSnapshotNotFound
 	}
+
 	return image, nil
 }
 
@@ -134,10 +144,12 @@ func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
 	if a == nil || packet == nil {
 		return
 	}
+
 	raw, err := packet.Marshal()
 	if err != nil {
 		return
 	}
+
 	select {
 	case a.packets <- raw:
 	default:
@@ -152,11 +164,13 @@ func (a *snapshotAttempt) Close() {
 
 func (a *snapshotAttempt) run() {
 	defer a.finish()
+
 	output, err := os.CreateTemp("", "bticino-snapshot-*.mjpeg")
 	if err != nil {
 		a.manager.logger.Warn("create snapshot output", "entrypoint_id", a.entrypointID, "error", err)
 		return
 	}
+
 	outputPath := output.Name()
 	if err := output.Close(); err != nil {
 		a.manager.logger.Warn("close snapshot output", "entrypoint_id", a.entrypointID, "error", err)
@@ -166,6 +180,7 @@ func (a *snapshotAttempt) run() {
 
 	ctx, cancel := context.WithTimeout(a.ctx, snapshotCaptureTimeout)
 	defer cancel()
+
 	process, err := a.manager.runner.Start(ctx, outputPath)
 	if err != nil {
 		a.manager.logger.Warn("start snapshot capture", "entrypoint_id", a.entrypointID, "error", err)
@@ -182,6 +197,7 @@ func (a *snapshotAttempt) run() {
 
 	poll := time.NewTicker(snapshotPollInterval)
 	defer poll.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -193,11 +209,14 @@ func (a *snapshotAttempt) run() {
 			if err != nil {
 				continue
 			}
+
 			image, ok := firstJPEG(data)
 			if !ok || !a.manager.publish(a, image) {
 				continue
 			}
+
 			a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image))
+
 			return
 		}
 	}
@@ -217,45 +236,60 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 		s.mu.Unlock()
 		return false
 	}
+
 	path, ok := s.path(attempt.entrypointID)
 	if !ok {
 		s.mu.Unlock()
 		return false
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		s.mu.Unlock()
 		s.logger.Warn("create snapshot directory", "error", err)
+
 		return false
 	}
+
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".snapshot-*.jpg")
 	if err != nil {
 		s.mu.Unlock()
 		s.logger.Warn("create snapshot file", "error", err)
+
 		return false
 	}
+
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath) //nolint:errcheck // removed after successful rename too
+
 	if _, err := temporary.Write(image); err != nil {
 		_ = temporary.Close()
 		s.mu.Unlock()
 		s.logger.Warn("write snapshot", "error", err)
+
 		return false
 	}
+
 	if err := temporary.Close(); err != nil {
 		s.mu.Unlock()
 		s.logger.Warn("close snapshot", "error", err)
+
 		return false
 	}
+
 	if err := os.Rename(temporaryPath, path); err != nil {
 		s.mu.Unlock()
 		s.logger.Warn("publish snapshot", "error", err)
+
 		return false
 	}
+
 	callback := s.onCaptured
 	s.mu.Unlock()
+
 	if callback != nil {
 		callback()
 	}
+
 	return true
 }
 
@@ -264,6 +298,7 @@ func (s *SnapshotManager) path(entrypointID string) (string, bool) {
 	if entrypointID == "" || entrypointID == "." || entrypointID == ".." || filepath.Base(entrypointID) != entrypointID || strings.ContainsRune(entrypointID, filepath.Separator) {
 		return "", false
 	}
+
 	return filepath.Join(s.dir, "snapshots", entrypointID+".jpg"), true
 }
 
@@ -272,10 +307,12 @@ func firstJPEG(data []byte) ([]byte, bool) {
 	if start < 0 {
 		return nil, false
 	}
+
 	end := bytes.Index(data[start+2:], []byte{0xff, 0xd9})
 	if end < 0 {
 		return nil, false
 	}
+
 	return append([]byte(nil), data[start:start+end+4]...), true
 }
 
@@ -287,18 +324,22 @@ func mustResolveSnapshotAddress() *net.UDPAddr {
 type gstreamerSnapshotRunner struct{}
 
 func (gstreamerSnapshotRunner) Start(ctx context.Context, outputPath string) (snapshotProcess, error) {
-	command := exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q",
+	// outputPath comes from os.CreateTemp and is passed as an argument, not through a shell.
+	command := exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", // #nosec G204 -- fixed executable and pipeline; generated output path is an argument.
 		"udpsrc", "address=127.0.0.1", "port=51074", "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=96",
 		"!", "rtph264depay", "!", "h264parse", "!", "imxvpudec", "!", "jpegenc", "quality=90", "!", "filesink", "location="+outputPath,
 	)
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
+
 	process := &gstreamerSnapshotProcess{command: command, done: make(chan struct{})}
 	go func() {
 		_ = command.Wait()
+
 		close(process.done)
 	}()
+
 	return process, nil
 }
 
@@ -313,7 +354,9 @@ func (p *gstreamerSnapshotProcess) Close() error {
 		if p.command.Process != nil {
 			_ = p.command.Process.Kill()
 		}
+
 		<-p.done
 	})
+
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"sync"
@@ -184,6 +185,7 @@ func newCameraSessionManager(coordinator *media.StreamCoordinator, entrypoint co
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	m := &cameraSessionManager{
 		coordinator: coordinator,
 		entrypoint:  entrypoint,
@@ -191,6 +193,7 @@ func newCameraSessionManager(coordinator *media.StreamCoordinator, entrypoint co
 		logger:      logger,
 	}
 	m.configureService()
+
 	return m
 }
 
@@ -231,12 +234,15 @@ func (m *cameraSessionManager) configureService() {
 		if request == nil {
 			return
 		}
+
 		m.logger.Info("homekit camera endpoints requested", "entrypoint_id", m.entrypoint.ID)
+
 		response, err := m.setupEndpoints(value, request)
 		if err != nil {
 			m.logger.Error("configure homekit camera endpoints", "entrypoint_id", m.entrypoint.ID, "error", err)
 			return
 		}
+
 		m.service.SetupEndpoints.SetValue(response)
 	})
 	m.service.SelectedRTPStreamConfiguration.OnSetRemoteValue(m.handleSelectedStreamConfiguration)
@@ -247,9 +253,11 @@ func (m *cameraSessionManager) setupEndpoints(data []byte, httpRequest *http.Req
 	if err := tlv8.Unmarshal(data, &request); err != nil {
 		return nil, fmt.Errorf("decode setup endpoints: %w", err)
 	}
+
 	if request.SessionID == "" || net.ParseIP(request.Address.IPAddr) == nil || request.Address.VideoRTPPort == 0 || request.Address.AudioRTPPort == 0 {
 		return nil, errors.New("invalid setup endpoints request")
 	}
+
 	if request.VideoCrypto.CryptoSuite != cameraCryptoAESCM128HMACSHA180 || request.AudioCrypto.CryptoSuite != cameraCryptoAESCM128HMACSHA180 {
 		return nil, errors.New("unsupported SRTP crypto suite")
 	}
@@ -258,10 +266,12 @@ func (m *cameraSessionManager) setupEndpoints(data []byte, httpRequest *http.Req
 	if err != nil {
 		return nil, fmt.Errorf("detect local address: %w", err)
 	}
+
 	videoConn, videoPort, err := cameraUDPPort()
 	if err != nil {
 		return nil, fmt.Errorf("allocate video port: %w", err)
 	}
+
 	audioConn, audioPort, err := cameraUDPPort()
 	if err != nil {
 		_ = videoConn.Close()
@@ -272,24 +282,31 @@ func (m *cameraSessionManager) setupEndpoints(data []byte, httpRequest *http.Req
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, err
 	}
+
 	audioResponseCrypto, err := cameraCrypto()
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, err
 	}
+
 	videoSRTP, err := cameraSRTPContext(videoResponseCrypto)
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, fmt.Errorf("create video SRTP context: %w", err)
 	}
+
 	audioSRTP, err := cameraSRTPContext(audioResponseCrypto)
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, fmt.Errorf("create audio SRTP context: %w", err)
 	}
 
@@ -297,12 +314,15 @@ func (m *cameraSessionManager) setupEndpoints(data []byte, httpRequest *http.Req
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, err
 	}
+
 	audioSSRC, err := cameraRandomUint32()
 	if err != nil {
 		_ = videoConn.Close()
 		_ = audioConn.Close()
+
 		return nil, err
 	}
 
@@ -346,6 +366,7 @@ func (m *cameraSessionManager) setupEndpoints(data []byte, httpRequest *http.Req
 		m.closeSession(session)
 		return nil, fmt.Errorf("encode setup endpoints response: %w", err)
 	}
+
 	return response, nil
 }
 
@@ -354,12 +375,15 @@ func (m *cameraSessionManager) handleSelectedStreamConfiguration(data []byte) er
 	if err := tlv8.Unmarshal(data, &request); err != nil {
 		return fmt.Errorf("decode selected stream configuration: %w", err)
 	}
+
 	m.mu.Lock()
 	session := m.active
 	m.mu.Unlock()
+
 	if session == nil || session.id != request.Control.SessionID {
 		return errors.New("homekit camera session is unavailable")
 	}
+
 	m.logger.Info("homekit camera stream command", "entrypoint_id", m.entrypoint.ID, "command", request.Control.Command)
 
 	switch request.Control.Command {
@@ -381,10 +405,12 @@ func (m *cameraSessionManager) start(session *cameraSession, request cameraSelec
 		m.mu.Unlock()
 		return errors.New("homekit camera session is unavailable")
 	}
+
 	if session.started {
 		m.mu.Unlock()
 		return nil
 	}
+
 	session.started = true
 	m.mu.Unlock()
 
@@ -395,7 +421,9 @@ func (m *cameraSessionManager) start(session *cameraSession, request cameraSelec
 		RemoteBYE: func() { m.clearSession(session) },
 		Failed:    func(error) { m.clearSession(session) },
 	})
+
 	cancel()
+
 	if err != nil {
 		m.clearSession(session)
 		return fmt.Errorf("acquire intercom stream: %w", err)
@@ -405,15 +433,20 @@ func (m *cameraSessionManager) start(session *cameraSession, request cameraSelec
 	if m.active != session || session.closed.Load() {
 		m.mu.Unlock()
 		m.coordinator.Release(lease)
+
 		return errors.New("homekit camera session closed during startup")
 	}
+
 	session.lease = lease
 	rtcpCtx, rtcpCancel := context.WithCancel(sessionContext(session))
 	session.rtcpCancel = rtcpCancel
 	m.mu.Unlock()
+
 	m.setStreamingStatus(cameraStreamingInUse)
 	go m.sendRTCP(rtcpCtx, session)
+
 	m.logger.Info("homekit camera stream started", "entrypoint_id", m.entrypoint.ID, "session_id", session.id)
+
 	return nil
 }
 
@@ -430,21 +463,27 @@ func (m *cameraSessionManager) closeSession(session *cameraSession) {
 	if session == nil || !session.closed.CompareAndSwap(false, true) {
 		return
 	}
+
 	if session.rtcpCancel != nil {
 		session.rtcpCancel()
 	}
+
 	if session.cancel != nil {
 		session.cancel()
 	}
+
 	if session.lease != nil {
 		m.coordinator.Release(session.lease)
 	}
+
 	if session.videoConn != nil {
 		_ = session.videoConn.Close()
 	}
+
 	if session.audioConn != nil {
 		_ = session.audioConn.Close()
 	}
+
 	m.setStreamingStatus(cameraStreamingAvailable)
 	m.logger.Info("homekit camera stream stopped", "entrypoint_id", m.entrypoint.ID, "session_id", session.id)
 }
@@ -454,6 +493,7 @@ func (m *cameraSessionManager) forwardVideo(session *cameraSession, request came
 	if len(request.VideoCodec.RTPParameters) > 0 && request.VideoCodec.RTPParameters[0].PayloadType != 0 {
 		payloadType = request.VideoCodec.RTPParameters[0].PayloadType
 	}
+
 	m.forward(session, packet, payloadType, session.videoSSRC, session.videoConn, session.videoSRTP, session.videoTarget, &session.videoPackets, &session.videoOctets, &session.videoTime, "video")
 }
 
@@ -462,6 +502,7 @@ func (m *cameraSessionManager) forwardAudio(session *cameraSession, request came
 	if len(request.AudioCodec.RTPParameters) > 0 && request.AudioCodec.RTPParameters[0].PayloadType != 0 {
 		payloadType = request.AudioCodec.RTPParameters[0].PayloadType
 	}
+
 	m.forward(session, packet, payloadType, session.audioSSRC, session.audioConn, session.audioSRTP, session.audioTarget, &session.audioPackets, &session.audioOctets, &session.audioTime, "audio")
 }
 
@@ -469,6 +510,7 @@ func (m *cameraSessionManager) forward(session *cameraSession, packet *rtp.Packe
 	if session.closed.Load() || packet == nil || conn == nil || crypto == nil || target == nil {
 		return
 	}
+
 	clone := &rtp.Packet{
 		Header: rtp.Header{
 			Version:        2,
@@ -480,23 +522,34 @@ func (m *cameraSessionManager) forward(session *cameraSession, packet *rtp.Packe
 		},
 		Payload: append([]byte(nil), packet.Payload...),
 	}
+
 	plain, err := clone.Marshal()
 	if err != nil {
 		m.logger.Debug("marshal homekit camera RTP", "entrypoint_id", m.entrypoint.ID, "track", track, "error", err)
 		return
 	}
+
 	cipher, err := crypto.EncryptRTP(nil, plain, nil)
 	if err != nil {
 		m.logger.Debug("encrypt homekit camera SRTP", "entrypoint_id", m.entrypoint.ID, "track", track, "error", err)
 		return
 	}
+
 	if _, err := conn.WriteToUDP(cipher, target); err != nil && !session.closed.Load() {
 		m.logger.Debug("send homekit camera SRTP", "entrypoint_id", m.entrypoint.ID, "track", track, "error", err)
 		return
 	}
+
+	payloadLength := len(packet.Payload)
+	if uint64(payloadLength) > math.MaxUint32 {
+		m.logger.Warn("HomeKit camera RTP payload exceeds counter range", "entrypoint_id", m.entrypoint.ID, "track", track, "bytes", payloadLength)
+		return
+	}
+
 	packets.Add(1)
-	octets.Add(uint32(len(packet.Payload)))
+	octets.Add(uint32(payloadLength))
 	timestamp.Store(packet.Timestamp)
+
 	if packets.Load() == 1 {
 		m.logger.Info("homekit camera first SRTP packet forwarded", "entrypoint_id", m.entrypoint.ID, "track", track)
 	}
@@ -505,6 +558,7 @@ func (m *cameraSessionManager) forward(session *cameraSession, packet *rtp.Packe
 func (m *cameraSessionManager) sendRTCP(ctx context.Context, session *cameraSession) {
 	ticker := time.NewTicker(cameraRTCPInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -520,6 +574,7 @@ func (m *cameraSessionManager) sendRTCPSenderReport(session *cameraSession, conn
 	if session.closed.Load() || conn == nil || crypto == nil || target == nil {
 		return
 	}
+
 	report, err := (&rtcp.SenderReport{
 		SSRC:        ssrc,
 		NTPTime:     cameraNTPTime(time.Now()),
@@ -530,6 +585,7 @@ func (m *cameraSessionManager) sendRTCPSenderReport(session *cameraSession, conn
 	if err != nil {
 		return
 	}
+
 	cipher, err := crypto.EncryptRTCP(nil, report, nil)
 	if err == nil {
 		_, _ = conn.WriteToUDP(cipher, target)
@@ -540,11 +596,12 @@ func (m *cameraSessionManager) setStreamingStatus(status byte) {
 	m.service.StreamingStatus.SetValue(mustCameraTLV(cameraStreamingStatus{Status: status}))
 }
 
-func mustCameraTLV(value interface{}) []byte {
+func mustCameraTLV(value any) []byte {
 	data, err := tlv8.Marshal(value)
 	if err != nil {
 		panic(fmt.Sprintf("encode HomeKit camera TLV: %v", err))
 	}
+
 	return data
 }
 
@@ -553,10 +610,12 @@ func cameraCrypto() (cameraSRTPCryptoSuite, error) {
 	if err != nil {
 		return cameraSRTPCryptoSuite{}, err
 	}
+
 	salt, err := cameraRandomBytes(cameraSRTPSaltLength)
 	if err != nil {
 		return cameraSRTPCryptoSuite{}, err
 	}
+
 	return cameraSRTPCryptoSuite{
 		CryptoSuite: cameraCryptoAESCM128HMACSHA180,
 		MasterKey:   string(key),
@@ -571,10 +630,12 @@ func cameraSRTPContext(crypto cameraSRTPCryptoSuite) (*srtp.Context, error) {
 	if len(crypto.MasterKey) != cameraSRTPKeyLength || len(crypto.MasterSalt) != cameraSRTPSaltLength {
 		return nil, errors.New("invalid SRTP key material")
 	}
+
 	context, err := srtp.CreateContext([]byte(crypto.MasterKey), []byte(crypto.MasterSalt), srtp.ProtectionProfileAes128CmHmacSha1_80)
 	if err != nil {
 		return nil, fmt.Errorf("create SRTP context: %w", err)
 	}
+
 	return context, nil
 }
 
@@ -583,6 +644,7 @@ func cameraRandomBytes(length int) ([]byte, error) {
 	if _, err := rand.Read(data); err != nil {
 		return nil, fmt.Errorf("generate random data: %w", err)
 	}
+
 	return data, nil
 }
 
@@ -591,6 +653,7 @@ func cameraRandomUint32() (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	return binary.BigEndian.Uint32(data), nil
 }
 
@@ -599,18 +662,31 @@ func cameraUDPPort() (*net.UDPConn, uint16, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+
 	address, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		_ = conn.Close()
 		return nil, 0, errors.New("unexpected local UDP address")
 	}
+
+	if address.Port < 0 || address.Port > math.MaxUint16 {
+		_ = conn.Close()
+		return nil, 0, errors.New("local UDP port is outside uint16 range")
+	}
+
 	return conn, uint16(address.Port), nil
 }
 
 func cameraNTPTime(now time.Time) uint64 {
 	const ntpEpoch = 2208988800
-	seconds := uint64(now.Unix()) + ntpEpoch
-	fraction := (uint64(now.Nanosecond()) << 32) / uint64(time.Second)
+
+	unixSeconds := now.Unix()
+	unixSeconds = max(unixSeconds, 0)
+	seconds := uint64(unixSeconds) + ntpEpoch
+	nanoseconds := now.Nanosecond()
+	nanoseconds = max(nanoseconds, 0)
+	fraction := (uint64(nanoseconds) << 32) / uint64(time.Second)
+
 	return (seconds << 32) | fraction
 }
 
@@ -618,6 +694,7 @@ func sessionContext(session *cameraSession) context.Context {
 	if session == nil || session.ctx == nil {
 		return context.Background()
 	}
+
 	return session.ctx
 }
 
@@ -625,20 +702,25 @@ func cameraLocalIP(request *http.Request, version byte) (net.IP, error) {
 	if request == nil {
 		return nil, errors.New("HomeKit request is unavailable")
 	}
+
 	if version != 0 {
 		return nil, fmt.Errorf("unsupported HomeKit IP version %d", version)
 	}
+
 	address, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr)
 	if !ok || address == nil {
 		return nil, errors.New("HomeKit request local address is unavailable")
 	}
+
 	host, _, err := net.SplitHostPort(address.String())
 	if err != nil {
 		return nil, fmt.Errorf("parse HomeKit local address: %w", err)
 	}
+
 	ip := net.ParseIP(host)
 	if ip == nil || ip.To4() == nil {
 		return nil, fmt.Errorf("HomeKit local address %q is not IPv4", host)
 	}
+
 	return ip, nil
 }

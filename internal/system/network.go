@@ -2,6 +2,7 @@ package system
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -18,20 +19,24 @@ func PreferredOutboundInterface() (net.Interface, error) {
 
 	address, ok := conn.LocalAddr().(*net.UDPAddr)
 	if !ok || address.IP.To4() == nil {
-		return net.Interface{}, fmt.Errorf("detect outbound ipv4")
+		return net.Interface{}, errors.New("detect outbound ipv4")
 	}
+
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return net.Interface{}, fmt.Errorf("list interfaces: %w", err)
 	}
+
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagMulticast == 0 {
 			continue
 		}
+
 		addresses, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
+
 		for _, ifaceAddress := range addresses {
 			if network, ok := ifaceAddress.(*net.IPNet); ok && network.Contains(address.IP) {
 				return iface, nil
@@ -39,7 +44,7 @@ func PreferredOutboundInterface() (net.Interface, error) {
 		}
 	}
 
-	return net.Interface{}, fmt.Errorf("map outbound ipv4 to interface")
+	return net.Interface{}, errors.New("map outbound ipv4 to interface")
 }
 
 // NetworkSnapshot describes the connected WiFi service reported by ConnMan.
@@ -60,16 +65,19 @@ func DetectNetworkSnapshot() (NetworkSnapshot, bool) {
 	}
 
 	best := connManService{score: -1}
+
 	for _, block := range splitConnManServiceBlocks(string(out)) {
 		service := parseConnManServiceBlock(block)
 		if !strings.EqualFold(strings.TrimSpace(service.Type), "wifi") || strings.TrimSpace(service.Interface) == "" || strings.TrimSpace(service.IP) == "" {
 			continue
 		}
+
 		service.score = connManServiceScore(service.State)
 		if service.score > best.score {
 			best = service
 		}
 	}
+
 	if best.score < 0 {
 		return NetworkSnapshot{}, false
 	}
@@ -79,6 +87,7 @@ func DetectNetworkSnapshot() (NetworkSnapshot, bool) {
 		strength := max(0, min(100, *best.Strength))
 		snapshot.WiFiStrength = &strength
 	}
+
 	return snapshot, true
 }
 
@@ -90,36 +99,49 @@ type connManService struct {
 
 func splitConnManServiceBlocks(output string) []string {
 	var blocks []string
+
 	depth := 0
+
 	var current strings.Builder
-	for _, raw := range strings.Split(output, "\n") {
+
+	for raw := range strings.SplitSeq(output, "\n") {
 		line := strings.TrimSpace(raw)
 		if strings.Contains(line, "struct {") && depth == 0 {
 			depth = 1
+
 			current.Reset()
 			current.WriteString(raw + "\n")
+
 			continue
 		}
+
 		if depth == 0 {
 			continue
 		}
+
 		open := strings.Count(line, "{")
 		if open == 1 && strings.Contains(line, "struct {") {
 			open = 0
 		}
+
 		depth += open - strings.Count(line, "}")
+
 		current.WriteString(raw + "\n")
+
 		if depth <= 0 {
 			blocks = append(blocks, current.String())
 			depth = 0
 		}
 	}
+
 	return blocks
 }
 
 func parseConnManServiceBlock(block string) connManService {
 	var service connManService
+
 	section, key := "top", ""
+
 	scanner := bufio.NewScanner(strings.NewReader(block))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -133,15 +155,19 @@ func parseConnManServiceBlock(block string) connManService {
 			case "IPv6", "Proxy", "Provider":
 				section, key = "other", ""
 			}
+
 			continue
 		}
+
 		if !strings.Contains(line, "variant") || key == "" {
 			continue
 		}
+
 		value, ok := parseDBusVariantValue(line)
 		if !ok {
 			continue
 		}
+
 		switch section {
 		case "top":
 			switch key {
@@ -155,19 +181,22 @@ func parseConnManServiceBlock(block string) connManService {
 				}
 			}
 		case "ethernet":
-			if key == "Interface" {
+			switch key {
+			case "Interface":
 				service.Interface = value
-			} else if key == "Address" {
+			case "Address":
 				service.MAC = value
 			}
 		case "ipv4":
-			if key == "Address" {
+			switch key {
+			case "Address":
 				service.IP = value
-			} else if key == "Netmask" {
+			case "Netmask":
 				service.Netmask = value
 			}
 		}
 	}
+
 	return service
 }
 
@@ -175,12 +204,16 @@ func parseDBusKey(line string) (string, bool) {
 	if !strings.HasPrefix(line, "string \"") {
 		return "", false
 	}
+
 	rest := line[len("string \""):]
-	end := strings.Index(rest, "\"")
-	if end < 0 {
+
+	before, _, ok := strings.Cut(rest, "\"")
+	if !ok {
 		return "", false
 	}
-	key := strings.TrimSpace(rest[:end])
+
+	key := strings.TrimSpace(before)
+
 	return key, key != ""
 }
 
@@ -190,25 +223,31 @@ func parseDBusVariantValue(line string) (string, bool) {
 		if field != "variant" || index+1 >= len(parts) {
 			continue
 		}
+
 		switch parts[index+1] {
 		case "string":
 			start := strings.Index(line, "\"")
 			if start < 0 {
 				return "", false
 			}
+
 			rest := line[start+1:]
+
 			end := strings.LastIndex(rest, "\"")
 			if end < 0 {
 				return "", false
 			}
+
 			return strings.TrimSpace(rest[:end]), true
 		case "byte", "int16", "int32", "uint16", "uint32", "int64", "uint64":
 			if index+2 < len(parts) {
 				return strings.TrimSpace(parts[index+2]), true
 			}
 		}
+
 		return "", false
 	}
+
 	return "", false
 }
 
@@ -227,14 +266,17 @@ func connManServiceScore(state string) int {
 
 func normalizeMAC(raw string) string {
 	mac := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(raw)), "-", ":")
+
 	parts := strings.Split(mac, ":")
 	if len(parts) != 6 {
 		return ""
 	}
+
 	for _, part := range parts {
 		if len(part) != 2 {
 			return ""
 		}
 	}
+
 	return mac
 }

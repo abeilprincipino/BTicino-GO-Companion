@@ -66,7 +66,8 @@ func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
-}) {
+},
+) {
 	s.diagnostics = v
 }
 
@@ -137,8 +138,10 @@ func (s *Server) pairChallenge(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.DebugContext(r.Context(), "pairing challenge rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
+
 		return
 	}
+
 	s.logger.InfoContext(r.Context(), "pairing challenge created", "client_ip", sourceIP(r))
 
 	writeOK(w, http.StatusCreated, map[string]any{"challenge_id": challenge.ID, "expires_at": challenge.ExpiresAt.Format(time.RFC3339)})
@@ -157,8 +160,10 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.DebugContext(r.Context(), "pairing claim rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
+
 		return
 	}
+
 	s.logger.InfoContext(r.Context(), "pairing completed", "client_ip", sourceIP(r))
 
 	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
@@ -169,6 +174,7 @@ func (s *Server) rotateBearer(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.DebugContext(r.Context(), "bearer rotation rejected", "client_ip", sourceIP(r), "error", err)
 		writeAuthError(w, err)
+
 		return
 	}
 
@@ -216,6 +222,7 @@ func (s *Server) diagnosticsRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go s.diagnostics.Refresh(context.WithoutCancel(r.Context()))
+
 	writeOK(w, http.StatusAccepted, map[string]any{"diagnostics": s.currentDiagnostics()})
 }
 
@@ -233,6 +240,7 @@ func (s *Server) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 		if !ok || token == "" || s.auth == nil || !s.auth.ValidateBearer(token) {
 			s.logger.DebugContext(r.Context(), "bearer authentication rejected", "route", r.Pattern, "client_ip", sourceIP(r))
 			writeError(w, http.StatusUnauthorized, "unauthorized", "a valid bearer token is required")
+
 			return
 		}
 
@@ -252,32 +260,40 @@ func (s *Server) currentDiagnostics() diagnostics.Snapshot {
 	if s.diagnostics == nil {
 		return diagnostics.Snapshot{}
 	}
+
 	return s.diagnostics.Snapshot()
 }
 
 func (s *Server) currentPayload() StateDTO {
 	diagnostic := s.currentDiagnostics()
+
 	dto := StateDTO{State: s.currentState(), Diagnostics: diagnostic}
 	if s.config != nil {
 		cfg := s.config.Snapshot()
 		dto.Device.Model = cfg.Companion.Model
+
 		dto.Entrypoints = make([]EntrypointDTO, 0, len(cfg.Companion.Entrypoints))
 		for _, entrypoint := range cfg.Companion.Entrypoints {
 			dto.Entrypoints = append(dto.Entrypoints, entrypointDTO(entrypoint, s.entrypoints != nil))
 		}
+
 		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil && s.runtime.RebootAvailable()
+
 		dto.SystemControl.Services = make(map[string]SystemServiceDTO, len(cfg.System.Services))
 		for name, service := range cfg.System.Services {
 			dto.SystemControl.Services[name] = SystemServiceDTO{Enabled: service.Enabled, Exposed: service.Exposed && s.runtime != nil && s.runtime.ServiceAvailable(name)}
 		}
 	}
+
 	dto.Device.Firmware = diagnostic.OpenWebNet.Firmware
 	dto.Device.Hardware = diagnostic.OpenWebNet.Hardware
+
 	if s.update != nil {
 		if update, err := s.update.Status(context.Background()); err == nil {
 			dto.SystemControl.Update = &update
 		}
 	}
+
 	return dto
 }
 
@@ -288,7 +304,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 			writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one JSON object")
 			return false
 		}
+
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
+
 		return false
 	}
 

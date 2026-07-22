@@ -74,6 +74,7 @@ func NewAudioBridge(
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &AudioBridge{
 		gstreamer:   gstreamer,
 		opusOutput:  opusOutput,
@@ -94,17 +95,20 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 		b.mu.Unlock()
 		return ErrAudioBridgeStarted
 	}
+
 	b.active = true
 	b.restarts = 0
 	b.lifecycle = ctx
 	b.mu.Unlock()
 
 	b.logger.InfoContext(ctx, "audio bridge starting", "direction", "downlink")
+
 	pipeline, err := b.gstreamer.StartAudioBridge(ctx)
 	if err != nil {
 		b.mu.Lock()
 		b.active = false
 		b.mu.Unlock()
+
 		return err
 	}
 
@@ -112,14 +116,19 @@ func (b *AudioBridge) Start(ctx context.Context) error {
 		b.mu.Lock()
 		b.active = false
 		b.mu.Unlock()
+
 		return ErrAudioBridgeUnavailable
 	}
+
 	b.mu.Lock()
 	if !b.active {
 		b.mu.Unlock()
+
 		_ = pipeline.Close()
+
 		return ErrAudioBridgeUnavailable
 	}
+
 	b.installLocked(pipeline)
 	generation := b.generation
 	b.mu.Unlock()
@@ -133,6 +142,7 @@ func (b *AudioBridge) installLocked(pipeline AudioPipeline) {
 	b.generation++
 	b.pipeline = pipeline
 	b.cancel = cancel
+
 	b.done = make(chan struct{})
 	go b.forward(runCtx, pipeline, b.done)
 	go b.monitor(runCtx, pipeline)
@@ -146,6 +156,7 @@ func (b *AudioBridge) monitor(ctx context.Context, pipeline AudioPipeline) {
 		if !ok || err == nil {
 			return
 		}
+
 		b.restart(pipeline, err)
 	}
 }
@@ -156,14 +167,18 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 		b.mu.Unlock()
 		return
 	}
+
 	if b.restarts >= audioBridgeRestartLimit {
 		b.mu.Unlock()
 		b.logger.Error("audio bridge restart budget exhausted", "generation", b.generation, "attempts", audioBridgeRestartLimit, "error", cause)
+
 		if b.failure != nil {
 			b.failure(cause)
 		}
+
 		return
 	}
+
 	b.restarts++
 	attempt, generation := b.restarts, b.generation
 	cancel, done := b.cancel, b.done
@@ -171,30 +186,40 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 	b.mu.Unlock()
 	b.logger.Warn("audio bridge restarting", "generation", generation, "attempt", attempt, "limit", audioBridgeRestartLimit, "error", cause)
 	cancel()
+
 	_ = failed.Close()
+
 	<-done
 
 	b.mu.Lock()
 	lifecycle := b.lifecycle
 	b.mu.Unlock()
+
 	if lifecycle == nil {
 		lifecycle = context.Background()
 	}
+
 	pipeline, err := b.gstreamer.StartAudioBridge(lifecycle)
 	if err != nil || pipeline == nil {
 		if err == nil {
 			err = ErrAudioBridgeUnavailable
 		}
+
 		b.logger.Warn("audio bridge restart failed", "generation", generation, "attempt", attempt, "error", err)
 		b.restartFailure(failed, err)
+
 		return
 	}
+
 	b.mu.Lock()
 	if !b.active || b.pipeline != nil {
 		b.mu.Unlock()
+
 		_ = pipeline.Close()
+
 		return
 	}
+
 	b.installLocked(pipeline)
 	newGeneration := b.generation
 	b.mu.Unlock()
@@ -203,7 +228,9 @@ func (b *AudioBridge) restart(failed AudioPipeline, cause error) {
 
 func (b *AudioBridge) restartFailure(failed AudioPipeline, err error) {
 	_ = failed
+
 	b.logger.Error("audio bridge restart exhausted", "attempts", audioBridgeRestartLimit, "error", err)
+
 	if b.failure != nil {
 		b.failure(err)
 	}
@@ -217,9 +244,11 @@ func (b *AudioBridge) WriteIntercomSpeex(packet *rtp.Packet) error {
 	b.mu.Lock()
 	pipeline := b.pipeline
 	b.mu.Unlock()
+
 	if pipeline == nil {
 		return ErrAudioBridgeUnavailable
 	}
+
 	return pipeline.WriteIntercomSpeex(packet)
 }
 
@@ -248,6 +277,7 @@ func (b *AudioBridge) StopContext(ctx context.Context) error {
 	if b == nil {
 		return nil
 	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -255,11 +285,13 @@ func (b *AudioBridge) StopContext(ctx context.Context) error {
 	b.mu.Lock()
 
 	pipeline := b.pipeline
+
 	b.active = false
 	if pipeline == nil {
 		b.mu.Unlock()
 		return nil
 	}
+
 	b.logger.Info("audio bridge stopping")
 
 	b.pipeline = nil
@@ -283,7 +315,9 @@ func (b *AudioBridge) StopContext(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	b.logger.Info("audio bridge stopped")
+
 	return nil
 }
 
@@ -329,6 +363,7 @@ func NewGStreamerAudioBridge(bundleRoot string, logger *slog.Logger) *GStreamerA
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &GStreamerAudioBridge{bundleRoot: bundleRoot, logger: logger.With("component", "media.audiobridge")}
 }
 
@@ -337,17 +372,20 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 	if err != nil {
 		return nil, fmt.Errorf("listen bridge opus output: %w", err)
 	}
+
 	speexConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: audioBridgeSpeexOut})
 	if err != nil {
 		_ = opusConn.Close()
 		return nil, fmt.Errorf("listen bridge speex output: %w", err)
 	}
+
 	p := &gstreamerAudioPipeline{logger: g.logger, opusConn: opusConn, speexConn: speexConn, opusOut: make(chan *rtp.Packet, 32), speexOut: make(chan *rtp.Packet, 32), errors: make(chan error, 4), stop: make(chan struct{}), closeDone: make(chan struct{})}
 	bundle := filepath.Join(g.bundleRoot, "bin", "gst-launch-1.0")
+
 	p.commands = []*exec.Cmd{
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51060", "caps=application/x-rtp,media=audio,encoding-name=SPEEX,clock-rate=8000,payload=110", "!", "rtpspeexdepay", "!", "speexdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51062"),
-		exec.CommandContext(ctx, bundle, "-q", "udpsrc", "port=51062", "caps=application/x-rtp,media=audio,encoding-name=L16,clock-rate=8000,channels=1,encoding-params=1,payload=96", "!", "rtpL16depay", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16LE,rate=48000,channels=1", "!", "opusenc", "bitrate=24000", "complexity=5", "frame-size=20", "dtx=false", "inband-fec=false", "audio-type=voice", "!", "rtpopuspay", "pt=111", "!", "udpsink", "host=127.0.0.1", "port=51064"),
-		exec.CommandContext(ctx, bundle, "-q", "udpsrc", "port=51066", "caps=application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload=112", "!", "rtpopusdepay", "!", "opusdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51068"),
+		exec.CommandContext(ctx, bundle, "-q", "udpsrc", "port=51062", "caps=application/x-rtp,media=audio,encoding-name=L16,clock-rate=8000,channels=1,encoding-params=1,payload=96", "!", "rtpL16depay", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16LE,rate=48000,channels=1", "!", "opusenc", "bitrate=24000", "complexity=5", "frame-size=20", "dtx=false", "inband-fec=false", "audio-type=voice", "!", "rtpopuspay", "pt=111", "!", "udpsink", "host=127.0.0.1", "port=51064"), // #nosec G204 -- bundle is a configured absolute GStreamer executable; arguments are fixed.
+		exec.CommandContext(ctx, bundle, "-q", "udpsrc", "port=51066", "caps=application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload=112", "!", "rtpopusdepay", "!", "opusdec", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,format=S16BE,rate=8000,channels=1", "!", "rtpL16pay", "pt=96", "!", "udpsink", "host=127.0.0.1", "port=51068"),                                                                                                                                    // #nosec G204 -- bundle is a configured absolute GStreamer executable; arguments are fixed.
 		exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", "udpsrc", "port=51068", "caps=application/x-rtp,media=audio,encoding-name=L16,clock-rate=8000,channels=1,encoding-params=1,payload=96", "!", "rtpL16depay", "!", "audioconvert", "!", "audioresample", "!", "audio/x-raw,rate=8000,channels=1", "!", "speexenc", "!", "rtpspeexpay", "pt=97", "!", "udpsink", "host=127.0.0.1", "port=51070"),
 	}
 	for index, command := range p.commands {
@@ -356,17 +394,22 @@ func (g *GStreamerAudioBridge) StartAudioBridge(ctx context.Context) (AudioPipel
 		if index == 1 || index == 2 {
 			command.Env = bundledGSTEnv(g.bundleRoot)
 		}
+
 		if err := command.Start(); err != nil {
 			_ = p.Close()
 			return nil, fmt.Errorf("start audio bridge pipeline: %w", err)
 		}
+
 		g.logger.Debug("audio bridge pipeline started", "pipeline", audioPipelineName(index))
+
 		p.waiters.Add(1)
 		go p.wait(command, audioPipelineName(index))
 	}
+
 	p.readers.Add(2)
 	go p.read(p.opusConn, audioBridgeOpusPT, p.opusOut)
 	go p.read(p.speexConn, 97, p.speexOut)
+
 	return p, nil
 }
 
@@ -387,14 +430,18 @@ type gstreamerAudioPipeline struct {
 
 func (p *gstreamerAudioPipeline) wait(command *exec.Cmd, name string) {
 	defer p.waiters.Done()
+
 	err := command.Wait()
+
 	p.mu.Lock()
 	closed := p.closed
 	p.mu.Unlock()
+
 	if !closed {
 		if err == nil {
 			err = fmt.Errorf("audio bridge pipeline %s exited unexpectedly", name)
 		}
+
 		select {
 		case p.errors <- err:
 		default:
@@ -420,6 +467,7 @@ func audioPipelineName(index int) string {
 func (p *gstreamerAudioPipeline) WriteIntercomSpeex(packet *rtp.Packet) error {
 	return p.write(packet, &p.speexIn, audioBridgeSpeexIn)
 }
+
 func (p *gstreamerAudioPipeline) WriteBackchannelOpus(packet *rtp.Packet) error {
 	return p.write(packet, &p.opusIn, audioBridgeOpusIn)
 }
@@ -430,42 +478,54 @@ func (p *gstreamerAudioPipeline) write(packet *rtp.Packet, conn **net.UDPConn, p
 	if packet == nil {
 		return nil
 	}
+
 	raw, err := packet.Marshal()
 	if err != nil {
 		return err
 	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	if p.closed {
 		return ErrAudioBridgeUnavailable
 	}
+
 	if *conn == nil {
 		*conn, err = net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 		if err != nil {
 			return err
 		}
 	}
+
 	_, err = (*conn).Write(raw)
+
 	return err
 }
+
 func (p *gstreamerAudioPipeline) Close() error {
 	p.mu.Lock()
 	if p.closed {
 		done := p.closeDone
 		p.mu.Unlock()
 		<-done
+
 		return p.closeErr
 	}
+
 	p.closed = true
 	if p.stop != nil {
 		close(p.stop)
 	}
+
 	p.logger.Info("audio bridge pipeline stopping")
+
 	for _, conn := range []*net.UDPConn{p.opusConn, p.speexConn, p.speexIn, p.opusIn} {
 		if conn != nil {
 			_ = conn.Close()
 		}
 	}
+
 	for _, command := range p.commands {
 		if command.Process != nil {
 			// A negative PID targets the process group created at Start.
@@ -482,17 +542,21 @@ func (p *gstreamerAudioPipeline) Close() error {
 	p.mu.Lock()
 	close(p.closeDone)
 	p.mu.Unlock()
+
 	return p.closeErr
 }
+
 func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, output chan<- *rtp.Packet) {
 	defer p.readers.Done()
 	defer close(output)
+
 	buffer := make([]byte, 1500)
 	for {
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			return
 		}
+
 		packet := &rtp.Packet{}
 		if packet.Unmarshal(buffer[:n]) == nil && packet.PayloadType == payloadType {
 			select {
@@ -507,6 +571,7 @@ func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, outp
 func bundledGSTEnv(bundleRoot string) []string {
 	root := strings.TrimSpace(bundleRoot)
 	libDir := filepath.Join(root, "lib")
+
 	return []string{
 		"PATH=/usr/bin:/bin",
 		"LD_LIBRARY_PATH=" + libDir,

@@ -33,6 +33,7 @@ func TestCreateAndLoad(t *testing.T) {
 	if loaded.Auth.PairingState != PairingStateSetupRequired || created.Auth.PairingState != PairingStateSetupRequired {
 		t.Fatalf("loaded config differs: got %#v want %#v", loaded, created)
 	}
+
 	if loaded.Companion.DeviceID != "" || loaded.Companion.Model != "" {
 		t.Fatalf("loaded runtime metadata = %#v, want empty", loaded.Companion)
 	}
@@ -102,9 +103,11 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 			t.Errorf("YAML value at %q = %#v, want empty string", path, value)
 		}
 	}
+
 	if value, _ := yamlPath(document, "auth.home_assistant.pairing_state"); value != string(PairingStateSetupRequired) {
 		t.Errorf("YAML value at auth.pairing_state = %#v, want %q", value, PairingStateSetupRequired)
 	}
+
 	for _, path := range []string{"system.updates.exposed", "homekit.enabled"} {
 		if value, _ := yamlPath(document, path); value != false {
 			t.Errorf("YAML value at %q = %#v, want false", path, value)
@@ -120,10 +123,11 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 
 func yamlPath(document map[string]any, path string) (any, bool) {
 	var value any = document
-	for _, component := range strings.Split(path, ".") {
+	for component := range strings.SplitSeq(path, ".") {
 		switch current := value.(type) {
 		case map[string]any:
 			var ok bool
+
 			value, ok = current[component]
 			if !ok {
 				return nil, false
@@ -132,6 +136,7 @@ func yamlPath(document map[string]any, path string) (any, bool) {
 			if component != "0" || len(current) == 0 {
 				return nil, false
 			}
+
 			value = current[0]
 		default:
 			return nil, false
@@ -164,6 +169,7 @@ func TestLoadRejectsUnsupportedCompanionMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config: %v", err)
 			}
+
 			data = []byte(strings.Replace(string(data), "companion:\n", "companion:\n    "+field+": invalid\n", 1))
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatalf("write config: %v", err)
@@ -224,6 +230,7 @@ func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
 	if cfg.HomeKit.PIN != "" || cfg.HomeKit.SetupID != "" {
 		t.Fatalf("disabled HomeKit credentials = %#v, want empty", cfg.HomeKit)
 	}
+
 	if cfg.HomeKit.Name == "" {
 		t.Fatalf("homekit runtime defaults = %#v, want name", cfg.HomeKit)
 	}
@@ -241,6 +248,7 @@ func TestClaimCodeFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate claim code: %v", err)
 	}
+
 	if !ValidClaimCode(code) {
 		t.Fatalf("generated invalid claim code %q", code)
 	}

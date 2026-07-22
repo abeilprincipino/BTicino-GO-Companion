@@ -105,6 +105,7 @@ func (s *Store) CreateChallenge(sourceIP string) (Challenge, error) {
 	if s.config == nil {
 		return Challenge{}, ErrStoreUnavailable
 	}
+
 	switch s.PairingState() {
 	case config.PairingStateClaimed:
 		return Challenge{}, ErrAlreadyClaimed
@@ -142,6 +143,7 @@ func (s *Store) Claim(sourceIP, challengeID, claimCode string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
+
 	switch s.PairingState() {
 	case config.PairingStateClaimed:
 		return "", ErrAlreadyClaimed
@@ -177,18 +179,23 @@ func (s *Store) Claim(sourceIP, challengeID, claimCode string) (string, error) {
 	}
 
 	var token string
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		if cfg.Auth.PairingState != config.PairingStateClaimable {
 			return ErrClaimNotAllowed
 		}
+
 		if !constantTimeClaimCodeEqual(claimCode, deriveClaimCode(cfg.WebUI.SessionSecret)) {
 			return ErrInvalidClaimCode
 		}
+
 		var err error
+
 		token, err = config.RandomHex(bearerTokenBytes)
 		if err != nil {
 			return fmt.Errorf("generate bearer token: %w", err)
 		}
+
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
 		cfg.Auth.PairingState = config.PairingStateClaimed
 
@@ -222,17 +229,22 @@ func (s *Store) StartInitialClaim() (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
+
 	if s.PairingState() == config.PairingStateClaimed {
 		return "", ErrAlreadyClaimed
 	}
+
 	if s.PairingState() != config.PairingStateSetupRequired {
 		return "", ErrClaimNotAllowed
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		if cfg.Auth.PairingState != config.PairingStateSetupRequired {
 			return ErrClaimNotAllowed
 		}
+
 		cfg.Auth.PairingState = config.PairingStateClaimable
+
 		return nil
 	}); err != nil {
 		return "", err
@@ -245,10 +257,12 @@ func (s *Store) InitialClaimCode() (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
+
 	cfg := s.config.Snapshot()
 	if cfg.Auth.PairingState == config.PairingStateSetupRequired {
 		return "", ErrSetupRequired
 	}
+
 	if cfg.Auth.PairingState != config.PairingStateClaimable {
 		return "", ErrClaimNotAllowed
 	}
@@ -262,6 +276,7 @@ func (s *Store) Status() PairingStatus {
 	}
 
 	cfg := s.config.Snapshot()
+
 	status := PairingStatus{
 		State:      cfg.Auth.PairingState,
 		InstanceID: cfg.Auth.InstanceID,
@@ -272,10 +287,12 @@ func (s *Store) Status() PairingStatus {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.repair.value != "" && s.repair.expiresAt.After(s.now()) {
 		status.RecoveryCode = s.repair.value
 		status.RecoveryCodeExpiry = s.repair.expiresAt
 	}
+
 	if s.repair.value != "" && !s.repair.expiresAt.After(s.now()) {
 		s.repair = repairCode{}
 	}
@@ -297,8 +314,10 @@ func (s *Store) RotateBearer() (string, error) {
 		if cfg.Auth.PairingState != config.PairingStateClaimed && cfg.Auth.PairingState != config.PairingStateClaimable {
 			return ErrClaimNotAllowed
 		}
+
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
 		cfg.Auth.PairingState = config.PairingStateClaimed
+
 		return nil
 	}); err != nil {
 		return "", err
@@ -316,8 +335,10 @@ func (s *Store) RevokeBearer() error {
 		if cfg.Auth.PairingState != config.PairingStateClaimed {
 			return ErrClaimNotAllowed
 		}
+
 		cfg.Auth.BearerTokenHash = ""
 		cfg.Auth.PairingState = config.PairingStateClaimable
+
 		return nil
 	})
 }
@@ -345,19 +366,23 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 	if s.config == nil {
 		return "", ErrStoreUnavailable
 	}
+
 	if s.PairingState() != config.PairingStateClaimed {
 		return "", ErrRepairNotAllowed
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.repair.value == "" || !constantTimeStringEqual(code, s.repair.value) {
 		s.logger.Debug("repair code rejected")
 		return "", ErrInvalidRepairCode
 	}
+
 	if !s.repair.expiresAt.After(s.now()) {
 		s.repair = repairCode{}
 		s.logger.Debug("repair code expired")
+
 		return "", ErrRepairCodeExpired
 	}
 
@@ -365,17 +390,21 @@ func (s *Store) RecoverBearer(code string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("generate bearer token: %w", err)
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		if cfg.Auth.PairingState != config.PairingStateClaimed {
 			return ErrRepairNotAllowed
 		}
+
 		cfg.Auth.BearerTokenHash = bearerTokenHash(token)
+
 		return nil
 	}); err != nil {
 		return "", err
 	}
 
 	s.repair = repairCode{}
+
 	return token, nil
 }
 
@@ -439,6 +468,7 @@ func deriveClaimCode(sessionSecret string) string {
 	_, _ = mac.Write([]byte("bticino-go-companion/initial-claim/v1"))
 	sum := mac.Sum(nil)
 	encoded := hex.EncodeToString(sum[:4])
+
 	return encoded[:4] + "-" + encoded[4:]
 }
 
@@ -452,6 +482,7 @@ func constantTimeClaimCodeEqual(left, right string) bool {
 
 func constantTimeStringEqual(left, right string) bool {
 	left = strings.ToLower(strings.TrimSpace(left))
+
 	right = strings.ToLower(strings.TrimSpace(right))
 	if len(left) != len(right) {
 		return false

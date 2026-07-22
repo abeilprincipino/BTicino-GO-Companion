@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/media"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -40,10 +41,13 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 	disconnectReason := "client_closed"
 
 	s.clients.add(client)
+
 	s.logger.DebugContext(r.Context(), "websocket connected", "channel", "state", "client_ip", sourceIP(r))
 	defer func() {
 		s.clients.remove(client)
+
 		_ = conn.Close()
+
 		s.logger.DebugContext(r.Context(), "websocket disconnected", "channel", "state", "client_ip", sourceIP(r), "reason", disconnectReason)
 	}()
 
@@ -51,6 +55,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 		disconnectReason = "initial_state_write_failed"
 		return
 	}
+
 	s.logger.DebugContext(r.Context(), "websocket ready", "channel", "state", "client_ip", sourceIP(r))
 
 	lastActivity := time.Now()
@@ -61,13 +66,16 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 
 		data, opcode, err := readClientFrame(conn)
 		if err != nil {
-			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+			var networkError net.Error
+			if errors.As(err, &networkError) {
 				disconnectReason = "heartbeat_timeout"
 			} else {
 				disconnectReason = "read_failed"
 			}
+
 			return
 		}
+
 		if opcode == ws.OpClose {
 			disconnectReason = "client_closed"
 			return
@@ -75,6 +83,7 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 
 		if opcode == ws.OpPing {
 			lastActivity = time.Now()
+
 			if client.writeFrame(ws.OpPong, data) != nil {
 				disconnectReason = "pong_write_failed"
 				return
@@ -88,13 +97,16 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 				lastActivity = time.Now()
 				continue
 			}
+
 			disconnectReason = "unsupported_frame"
+
 			return
 		}
 
 		message, err := ParseMessage(data)
 		if err != nil {
 			s.logger.DebugContext(r.Context(), "websocket message rejected", "channel", "state", "client_ip", sourceIP(r), "reason", "invalid_message")
+
 			if client.write(Message{Type: "error", Payload: mustJSON(map[string]string{"code": "invalid_message", "message": "message is invalid"})}) != nil {
 				return
 			}
@@ -110,8 +122,8 @@ func (s *Server) websocket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMessage(client *client, request *http.Request, message Message) {
 	_ = request
-	switch message.Type {
-	case "ping":
+
+	if message.Type == "ping" {
 		_ = client.write(Message{Type: "pong", ID: message.ID})
 	}
 }
@@ -133,6 +145,7 @@ func (s *Server) CloseWebSockets() {
 	for _, client := range s.clients.all() {
 		_ = client.conn.Close()
 	}
+
 	for _, client := range s.webrtcClients.all() {
 		_ = client.conn.Close()
 	}
@@ -240,11 +253,6 @@ type webrtcCandidatePayload struct {
 	Candidate media.ICECandidate `json:"candidate"`
 }
 
-type webrtcLocalCandidatePayload struct {
-	SessionID string              `json:"session_id"`
-	Candidate *media.ICECandidate `json:"candidate"`
-}
-
 type webrtcClosePayload struct {
 	SessionID string `json:"session_id"`
 	Reason    string `json:"reason"`
@@ -260,16 +268,22 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+
 	client := &client{conn: conn}
 	s.webrtcClients.add(client)
+
 	var sessionID string
+
 	lastActivity := time.Now()
 	nextPing := lastActivity.Add(heartbeatInterval)
+
 	defer func() {
 		s.webrtcClients.remove(client)
+
 		if sessionID != "" {
 			_ = s.webrtc.Close(sessionID)
 		}
+
 		_ = conn.Close()
 	}()
 
@@ -278,37 +292,50 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 		if nextPing.Before(deadline) {
 			deadline = nextPing
 		}
+
 		if conn.SetReadDeadline(deadline) != nil {
 			return
 		}
+
 		data, opcode, err := readClientFrame(conn)
 		if err != nil {
-			if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+			var networkError net.Error
+			if errors.As(err, &networkError) {
 				now := time.Now()
 				if now.Sub(lastActivity) >= heartbeatTimeout || client.writeFrame(ws.OpPing, nil) != nil {
 					return
 				}
+
 				nextPing = now.Add(heartbeatInterval)
+
 				continue
 			}
+
 			return
 		}
+
 		if opcode == ws.OpClose {
 			return
 		}
+
 		if opcode == ws.OpPing {
 			lastActivity = time.Now()
 			nextPing = lastActivity.Add(heartbeatInterval)
+
 			if client.writeFrame(ws.OpPong, data) != nil {
 				return
 			}
+
 			continue
 		}
+
 		if opcode == ws.OpPong {
 			lastActivity = time.Now()
 			nextPing = lastActivity.Add(heartbeatInterval)
+
 			continue
 		}
+
 		if opcode != ws.OpText {
 			return
 		}
@@ -318,65 +345,84 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 			if client.write(Message{Type: "error", Payload: mustJSON(map[string]string{"code": "invalid_message", "message": "message is invalid"})}) != nil {
 				return
 			}
+
 			continue
 		}
+
 		lastActivity = time.Now()
 		nextPing = lastActivity.Add(heartbeatInterval)
 
 		var response Message
-		switch message.Type {
-		case "offer":
-			var payload webrtcOfferPayload
-			if json.Unmarshal(message.Payload, &payload) != nil || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.EntrypointID) == "" || strings.TrimSpace(payload.Origin) == "" || strings.TrimSpace(payload.OfferSDP) == "" || sessionID != "" {
-				s.logger.DebugContext(r.Context(), "webrtc offer rejected", "reason", "invalid_offer")
-				response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
-				break
-			}
-			offerCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-			// Home Assistant's signaling client expects one response for every
-			// request, so server candidates must be part of the SDP answer.
-			answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, nil)
-			cancel()
-			if offerErr != nil {
-				s.logger.WarnContext(r.Context(), "webrtc offer failed", "session_id", payload.SessionID, "entrypoint_id", payload.EntrypointID, "error", offerErr)
-				response = webrtcError(message.ID, "offer_failed", offerErr.Error())
-				break
-			}
-			sessionID = payload.SessionID
-			s.logger.DebugContext(r.Context(), "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin)
-			response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
-			if client.write(response) != nil {
-				return
-			}
-			continue
-		case "candidate":
-			var payload webrtcCandidatePayload
-			if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {
-				response = webrtcError(message.ID, "invalid_candidate", "candidate is invalid")
-				break
-			}
-			if candidateErr := s.webrtc.AddICECandidate(sessionID, payload.Candidate); candidateErr != nil {
-				s.logger.DebugContext(r.Context(), "webrtc candidate rejected", "session_id", sessionID, "error", candidateErr)
-				response = webrtcError(message.ID, "candidate_failed", candidateErr.Error())
-				break
-			}
-			response = Message{Type: "ack", ID: message.ID}
-		case "close":
-			var payload webrtcClosePayload
-			if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID {
-				response = webrtcError(message.ID, "invalid_close", "close is invalid")
-				break
-			}
-			_ = s.webrtc.Close(sessionID)
-			response = Message{Type: "ack", ID: message.ID}
-			sessionID = ""
-		default:
-			response = webrtcError(message.ID, "invalid_message", "message is invalid")
-		}
+
+		sessionID, response = s.webrtcResponse(r.Context(), message, sessionID)
 		if client.write(response) != nil {
 			return
 		}
 	}
+}
+
+func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID string) (string, Message) {
+	var response Message
+
+	switch message.Type {
+	case "offer":
+		var payload webrtcOfferPayload
+		if json.Unmarshal(message.Payload, &payload) != nil || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.EntrypointID) == "" || strings.TrimSpace(payload.Origin) == "" || strings.TrimSpace(payload.OfferSDP) == "" || sessionID != "" {
+			s.logger.DebugContext(ctx, "webrtc offer rejected", "reason", "invalid_offer")
+
+			response = webrtcError(message.ID, "invalid_offer", "offer is invalid")
+
+			break
+		}
+
+		offerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		// Home Assistant's signaling client expects one response for every
+		// request, so server candidates must be part of the SDP answer.
+		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, nil)
+
+		cancel()
+
+		if offerErr != nil {
+			s.logger.WarnContext(ctx, "webrtc offer failed", "session_id", payload.SessionID, "entrypoint_id", payload.EntrypointID, "error", offerErr)
+			response = webrtcError(message.ID, "offer_failed", offerErr.Error())
+
+			break
+		}
+
+		sessionID = payload.SessionID
+		s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", payload.EntrypointID, "origin", payload.Origin)
+
+		response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
+	case "candidate":
+		var payload webrtcCandidatePayload
+		if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {
+			response = webrtcError(message.ID, "invalid_candidate", "candidate is invalid")
+			break
+		}
+
+		if candidateErr := s.webrtc.AddICECandidate(sessionID, payload.Candidate); candidateErr != nil {
+			s.logger.DebugContext(ctx, "webrtc candidate rejected", "session_id", sessionID, "error", candidateErr)
+			response = webrtcError(message.ID, "candidate_failed", candidateErr.Error())
+
+			break
+		}
+
+		response = Message{Type: "ack", ID: message.ID}
+	case "close":
+		var payload webrtcClosePayload
+		if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID {
+			response = webrtcError(message.ID, "invalid_close", "close is invalid")
+			break
+		}
+
+		_ = s.webrtc.Close(sessionID)
+		response = Message{Type: "ack", ID: message.ID}
+		sessionID = ""
+	default:
+		response = webrtcError(message.ID, "invalid_message", "message is invalid")
+	}
+
+	return sessionID, response
 }
 
 func parseWebRTCMessage(data []byte) (Message, error) {
@@ -384,9 +430,11 @@ func parseWebRTCMessage(data []byte) (Message, error) {
 	if json.Unmarshal(data, &message) != nil || message.ID == "" || len(message.Payload) == 0 {
 		return Message{}, ErrInvalidMessage
 	}
+
 	if message.Type != "offer" && message.Type != "candidate" && message.Type != "close" {
 		return Message{}, ErrInvalidMessage
 	}
+
 	return message, nil
 }
 

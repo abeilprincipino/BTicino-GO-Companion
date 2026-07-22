@@ -116,6 +116,7 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 	if err != nil {
 		return nil, fmt.Errorf("listen WebRTC ICE UDP %d: %w", webrtcICEPort, err)
 	}
+
 	interface_, err := system.PreferredOutboundInterface()
 	if err != nil {
 		_ = iceConn.Close()
@@ -135,6 +136,7 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 			configured[entrypoint.ID] = entrypoint
 		}
 	}
+
 	return &WebRTCService{
 		coordinator:       coordinator,
 		api:               api,
@@ -151,35 +153,72 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
-	if sessionID == "" {
-		return "", ErrSessionIDRequired
+
+	if err := validateOffer(sessionID, entrypointID, offerSDP, s.coordinator); err != nil {
+		return "", err
 	}
-	if entrypointID == "" {
-		return "", ErrEntrypointRequired
-	}
-	if offerSDP == "" {
-		return "", ErrOfferRequired
-	}
-	if s.coordinator == nil {
-		return "", ErrStreamBusy
-	}
+
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
 
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return "", ErrWebRTCClosed
+	entrypoint, previousSessionIDs, err := s.prepareOffer(sessionID, entrypointID)
+	if err != nil {
+		return "", err
 	}
+
+	for _, previousSessionID := range previousSessionIDs {
+		s.closeSession(previousSessionID, "superseded by successor session")
+	}
+
+	session, err := s.newOfferSession(sessionID, entrypointID, onLocalCandidate)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.registerSession(session); err != nil {
+		_ = session.pc.Close()
+		return "", err
+	}
+
+	if err := s.startOfferSource(ctx, session, entrypoint, offerSDP); err != nil {
+		return "", err
+	}
+
+	return s.createOfferAnswer(ctx, session, sessionID, entrypointID, len(previousSessionIDs))
+}
+
+func validateOffer(sessionID, entrypointID, offerSDP string, coordinator *StreamCoordinator) error {
+	switch {
+	case sessionID == "":
+		return ErrSessionIDRequired
+	case entrypointID == "":
+		return ErrEntrypointRequired
+	case offerSDP == "":
+		return ErrOfferRequired
+	case coordinator == nil:
+		return ErrStreamBusy
+	default:
+		return nil
+	}
+}
+
+func (s *WebRTCService) prepareOffer(sessionID, entrypointID string) (config.Entrypoint, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return config.Entrypoint{}, nil, ErrWebRTCClosed
+	}
+
 	s.prunePendingCandidatesLocked(time.Now())
+
 	entrypoint, found := s.entrypoints[entrypointID]
 	if !found {
-		s.mu.Unlock()
-		return "", ErrEntrypointNotFound
+		return config.Entrypoint{}, nil, ErrEntrypointNotFound
 	}
+
 	if _, exists := s.sessions[sessionID]; exists {
-		s.mu.Unlock()
-		return "", ErrSessionExists
+		return config.Entrypoint{}, nil, ErrSessionExists
 	}
 	// HA may create a successor player before its prior player has finished
 	// closing. One intercom source cannot serve both independent leases.
@@ -189,24 +228,27 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 			previousSessionIDs = append(previousSessionIDs, id)
 		}
 	}
-	s.mu.Unlock()
-	for _, previousSessionID := range previousSessionIDs {
-		s.closeSession(previousSessionID, "superseded by successor session")
-	}
 
+	return entrypoint, previousSessionIDs, nil
+}
+
+func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, onLocalCandidate func(*ICECandidate)) (*webRTCSession, error) {
 	pc, err := s.api.NewPeerConnection(s.configuration)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+
 	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now(), onLocalCandidate: onLocalCandidate}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			go s.closeSession(sessionID, "peer connection "+state.String())
 		}
 	})
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		s.logger.Debug("webrtc ICE connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+
 		if state == webrtc.ICEConnectionStateConnected {
 			s.logger.Info("webrtc ICE connected", "session_id", sessionID, "entrypoint_id", entrypointID)
 		}
@@ -221,6 +263,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		if track == nil || track.Kind() != webrtc.RTPCodecTypeAudio || !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
 			return
 		}
+
 		s.logger.Debug("webrtc backchannel track received", "session_id", sessionID, "entrypoint_id", entrypointID, "codec", track.Codec().MimeType, "payload_type", track.PayloadType(), "ssrc", track.SSRC())
 		go s.forwardBackchannel(session, track)
 	})
@@ -228,10 +271,12 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		if session.onLocalCandidate == nil {
 			return
 		}
+
 		if candidate == nil {
 			session.onLocalCandidate(nil)
 			return
 		}
+
 		candidateJSON := candidate.ToJSON()
 		session.onLocalCandidate(&ICECandidate{
 			Candidate:        candidateJSON.Candidate,
@@ -241,32 +286,42 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		})
 	})
 
-	if err := s.addOutboundTracks(session, entrypoint.ID); err != nil {
+	if err := s.addOutboundTracks(session, entrypointID); err != nil {
 		_ = pc.Close()
-		return "", err
+		return nil, err
 	}
 
+	return session, nil
+}
+
+func (s *WebRTCService) registerSession(session *webRTCSession) error {
 	s.mu.Lock()
-	if _, exists := s.sessions[sessionID]; exists {
-		s.mu.Unlock()
-		_ = pc.Close()
-		return "", ErrSessionExists
+	defer s.mu.Unlock()
+
+	if _, exists := s.sessions[session.id]; exists {
+		return ErrSessionExists
 	}
-	if pending, ok := s.pendingCandidates[sessionID]; ok {
+
+	if pending, ok := s.pendingCandidates[session.id]; ok {
 		session.pendingRemoteICE = append(session.pendingRemoteICE, pending.candidates...)
 		session.queuedCandidates.Add(uint64(len(pending.candidates)))
-		delete(s.pendingCandidates, sessionID)
+		delete(s.pendingCandidates, session.id)
 	}
-	s.sessions[sessionID] = session
-	s.mu.Unlock()
 
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
-		s.closeSession(sessionID, "set remote description failed")
-		return "", err
+	s.sessions[session.id] = session
+
+	return nil
+}
+
+func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSession, entrypoint config.Entrypoint, offerSDP string) error {
+	if err := session.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
+		s.closeSession(session.id, "set remote description failed")
+		return err
 	}
+
 	if err := s.flushPendingRemoteCandidates(session); err != nil {
-		s.closeSession(sessionID, "apply remote candidates failed")
-		return "", err
+		s.closeSession(session.id, "apply remote candidates failed")
+		return err
 	}
 
 	// The signaling request ends after this answer; the source must instead live
@@ -276,43 +331,56 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	lease, err := s.coordinator.AcquireWithStartup(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
 		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
 		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
-		RemoteBYE: func() { s.closeSession(sessionID, "remote SIP BYE") },
-		Failed:    func(error) { s.closeSession(sessionID, "source failure") },
+		RemoteBYE: func() { s.closeSession(session.id, "remote SIP BYE") },
+		Failed:    func(error) { s.closeSession(session.id, "source failure") },
 	})
+
 	startupCancel()
+
 	if err != nil {
-		s.closeSession(sessionID, "source startup failed")
-		return "", err
+		s.closeSession(session.id, "source startup failed")
+		return err
 	}
+
 	if !session.setLease(lease) {
 		s.coordinator.Release(lease)
-		return "", context.Canceled
+		return context.Canceled
 	}
+
+	return nil
+}
+
+func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSession, sessionID, entrypointID string, replacedSessions int) (string, error) {
 	s.logger.DebugContext(ctx, "webrtc source started", "session_id", sessionID, "entrypoint_id", entrypointID)
 
-	answer, err := pc.CreateAnswer(nil)
+	answer, err := session.pc.CreateAnswer(nil)
 	if err != nil {
 		s.closeSession(sessionID, "create answer failed")
 		return "", err
 	}
-	gatheringComplete := webrtc.GatheringCompletePromise(pc)
-	if err := pc.SetLocalDescription(answer); err != nil {
+
+	gatheringComplete := webrtc.GatheringCompletePromise(session.pc)
+	if err := session.pc.SetLocalDescription(answer); err != nil {
 		s.closeSession(sessionID, "set local description failed")
 		return "", err
 	}
+
 	select {
 	case <-gatheringComplete:
 	case <-ctx.Done():
 		s.closeSession(sessionID, "local ICE gathering timed out")
 		return "", ctx.Err()
 	}
-	local := pc.LocalDescription()
+
+	local := session.pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {
 		s.closeSession(sessionID, "local answer unavailable")
 		return "", errors.New("media: local WebRTC answer is unavailable")
 	}
+
 	s.logNegotiatedMedia(ctx, session)
-	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "replaced_sessions", len(previousSessionIDs), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
+	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "replaced_sessions", replacedSessions, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
+
 	return local.SDP, nil
 }
 
@@ -321,25 +389,32 @@ func (s *WebRTCService) Shutdown() error {
 	if s == nil {
 		return nil
 	}
+
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
+
 	s.closed = true
+
 	sessionIDs := make([]string, 0, len(s.sessions))
 	for sessionID := range s.sessions {
 		sessionIDs = append(sessionIDs, sessionID)
 	}
 	s.mu.Unlock()
+
 	for _, sessionID := range sessionIDs {
 		s.closeSession(sessionID, "service shutdown")
 	}
+
 	if s.iceConn == nil {
 		return nil
 	}
+
 	return s.iceConn.Close()
 }
 
@@ -351,6 +426,7 @@ func (s *WebRTCService) addOutboundTracks(session *webRTCSession, streamID strin
 	if err != nil {
 		return err
 	}
+
 	audio, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
 		SDPFmtpLine: "minptime=10;useinbandfec=0;stereo=0;sprop-stereo=0",
@@ -358,17 +434,22 @@ func (s *WebRTCService) addOutboundTracks(session *webRTCSession, streamID strin
 	if err != nil {
 		return err
 	}
+
 	videoSender, err := session.pc.AddTransceiverFromTrack(video, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly})
 	if err != nil {
 		return err
 	}
+
 	audioSender, err := session.pc.AddTransceiverFromTrack(audio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv})
 	if err != nil {
 		return err
 	}
+
 	go s.drainRTCP(session, "video", videoSender.Sender())
 	go s.drainRTCP(session, "audio", audioSender.Sender())
+
 	session.videoTrack, session.audioTrack = video, audio
+
 	return nil
 }
 
@@ -378,11 +459,14 @@ func (s *WebRTCService) logNegotiatedMedia(ctx context.Context, session *webRTCS
 		if sender == nil || sender.Track() == nil {
 			continue
 		}
+
 		parameters := sender.GetParameters()
+
 		codecs := make([]string, 0, len(parameters.Codecs))
 		for _, codec := range parameters.Codecs {
 			codecs = append(codecs, fmt.Sprintf("%s/%d", codec.MimeType, codec.PayloadType))
 		}
+
 		s.logger.DebugContext(ctx, "webrtc negotiated media", "session_id", session.id, "entrypoint_id", session.entrypointID, "kind", transceiver.Kind().String(), "direction", transceiver.Direction().String(), "sender_has_track", true, "encoding_count", len(parameters.Encodings), "codecs", codecs)
 	}
 }
@@ -391,12 +475,15 @@ func (s *WebRTCService) writeRTP(session *webRTCSession, trackName string, track
 	if session == nil || track == nil || packet == nil {
 		return
 	}
+
 	if err := track.WriteRTP(packet); err != nil {
 		if session.recordOutboundRTPWriteError(trackName) {
 			s.logger.Debug("webrtc outbound RTP write failed", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName, "error", err)
 		}
+
 		return
 	}
+
 	if session.recordOutboundRTP(trackName, packet) {
 		s.logger.Info("webrtc first RTP packet", "session_id", session.id, "entrypoint_id", session.entrypointID, "track", trackName)
 	}
@@ -406,11 +493,13 @@ func (s *WebRTCService) drainRTCP(session *webRTCSession, trackName string, send
 	if session == nil || sender == nil {
 		return
 	}
+
 	for {
 		packets, _, err := sender.ReadRTCP()
 		if err != nil {
 			return
 		}
+
 		for _, packet := range packets {
 			session.recordRTCP(trackName, packet)
 		}
@@ -423,9 +512,11 @@ func (s *WebRTCService) forwardBackchannel(session *webRTCSession, track *webrtc
 		if err != nil {
 			return
 		}
+
 		session.mu.Lock()
 		lease := session.lease
 		session.mu.Unlock()
+
 		if lease != nil {
 			normalizeBackchannelPayloadType(packet)
 			_ = s.coordinator.WriteBackchannelRTP(lease, packet)
@@ -444,7 +535,9 @@ func (s *WebRTCService) Close(sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return ErrSessionIDRequired
 	}
+
 	s.closeSession(sessionID, "client requested close")
+
 	return nil
 }
 
@@ -456,6 +549,7 @@ func (s *WebRTCService) AddICECandidate(sessionID string, candidate ICECandidate
 	if sessionID == "" {
 		return ErrSessionIDRequired
 	}
+
 	if strings.TrimSpace(candidate.Candidate) == "" {
 		return ErrCandidateRequired
 	}
@@ -469,15 +563,18 @@ func (s *WebRTCService) AddICECandidate(sessionID string, candidate ICECandidate
 
 	s.mu.Lock()
 	s.prunePendingCandidatesLocked(time.Now())
+
 	session := s.sessions[sessionID]
 	if session == nil {
 		batch := s.pendingCandidates[sessionID]
 		if len(batch.candidates) < maxPendingSessionCandidates {
 			batch.candidates = append(batch.candidates, init)
 		}
+
 		batch.updatedAt = time.Now()
 		s.pendingCandidates[sessionID] = batch
 		s.mu.Unlock()
+
 		return nil
 	}
 	s.mu.Unlock()
@@ -493,14 +590,19 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 			session.queuedCandidates.Add(1)
 		}
 		session.mu.Unlock()
+
 		return nil
 	}
+
 	pc := session.pc
 	session.mu.Unlock()
+
 	if err := pc.AddICECandidate(candidate); err != nil {
 		return err
 	}
+
 	session.appliedCandidates.Add(1)
+
 	return nil
 }
 
@@ -516,30 +618,38 @@ func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) err
 		if err := pc.AddICECandidate(candidate); err != nil {
 			return err
 		}
+
 		session.appliedCandidates.Add(1)
 	}
+
 	return nil
 }
 
 func (s *WebRTCService) closeSession(sessionID, reason string) {
 	s.mu.Lock()
+
 	session := s.sessions[sessionID]
 	if session != nil {
 		delete(s.sessions, sessionID)
 	}
+
 	delete(s.pendingCandidates, sessionID)
 	s.mu.Unlock()
+
 	if session == nil {
 		return
 	}
+
 	session.closeOnce.Do(func() {
 		session.mu.Lock()
 		lease := session.lease
 		session.lease = nil
 		session.mu.Unlock()
+
 		if lease != nil {
 			s.coordinator.Release(lease)
 		}
+
 		video := session.outboundRTPStats("video")
 		audio := session.outboundRTPStats("audio")
 		s.logger.Info("webrtc session closed", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond))
@@ -553,8 +663,10 @@ func (s *webRTCSession) recordOutboundRTP(trackName string, packet *rtp.Packet) 
 	if stats == nil {
 		return false
 	}
+
 	stats.packets.Add(1)
 	stats.payloadBytes.Add(uint64(len(packet.Payload)))
+
 	return stats.firstPacket.CompareAndSwap(false, true)
 }
 
@@ -563,7 +675,9 @@ func (s *webRTCSession) recordOutboundRTPWriteError(trackName string) bool {
 	if stats == nil {
 		return false
 	}
+
 	stats.writeErrors.Add(1)
+
 	return stats.firstWriteError.CompareAndSwap(false, true)
 }
 
@@ -572,6 +686,7 @@ func (s *webRTCSession) recordRTCP(trackName string, packet rtcp.Packet) {
 	if stats == nil || packet == nil {
 		return
 	}
+
 	switch feedback := packet.(type) {
 	case *rtcp.ReceiverReport:
 		for _, report := range feedback.Reports {
@@ -592,6 +707,7 @@ func (s *webRTCSession) outboundRTPStats(trackName string) outboundRTPStatsSnaps
 	if stats == nil {
 		return outboundRTPStatsSnapshot{}
 	}
+
 	return outboundRTPStatsSnapshot{packets: stats.packets.Load(), payloadBytes: stats.payloadBytes.Load(), writeErrors: stats.writeErrors.Load(), receiverReports: stats.receiverReports.Load(), reportedFractionLost: stats.reportedFractionLost.Load(), reportedTotalLost: stats.reportedTotalLost.Load(), reportedLastSequence: stats.reportedLastSequence.Load(), nackFeedback: stats.nackFeedback.Load(), pliFeedback: stats.pliFeedback.Load()}
 }
 
@@ -617,10 +733,13 @@ func (s *WebRTCService) prunePendingCandidatesLocked(now time.Time) {
 func (s *webRTCSession) setLease(lease *StreamLease) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
 		return false
 	}
+
 	s.lease = lease
+
 	return true
 }
 
@@ -629,7 +748,9 @@ func canonicalizeSDP(raw string) string {
 	if value == "" {
 		return ""
 	}
+
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
+
 	return strings.ReplaceAll(value, "\n", "\r\n") + "\r\n"
 }

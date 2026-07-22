@@ -29,6 +29,7 @@ func TestParseConnManWiFiService(t *testing.T) {
 	if service.Type != "wifi" || service.State != "online" || service.Interface != "wlan0" || service.IP != "192.0.2.172" || service.Netmask != "255.255.255.0" || service.MAC != "00:11:22:33:44:55" {
 		t.Fatalf("unexpected ConnMan service: %#v", service)
 	}
+
 	if service.Strength == nil || *service.Strength != 61 {
 		t.Fatalf("unexpected WiFi strength: %#v", service.Strength)
 	}

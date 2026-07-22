@@ -249,6 +249,7 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&persisted); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+
 	cfg := Config{
 		Companion: Companion{
 			Entrypoints: persisted.Companion.Entrypoints,
@@ -259,6 +260,7 @@ func Load(path string) (Config, error) {
 		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, Services: persisted.System.Services},
 		HomeKit: persisted.HomeKit,
 	}
+
 	if err := ensureSingleDocument(decoder); err != nil {
 		return Config{}, err
 	}
@@ -315,15 +317,19 @@ func Validate(cfg Config) error {
 	if !validPairingState(cfg.Auth.PairingState) {
 		return fmt.Errorf("invalid pairing state %q", cfg.Auth.PairingState)
 	}
+
 	if !validInstanceID(cfg.Auth.InstanceID) {
 		return errors.New("pairing instance id must be a 32-character hexadecimal value")
 	}
+
 	if cfg.Auth.BearerTokenHash != "" && !validBearerTokenHash(cfg.Auth.BearerTokenHash) {
 		return errors.New("bearer token hash must be a SHA-256 hexadecimal value")
 	}
+
 	if cfg.Auth.PairingState == PairingStateClaimed && cfg.Auth.BearerTokenHash == "" {
 		return errors.New("claimed pairing state requires a bearer token hash")
 	}
+
 	if cfg.Auth.PairingState != PairingStateClaimed && cfg.Auth.BearerTokenHash != "" {
 		return errors.New("unclaimed pairing state must not contain a bearer token hash")
 	}
@@ -349,6 +355,7 @@ func Validate(cfg Config) error {
 	if cfg.HomeKit.PIN != "" && !validHomeKitPIN(cfg.HomeKit.PIN) {
 		return ErrInvalidHomeKitPIN
 	}
+
 	return nil
 }
 
@@ -387,6 +394,7 @@ func save(path string, cfg Config, exclusive bool) error {
 		if exclusive && errors.Is(err, os.ErrExist) {
 			return ErrConfigExists
 		}
+
 		return fmt.Errorf("save config: %w", err)
 	}
 
@@ -422,10 +430,12 @@ func GenerateClaimCode() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	second, err := RandomHex(2)
 	if err != nil {
 		return "", err
 	}
+
 	return first + "-" + second, nil
 }
 
@@ -433,7 +443,9 @@ func ValidClaimCode(code string) bool {
 	if len(code) != 9 || code[4] != '-' {
 		return false
 	}
+
 	_, err := hex.DecodeString(code[:4] + code[5:])
+
 	return err == nil
 }
 
@@ -441,7 +453,9 @@ func validBearerTokenHash(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
+
 	_, err := hex.DecodeString(value)
+
 	return err == nil
 }
 
@@ -458,7 +472,9 @@ func validInstanceID(value string) bool {
 	if len(value) != 32 {
 		return false
 	}
+
 	_, err := hex.DecodeString(value)
+
 	return err == nil
 }
 
@@ -487,6 +503,7 @@ func GenerateHomeKitSetupID() (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		setupID[i] = alphabet[value.Int64()]
 	}
 

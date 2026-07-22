@@ -2,7 +2,6 @@ package discovery
 
 import (
 	"bticino-go-companion/internal/config"
-	"context"
 	"errors"
 	"net"
 	"slices"
@@ -144,21 +143,26 @@ func TestServiceRunReadvertisesChangedPairingState(t *testing.T) {
 	registrar := notifyingRegistrar{registrations: make(chan RegistrationRequest, 2)}
 	service := NewService(registrar)
 	service.refresh = time.Millisecond
+
 	var claimed atomic.Bool
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	ctx := t.Context()
+
 	go func() {
 		_ = service.Run(ctx, func() (Advertisement, error) {
 			state := config.PairingStateClaimable
 			if claimed.Load() {
 				state = config.PairingStateClaimed
 			}
+
 			return Advertisement{DeviceID: "c300x-aabb", PairingState: state, InstanceID: "00112233445566778899aabbccddeeff", Port: 8080}, nil
 		})
 	}()
 
 	first := <-registrar.registrations
+
 	claimed.Store(true)
+
 	second := <-registrar.registrations
 	if !slices.Contains(first.TXT, "pairing_state=claimable") || !slices.Contains(second.TXT, "pairing_state=claimed") {
 		t.Fatalf("pairing TXT transition = %#v -> %#v", first.TXT, second.TXT)

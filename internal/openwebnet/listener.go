@@ -36,6 +36,7 @@ func NewListener(entrypoints []config.Entrypoint, logger *slog.Logger, trace *Tr
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &Listener{group: multicastGroup, port: multicastPort, buffer: readBufferSize, mapper: NewMapper(entrypoints), logger: logger, trace: trace}
 }
 
@@ -44,18 +45,27 @@ func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
 	if ip == nil {
 		return fmt.Errorf("invalid multicast group %q", l.group)
 	}
+
 	if l.buffer <= 0 {
 		l.buffer = 65535
 	}
+
 	conn, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: l.port})
 	if err != nil {
 		return fmt.Errorf("listen multicast: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			l.logger.Debug("close multicast listener", "error", closeErr)
+		}
+	}()
+
 	if err := conn.SetReadBuffer(l.buffer); err != nil {
 		l.logger.Warn("set multicast read buffer", "error", err)
 	}
+
 	go func() { <-ctx.Done(); _ = conn.Close() }()
+
 	buf := make([]byte, l.buffer)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
@@ -63,21 +73,28 @@ func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return nil
 			}
+
 			l.logger.Warn("read multicast frame", "error", err)
+
 			continue
 		}
+
 		message, err := l.parser.Parse(buf[:n])
 		if err != nil {
 			continue
 		}
+
 		if l.frameObserver != nil {
 			l.frameObserver(message.Raw)
 		}
+
 		if l.messageObserver != nil {
 			l.messageObserver(message)
 		}
+
 		events := l.mapper.Map(message)
 		l.trace.Record(message, len(events))
+
 		for _, event := range events {
 			sink(event)
 		}

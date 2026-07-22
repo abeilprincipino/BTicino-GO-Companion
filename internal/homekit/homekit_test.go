@@ -62,18 +62,23 @@ func TestManager_RunGeneratesPersistentCredentials(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	manager, err := NewManager(store)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	if err := manager.Run(ctx, t.TempDir(), nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if pin := store.Snapshot().HomeKit.PIN; len(pin) != 10 || pin[3] != '-' || pin[6] != '-' {
 		t.Fatalf("pin = %q, want XXX-XX-XXX", pin)
 	}
+
 	if setupID := store.Snapshot().HomeKit.SetupID; len(setupID) != 4 {
 		t.Fatalf("setup id = %q, want four characters", setupID)
 	}
@@ -99,12 +104,15 @@ func TestNewRuntimeConfig(t *testing.T) {
 	if runtime.name != "BTicino Companion" {
 		t.Fatalf("name = %q, want default", runtime.name)
 	}
+
 	if runtime.address != ":51826" {
 		t.Fatalf("address = %q, want :51826", runtime.address)
 	}
+
 	if runtime.setupPIN != "12345678" {
 		t.Fatalf("setup pin = %q, want 12345678", runtime.setupPIN)
 	}
+
 	if runtime.model != "C300X" || runtime.serialNumber != "c300x-001122334455" {
 		t.Fatalf("accessory identity = %#v", runtime)
 	}
@@ -129,10 +137,12 @@ func TestManager_RunSkipsDisabledHomeKit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	dataDir := filepath.Join(t.TempDir(), "homekit-data")
 	if err := manager.Run(context.Background(), dataDir, nil); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+
 	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("disabled Run() created %q: %v", dataDir, err)
 	}
@@ -146,19 +156,24 @@ func TestManager_ResetClearsCredentialsAndStore(t *testing.T) {
 		cfg.HomeKit.Enabled = true
 		cfg.HomeKit.PIN = "123-45-678"
 		cfg.HomeKit.SetupID = "ABCD"
+
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	manager, err := NewManager(store)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	dataDir := t.TempDir()
+
 	storePath := filepath.Join(dataDir, "homekit")
 	if err := os.MkdirAll(storePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(storePath, "pairing"), []byte("paired"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +181,11 @@ func TestManager_ResetClearsCredentialsAndStore(t *testing.T) {
 	if err := manager.Reset(dataDir); err != nil {
 		t.Fatal(err)
 	}
+
 	if cfg := store.Snapshot().HomeKit; !cfg.Enabled || cfg.PIN != "" || cfg.SetupID != "" {
 		t.Fatalf("reset HomeKit config = %#v", cfg)
 	}
+
 	if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("HomeKit store exists after reset: %v", err)
 	}
@@ -181,6 +198,7 @@ func TestManager_BuildsStableControlAccessories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	controls := &homeKitControls{}
 	manager.SetControllers(controls, controls, controls)
 	manager.Sync(core.State{Audio: core.AudioState{Muted: true}, Voicemail: &core.VoicemailState{Enabled: true}})
@@ -199,29 +217,36 @@ func TestManager_BuildsStableControlAccessories(t *testing.T) {
 	if bridge.Id != 1 {
 		t.Fatalf("bridge id = %d, want 1", bridge.Id)
 	}
+
 	if len(accessories) != 4 {
 		t.Fatalf("accessory count = %d, want 4", len(accessories))
 	}
+
 	if manager.ringer == nil || !manager.ringer.Switch.On.Value() {
 		t.Fatal("ringer mute switch did not reflect projected state")
 	}
+
 	if manager.mailbox == nil || !manager.mailbox.Switch.On.Value() {
 		t.Fatal("voicemail switch did not reflect projected state")
 	}
+
 	for _, id := range []core.EntrypointID{"main", "side"} {
 		lock := manager.locks[id]
 		if lock == nil {
 			t.Fatalf("lock %q was not created", id)
 		}
+
 		if got := lock.lock.LockTargetState.Value(); got != characteristic.LockTargetStateSecured {
 			t.Fatalf("lock %q target state = %d, want secured", id, got)
 		}
 	}
+
 	mainID := manager.locks["main"].aid
 	manager.mu.Lock()
 	cfg.Companion.Entrypoints[0], cfg.Companion.Entrypoints[1] = cfg.Companion.Entrypoints[1], cfg.Companion.Entrypoints[0]
 	manager.buildAccessoriesLocked(cfg, newRuntimeConfig(cfg))
 	manager.mu.Unlock()
+
 	if got := manager.locks["main"].aid; got != mainID {
 		t.Fatalf("main lock id = %d, want stable id %d", got, mainID)
 	}
@@ -234,8 +259,10 @@ func TestManager_UnlockRestoresSecuredState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	controls := &homeKitControls{}
 	manager.SetControllers(controls, nil, nil)
+
 	cfg := testConfigStore(t).Snapshot()
 
 	manager.mu.Lock()
@@ -246,9 +273,11 @@ func TestManager_UnlockRestoresSecuredState(t *testing.T) {
 	if err := manager.unlock("main"); err != nil {
 		t.Fatal(err)
 	}
+
 	if controls.unlocked != "main" {
 		t.Fatalf("unlock entrypoint = %q, want main", controls.unlocked)
 	}
+
 	if got := manager.locks["main"].lock.LockTargetState.Value(); got != characteristic.LockTargetStateUnsecured {
 		t.Fatalf("lock target state = %d, want unsecured", got)
 	}
@@ -261,9 +290,11 @@ func TestManager_ControlsRestoreProjectedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	controls := &homeKitControls{}
 	manager.SetControllers(nil, controls, controls)
 	manager.Sync(core.State{Audio: core.AudioState{Muted: false}, Voicemail: &core.VoicemailState{Enabled: true}})
+
 	cfg := testConfigStore(t).Snapshot()
 
 	manager.mu.Lock()
@@ -273,12 +304,15 @@ func TestManager_ControlsRestoreProjectedState(t *testing.T) {
 
 	manager.setRingerMute(true)
 	manager.setVoicemail(false)
+
 	if controls.muteCalls != 1 || controls.disableVoicemailCalls != 1 {
 		t.Fatalf("control calls = %#v", controls)
 	}
+
 	if manager.ringer.Switch.On.Value() {
 		t.Fatal("ringer switch optimistically changed projected state")
 	}
+
 	if !manager.mailbox.Switch.On.Value() {
 		t.Fatal("voicemail switch optimistically changed projected state")
 	}

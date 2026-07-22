@@ -55,6 +55,7 @@ func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypoint
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &SourceSession{logger: logger.With("component", "media.session", "model", sourceConfig.Model, "entrypoint_id", entrypointID), sourceConfig: sourceConfig, entrypointID: entrypointID, sip: sip, av: av, video: video, audio: audio}
 }
 
@@ -64,10 +65,12 @@ func (s *SourceSession) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return ErrSourceSessionStarted
 	}
+
 	if s.sourceConfig.Model == "" || s.sourceConfig.DevAddr == "" || s.entrypointID == "" || s.sip == nil || s.av == nil || s.video == nil || s.audio == nil {
 		s.mu.Unlock()
 		return errors.New("media: incomplete source session")
 	}
+
 	startCtx, cancel := context.WithCancel(ctx)
 	s.starting = true
 	s.remoteEnded = false
@@ -77,63 +80,83 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	var videoStarted, audioStarted, sipStarted bool
+
 	started := false
 	defer func() {
 		if !started {
 			s.mu.Lock()
+
 			hangup := sipStarted && !s.remoteEnded && !s.terminating
 			if hangup {
 				s.terminating = true
 			}
 			s.mu.Unlock()
+
 			if hangup {
 				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				if err := s.sip.Hangup(cleanupCtx); err != nil {
 					s.logger.WarnContext(cleanupCtx, "sip cleanup after startup failure failed", "error", err)
 				}
+
 				cleanupCancel()
 			}
+
 			if audioStarted || videoStarted {
 				s.closeReceivers()
 			}
 		}
+
 		var onStarted func()
+
 		s.mu.Lock()
 		s.started = started
 		s.starting = false
 		s.startCancel = nil
 		close(s.startDone)
+
 		s.startDone = nil
 		if started {
 			onStarted = s.onStarted
 		}
 		s.mu.Unlock()
+
 		if onStarted != nil {
 			onStarted()
 		}
 	}()
 
 	s.logger.InfoContext(startCtx, "source session starting", "dev_addr", s.sourceConfig.DevAddr, "high_res_video", s.sourceConfig.HighResVideo)
+
 	if err := s.video.Start(startCtx); err != nil {
 		return fmt.Errorf("start video receiver: %w", err)
 	}
+
 	videoStarted = true
+
 	if err := s.audio.Start(startCtx); err != nil {
 		return fmt.Errorf("start audio receiver: %w", err)
 	}
+
 	audioStarted = true
+
 	if err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr); err != nil {
 		return fmt.Errorf("start outgoing sip: %w", err)
 	}
+
 	sipStarted = true
+
 	if err := s.av.Start(startCtx, s.sourceConfig.HighResVideo, s.video, s.audio); err != nil {
 		return fmt.Errorf("start av: %w", err)
 	}
+
 	if err := startCtx.Err(); err != nil {
 		return fmt.Errorf("start source session: %w", err)
 	}
+
 	started = true
+
 	s.logger.InfoContext(startCtx, "source session started")
+
 	return nil
 }
 
@@ -150,27 +173,38 @@ func (s *SourceSession) Close(ctx context.Context) error {
 		cancel, done := s.startCancel, s.startDone
 		s.mu.Unlock()
 		cancel()
-		<-done
-		return nil
+
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+
 	if !s.started {
 		s.mu.Unlock()
 		return nil
 	}
+
 	s.logger.InfoContext(ctx, "source session stopping")
 	s.started = false
+
 	hangup := !s.remoteEnded && !s.terminating
 	if hangup {
 		s.terminating = true
 	}
 	s.mu.Unlock()
 	s.closeReceivers()
+
 	if hangup {
 		if err := s.sip.Hangup(ctx); err != nil {
 			return fmt.Errorf("stop outgoing sip: %w", err)
 		}
 	}
+
 	s.logger.InfoContext(ctx, "source session stopped")
+
 	return nil
 }
 
@@ -178,13 +212,16 @@ func (s *SourceSession) Close(ctx context.Context) error {
 // It deliberately does not send BYE because the peer has already done so.
 func (s *SourceSession) RemoteDialogEnded() {
 	s.mu.Lock()
+
 	s.remoteEnded = true
 	if s.starting {
 		cancel := s.startCancel
 		s.mu.Unlock()
 		cancel()
+
 		return
 	}
+
 	if !s.started {
 		s.mu.Unlock()
 		return
@@ -200,6 +237,7 @@ func (s *SourceSession) closeReceivers() {
 	if err := s.audio.Close(); err != nil {
 		s.logger.Warn("close audio receiver", "error", err)
 	}
+
 	if err := s.video.Close(); err != nil {
 		s.logger.Warn("close video receiver", "error", err)
 	}

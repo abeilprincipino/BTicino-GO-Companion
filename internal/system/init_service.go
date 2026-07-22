@@ -13,6 +13,7 @@ func NewInitServiceAdapter(runner CommandRunner) *InitServiceAdapter {
 	if runner == nil {
 		runner = execCommandRunner{}
 	}
+
 	return &InitServiceAdapter{runner: runner}
 }
 

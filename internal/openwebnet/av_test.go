@@ -18,13 +18,16 @@ func TestAVClientStartsProfiledVideoThenAudio(t *testing.T) {
 		if count == 1 {
 			video.flowing = true
 		}
+
 		if count == 2 {
 			audio.flowing = true
 		}
 	}
+
 	if err := client.Start(context.Background(), true, video, audio); err != nil {
 		t.Fatalf("start: %v", err)
 	}
+
 	frames := server.Frames()
 	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#5007#0*##" || frames[1] != "*7*300#127#0#0#1#5000#2*##" {
 		t.Fatalf("frames = %v", frames)
@@ -40,13 +43,16 @@ func TestAVClientUsesObservedFlowAfterNACK(t *testing.T) {
 		if count == 1 {
 			video.flowing = true
 		}
+
 		if count == 2 {
 			audio.flowing = true
 		}
 	}
+
 	if err := client.Start(context.Background(), false, video, audio); err != nil {
 		t.Fatalf("start with observed video flow: %v", err)
 	}
+
 	frames := server.Frames()
 	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#5007#1*##" {
 		t.Fatalf("frames = %v", frames)
@@ -56,10 +62,12 @@ func TestAVClientUsesObservedFlowAfterNACK(t *testing.T) {
 func TestAVClientBoundsRejectedAttempts(t *testing.T) {
 	server := newAVTestServer(t, FrameNACK, FrameNACK, FrameNACK)
 	client := newAVTestClient(server)
+
 	err := client.Start(context.Background(), false, &testFlowProbe{}, &testFlowProbe{})
 	if !errors.Is(err, ErrAVCommandRejected) {
 		t.Fatalf("start error = %v, want rejected command", err)
 	}
+
 	if got := len(server.Frames()); got != 3 {
 		t.Fatalf("attempts = %d, want 3", got)
 	}
@@ -79,31 +87,40 @@ type avTestServer struct {
 
 func newAVTestServer(t *testing.T, replies ...string) *avTestServer {
 	t.Helper()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	server := &avTestServer{listener: listener, replies: replies}
+
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
+
 			go server.handle(conn)
 		}
 	}()
+
 	t.Cleanup(func() { _ = listener.Close() })
+
 	return server
 }
 
 func (s *avTestServer) handle(conn net.Conn) {
 	defer conn.Close()
+
 	buf := make([]byte, 256)
+
 	n, err := conn.Read(buf)
 	if err != nil {
 		return
 	}
+
 	s.mu.Lock()
 	s.frames = append(s.frames, string(buf[:n]))
 	count := len(s.frames)
@@ -111,15 +128,18 @@ func (s *avTestServer) handle(conn net.Conn) {
 	s.replies = s.replies[1:]
 	onFrame := s.onFrame
 	s.mu.Unlock()
+
 	if onFrame != nil {
 		onFrame(count)
 	}
+
 	_, _ = conn.Write([]byte(reply))
 }
 
 func (s *avTestServer) Frames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return append([]string(nil), s.frames...)
 }
 
@@ -130,5 +150,6 @@ func newAVTestClient(server *avTestServer) *AVClient {
 	client.retryDelay = time.Millisecond
 	client.flowTimeout = 20 * time.Millisecond
 	client.flowPoll = time.Millisecond
+
 	return client
 }

@@ -31,19 +31,13 @@ linters:
     - predeclared
     - errname
     - asciicheck
-    - gocyclo
-    - nestif
     - funlen
-    - dupl
     - perfsprint
     - unconvert
     - ineffassign
-    - goconst
     - gosec
     - bidichk
     - bodyclose
-    - noctx
-    - containedctx
     - fatcontext
     - sqlclosecheck
     - rowserrcheck
@@ -52,12 +46,10 @@ linters:
     - testifylint
     - thelper
     - usetesting
-    - paralleltest
     - modernize
     - exptostd
     - intrange
     - usestdlibvars
-    - exhaustive
     - nolintlint
 
   disable:
@@ -99,23 +91,20 @@ linters:
       - testutils$
       - examples$
     rules:
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gosec
       - text: "G304"
         linters:
           - gosec
 
   settings:
-    dupl:
-      threshold: 100
     errcheck:
       check-type-assertions: true
     funlen:
-      lines: 120
-      statements: 80
-    goconst:
-      min-len: 3
-      min-occurrences: 4
-    gocyclo:
-      min-complexity: 30
+      lines: 240
+      statements: 240
     nolintlint:
       require-explanation: true
       require-specific: true

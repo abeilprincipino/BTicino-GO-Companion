@@ -69,26 +69,32 @@ func NewRTPReceiver(cfg RTPReceiverConfig) *RTPReceiver {
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &RTPReceiver{address: cfg.Address, codec: cfg.Codec, payloadType: cfg.PayloadType, logger: logger.With("component", "media.rtp", "direction", "downlink", "codec", cfg.Codec, "payload_type", cfg.PayloadType), packet: cfg.Packet}
 }
 
 func (r *RTPReceiver) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	if r.conn != nil {
 		return ErrRTPReceiverStarted
 	}
+
 	addr, err := net.ResolveUDPAddr("udp4", r.address)
 	if err != nil {
 		return fmt.Errorf("resolve rtp address: %w", err)
 	}
+
 	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		return fmt.Errorf("listen rtp: %w", err)
 	}
+
 	r.conn = conn
 	r.done = make(chan struct{})
 	r.metadata = RTPMetadata{Codec: r.codec, PayloadType: r.payloadType, LocalAddr: conn.LocalAddr().String()}
+
 	r.logger.InfoContext(ctx, "rtp receiver bound", "local_addr", r.metadata.LocalAddr)
 	go func(done <-chan struct{}) {
 		select {
@@ -99,20 +105,26 @@ func (r *RTPReceiver) Start(ctx context.Context) error {
 	}(r.done)
 	go r.read(ctx, conn, r.done)
 	go r.logPacketStatsPeriodically(r.done)
+
 	return nil
 }
 
 func (r *RTPReceiver) Close() error {
 	r.mu.Lock()
+
 	conn, done := r.conn, r.done
 	if conn == nil {
 		r.mu.Unlock()
 		return nil
 	}
+
 	r.conn, r.done = nil, nil
 	r.mu.Unlock()
+
 	err := conn.Close()
+
 	<-done
+
 	return err
 }
 
@@ -120,17 +132,20 @@ func (r *RTPReceiver) RecentlyFlowing(window time.Duration) bool {
 	r.mu.RLock()
 	last := r.metadata.LastPacketAt
 	r.mu.RUnlock()
+
 	return !last.IsZero() && time.Since(last) <= window
 }
 
 func (r *RTPReceiver) Metadata() RTPMetadata {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	return r.metadata
 }
 
 func (r *RTPReceiver) read(ctx context.Context, conn *net.UDPConn, done chan struct{}) {
 	defer close(done)
+
 	buf := make([]byte, 65535)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
@@ -138,14 +153,18 @@ func (r *RTPReceiver) read(ctx context.Context, conn *net.UDPConn, done chan str
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
+
 			r.logger.Warn("read rtp", "error", err)
+
 			continue
 		}
+
 		packet := &rtp.Packet{}
 		if err := packet.Unmarshal(buf[:n]); err != nil || packet.PayloadType != r.payloadType {
 			r.recordInvalidPacket()
 			continue
 		}
+
 		r.mu.Lock()
 		r.metadata.PacketCount++
 		r.metadata.SSRC = packet.SSRC
@@ -153,9 +172,11 @@ func (r *RTPReceiver) read(ctx context.Context, conn *net.UDPConn, done chan str
 		firstPacket := r.metadata.PacketCount == 1
 		localAddr := r.metadata.LocalAddr
 		r.mu.Unlock()
+
 		if firstPacket {
 			r.logger.Info("rtp receiver received first valid packet", "ssrc", packet.SSRC, "local_addr", localAddr)
 		}
+
 		if r.packet != nil {
 			r.packet(packet)
 		}
@@ -164,17 +185,20 @@ func (r *RTPReceiver) read(ctx context.Context, conn *net.UDPConn, done chan str
 
 func (r *RTPReceiver) recordInvalidPacket() {
 	now := time.Now()
+
 	r.mu.Lock()
 	r.metadata.InvalidCount++
 	r.invalidSinceLog++
 	invalidCount := r.metadata.InvalidCount
 	invalidSinceLog := r.invalidSinceLog
+
 	shouldLog := r.lastInvalidLog.IsZero() || now.Sub(r.lastInvalidLog) >= invalidLogInterval
 	if shouldLog {
 		r.lastInvalidLog = now
 		r.invalidSinceLog = 0
 	}
 	r.mu.Unlock()
+
 	if shouldLog {
 		r.logger.Warn("invalid rtp packets received", "invalid_count", invalidCount, "invalid_since_last_log", invalidSinceLog)
 	}
@@ -188,6 +212,7 @@ func (r *RTPReceiver) logPacketStats() {
 func (r *RTPReceiver) logPacketStatsPeriodically(done <-chan struct{}) {
 	ticker := time.NewTicker(packetStatsInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-done:

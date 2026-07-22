@@ -41,12 +41,15 @@ type FrameProvider interface {
 	Frames() []map[string]any
 }
 
-type DiagnosticsProvider interface{ Snapshot() diagnostics.Snapshot }
-type UpdateProvider interface {
-	Status(context.Context) (system.UpdateStatus, error)
-	Check(context.Context) (system.UpdateStatus, error)
-	Install(context.Context) (system.UpdateStatus, error)
-}
+type (
+	DiagnosticsProvider interface{ Snapshot() diagnostics.Snapshot }
+	UpdateProvider      interface {
+		Status(context.Context) (system.UpdateStatus, error)
+		Check(context.Context) (system.UpdateStatus, error)
+		Install(context.Context) (system.UpdateStatus, error)
+	}
+)
+
 type HomeKitProvider interface {
 	Status() homekit.Status
 	Reset(dataDir string) error
@@ -171,6 +174,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.diagnostics != nil {
 		diagnostic = s.diagnostics.Snapshot()
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"model": cfg.Companion.Model, "device_id": cfg.Companion.DeviceID, "firmware": diagnostic.OpenWebNet.Firmware, "hardware": diagnostic.OpenWebNet.Hardware, "uptime_seconds": int64(time.Since(s.bootTime).Seconds()), "free_ram_kb": readMemAvailableKB(), "wifi_strength": diagnostic.Local.WiFiStrength, "diagnostics": diagnostic})
 }
 
@@ -179,11 +183,13 @@ func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "update status is unavailable")
 		return
 	}
+
 	status, err := s.update.Status(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "update status is unavailable")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -191,6 +197,7 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	if s.update == nil {
 		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
 		return
@@ -201,6 +208,7 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "update install failed")
 		return
 	}
+
 	writeJSON(w, http.StatusAccepted, status)
 }
 
@@ -208,6 +216,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	if s.update == nil {
 		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
 		return
@@ -218,6 +227,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "update check failed")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -226,16 +236,19 @@ func readMemAvailableKB() int64 {
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+
+	for line := range strings.SplitSeq(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 || fields[0] != "MemAvailable:" {
 			continue
 		}
+
 		value, err := strconv.ParseInt(fields[1], 10, 64)
 		if err == nil {
 			return value
 		}
 	}
+
 	return 0
 }
 
@@ -245,6 +258,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "read log failed")
 		return
 	}
+
 	if len(data) > 512<<10 {
 		data = data[len(data)-(512<<10):]
 	}
@@ -259,7 +273,9 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
+
 		writeJSON(w, http.StatusOK, map[string]any{"level": cfg.Logging.Level})
+
 		return
 	}
 
@@ -269,15 +285,19 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+
 	if s.setLogLevel == nil || s.setLogLevel(body.Level) != nil {
 		writeError(w, http.StatusBadRequest, "invalid log level")
 		return
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error { cfg.Logging.Level = body.Level; return nil }); err != nil {
 		s.logger.ErrorContext(r.Context(), "logging level save failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "save log level failed")
+
 		return
 	}
+
 	s.logger.InfoContext(r.Context(), "logging level changed", "level", body.Level)
 	writeJSON(w, http.StatusOK, map[string]any{"level": body.Level})
 }
@@ -287,6 +307,7 @@ func (s *Server) handleFrames(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false, "frames": []any{}})
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"available": true, "frames": s.frames.Frames()})
 }
 
@@ -301,6 +322,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if authenticated {
 		refreshSessionCookie(w, r)
 	}
+
 	response := map[string]any{
 		"authenticated":            authenticated,
 		"password_change_required": authenticated && current.bootstrap,
@@ -312,6 +334,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		response["version"] = system.BuildVersion
 		response["git_sha"] = system.BuildGitSHA
 	}
+
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -355,9 +378,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.pruneSessions(time.Now())
+
 	if len(s.sessions) >= maxSessions {
 		s.removeOldestSession()
 	}
+
 	now := time.Now()
 	s.sessions[token] = session{bootstrap: bootstrap, secret: cfg.WebUI.SessionSecret, createdAt: now, lastSeen: now}
 	s.mu.Unlock()
@@ -385,11 +410,13 @@ func (s *Server) handlePairing(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "authentication is unavailable")
 		return
 	}
+
 	cfg, ok := s.snapshot()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 		return
 	}
+
 	status := s.auth.Status()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"claim_code":            status.ClaimCode,
@@ -406,16 +433,20 @@ func (s *Server) handleRepairCode(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	if s.auth == nil {
 		writeError(w, http.StatusServiceUnavailable, "authentication is unavailable")
 		return
 	}
+
 	code, expiresAt, err := s.auth.IssueRepairCode()
 	if err != nil {
 		s.logger.Warn("issue repair code", "error", err)
 		writeError(w, http.StatusConflict, "repair code is unavailable")
+
 		return
 	}
+
 	s.logger.InfoContext(r.Context(), "webui repair code issued", "expires_at", expiresAt)
 	writeJSON(w, http.StatusOK, map[string]any{"repair_code": code, "expires_at": expiresAt, "ttl_s": int(auth.RepairCodeLifetime.Seconds())})
 }
@@ -441,6 +472,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+
 	refreshSessionCookie(w, r)
 
 	request.Username = strings.TrimSpace(request.Username)
@@ -448,6 +480,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password must replace the default and contain at least 8 characters")
 		return
 	}
+
 	if current.bootstrap && request.Password != request.PasswordConfirm {
 		writeError(w, http.StatusBadRequest, "password confirmation does not match")
 		return
@@ -491,15 +524,19 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	s.sessions = make(map[string]session)
 	s.mu.Unlock()
 	clearSessionCookie(w)
+
 	if current.bootstrap && s.auth != nil {
 		_, err := s.auth.StartInitialClaim()
 		if err != nil && !errors.Is(err, auth.ErrAlreadyClaimed) {
 			s.logger.Error("issue initial claim code", "error", err)
 			writeError(w, http.StatusInternalServerError, "save password failed")
+
 			return
 		}
+
 		s.logger.Info("webui owner setup completed")
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -530,6 +567,7 @@ func (s *Server) handleEntrypointsConfig(w http.ResponseWriter, r *http.Request)
 		}); err != nil {
 			s.logger.Error("save webui config", "error", err)
 			writeError(w, http.StatusBadRequest, "configuration is invalid")
+
 			return
 		}
 
@@ -546,30 +584,38 @@ func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
+
 		status := homekit.Status{Enabled: cfg.Enabled}
 		if s.homeKit != nil {
 			status = s.homeKit.Status()
 		}
+
 		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.Enabled, PIN: cfg.PIN, SetupID: cfg.SetupID, Name: cfg.Name, Running: status.Running, Paired: status.Paired})
+
 		return
 	}
+
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	var next editableHomeKit
 	if !decodeJSON(w, r, &next) {
 		return
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		cfg.HomeKit.Enabled = next.Enabled
 		if strings.TrimSpace(next.Name) != "" {
 			cfg.HomeKit.Name = strings.TrimSpace(next.Name)
 		}
+
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "configuration is invalid")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
 }
 
@@ -579,14 +625,17 @@ func (s *Server) handleHomeKitQRCode(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 		return
 	}
+
 	if !cfg.Enabled || cfg.PIN == "" || cfg.SetupID == "" {
 		writeError(w, http.StatusConflict, "restart Companion before pairing HomeKit")
 		return
 	}
+
 	image, err := homekit.SetupQRCodePNG(cfg)
 	if err != nil {
 		s.logger.Error("render homekit qr code", "error", err)
 		writeError(w, http.StatusInternalServerError, "homekit qr code is unavailable")
+
 		return
 	}
 
@@ -607,27 +656,34 @@ func (s *Server) handleHomeKitReset(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	var request confirmationRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
+
 	if !request.Confirm {
 		writeError(w, http.StatusBadRequest, "confirmation required")
 		return
 	}
+
 	if s.homeKit == nil || s.restart == nil {
 		writeError(w, http.StatusServiceUnavailable, "HomeKit reset is unavailable")
 		return
 	}
+
 	if err := s.homeKit.Reset(system.CompanionDataDir); err != nil {
 		s.logger.Error("reset HomeKit", "error", err)
 		writeError(w, http.StatusInternalServerError, "reset HomeKit failed")
+
 		return
 	}
+
 	if err := s.requestRestart(r.Context()); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
 }
 
@@ -638,26 +694,33 @@ func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
+
 		writeJSON(w, http.StatusOK, editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, Services: cfg.System.Services})
+
 		return
 	}
+
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	var next editableSystem
 	if !decodeJSON(w, r, &next) {
 		return
 	}
+
 	if err := s.config.Update(func(cfg *config.Config) error {
 		cfg.System.RebootEnabled = next.RebootEnabled
 		cfg.System.UpdateEnabled = next.UpdateEnabled
 		cfg.System.UpdateExposed = next.UpdateExposed
 		cfg.System.Services = next.Services
+
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "configuration is invalid")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
 }
 
@@ -665,10 +728,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	var request confirmationRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
+
 	if !request.Confirm {
 		writeError(w, http.StatusBadRequest, "confirmation required")
 		return
@@ -678,6 +743,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
 }
 
@@ -685,16 +751,19 @@ func (s *Server) requestRestart(requestCtx context.Context) error {
 	if s.restart == nil {
 		return errors.New("restart is unavailable")
 	}
+
 	s.restartMu.Lock()
 	if s.restartPending {
 		s.restartMu.Unlock()
 		return errors.New("restart is already in progress")
 	}
+
 	s.restartPending = true
 	s.restartMu.Unlock()
 
 	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), restartTimeout)
 	go s.runRestart(restartCtx, cancel)
+
 	return nil
 }
 
@@ -702,14 +771,17 @@ func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
+
 	var request confirmationRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
+
 	if !request.Confirm {
 		writeError(w, http.StatusBadRequest, "confirmation required")
 		return
 	}
+
 	if s.reboot == nil {
 		writeError(w, http.StatusServiceUnavailable, "reboot is unavailable")
 		return
@@ -719,6 +791,7 @@ func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("reboot intercom", "error", err)
 		}
 	}()
+
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "rebooting": true})
 }
 
@@ -731,6 +804,7 @@ func (s *Server) runRestart(ctx context.Context, cancel context.CancelFunc) {
 	}()
 
 	s.logger.InfoContext(ctx, "restart companion requested")
+
 	if err := s.restart(ctx); err != nil {
 		s.logger.ErrorContext(ctx, "restart companion", "error", err)
 	}
@@ -749,6 +823,7 @@ func (s *Server) requireReady(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
+
 		refreshSessionCookie(w, r)
 
 		if current.bootstrap {
@@ -775,6 +850,7 @@ func (s *Server) currentSession(r *http.Request, cfg config.Config) (session, bo
 	}
 
 	now := time.Now()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -789,6 +865,7 @@ func (s *Server) currentSession(r *http.Request, cfg config.Config) (session, bo
 	if !current.bootstrap {
 		valid = cfg.WebUI.SessionSecret != "" && subtle.ConstantTimeCompare([]byte(current.secret), []byte(cfg.WebUI.SessionSecret)) == 1
 	}
+
 	if !valid {
 		delete(s.sessions, cookie.Value)
 		return session{}, false
@@ -796,6 +873,7 @@ func (s *Server) currentSession(r *http.Request, cfg config.Config) (session, bo
 
 	current.lastSeen = now
 	s.sessions[cookie.Value] = current
+
 	return current, true
 }
 
@@ -808,14 +886,17 @@ func (s *Server) pruneSessions(now time.Time) {
 }
 
 func (s *Server) removeOldestSession() {
-	var oldestToken string
-	var oldest time.Time
+	var (
+		oldestToken string
+		oldest      time.Time
+	)
 	for token, current := range s.sessions {
 		if oldestToken == "" || current.lastSeen.Before(oldest) {
 			oldestToken = token
 			oldest = current.lastSeen
 		}
 	}
+
 	delete(s.sessions, oldestToken)
 }
 
@@ -860,7 +941,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
@@ -871,7 +952,7 @@ func refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func (s *Server) staticHandler() http.Handler {

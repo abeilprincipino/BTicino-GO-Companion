@@ -2,9 +2,9 @@ package app
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/media"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"bticino-go-companion/internal/media"
 	"github.com/pion/rtp"
 )
 
@@ -30,9 +29,11 @@ func TestOpenConfigCreatesThenReusesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create config: %v", err)
 	}
+
 	if !created {
 		t.Fatal("created = false, want true")
 	}
+
 	if store.Snapshot().Companion.DeviceID != "c300x-001122334455" {
 		t.Fatalf("device id = %q", store.Snapshot().Companion.DeviceID)
 	}
@@ -41,12 +42,15 @@ func TestOpenConfigCreatesThenReusesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reuse config: %v", err)
 	}
+
 	if created {
 		t.Fatal("created = true, want false")
 	}
+
 	if detectCalls != 2 {
 		t.Fatalf("metadata detection calls = %d, want 2", detectCalls)
 	}
+
 	if store.Snapshot().Companion.DeviceID != "c300x-001122334455" {
 		t.Fatalf("reopened device id = %q", store.Snapshot().Companion.DeviceID)
 	}
@@ -68,6 +72,7 @@ func TestServeRunsAPIAndWebUI(t *testing.T) {
 
 	apiListener := testListener(t)
 	webUIListener := testListener(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -75,7 +80,7 @@ func TestServeRunsAPIAndWebUI(t *testing.T) {
 	go func() {
 		done <- serve(
 			ctx,
-			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			slog.New(slog.DiscardHandler),
 			apiListener,
 			&http.Server{Handler: http.HandlerFunc(writeOK)},
 			webUIListener,
@@ -88,6 +93,7 @@ func TestServeRunsAPIAndWebUI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("request %s: %v", listener.Addr(), err)
 		}
+
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("status %s = %d, want 200", listener.Addr(), response.StatusCode)
@@ -95,6 +101,7 @@ func TestServeRunsAPIAndWebUI(t *testing.T) {
 	}
 
 	cancel()
+
 	select {
 	case err := <-done:
 		if err != nil {
@@ -111,10 +118,12 @@ func TestBridgeSourceWritesBackchannelToAudioBridge(t *testing.T) {
 		speexOut: make(chan *rtp.Packet),
 		errors:   make(chan error),
 	}
-	bridge := media.NewAudioBridge(appGStreamerAudio{pipeline: pipeline}, func(*rtp.Packet) {}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	bridge := media.NewAudioBridge(appGStreamerAudio{pipeline: pipeline}, func(*rtp.Packet) {}, nil, slog.New(slog.DiscardHandler), nil)
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatalf("start bridge: %v", err)
 	}
+
 	t.Cleanup(func() {
 		if err := bridge.Stop(); err != nil {
 			t.Errorf("stop bridge: %v", err)
@@ -125,6 +134,7 @@ func TestBridgeSourceWritesBackchannelToAudioBridge(t *testing.T) {
 	if err := (&bridgeSource{bridge: bridge}).WriteBackchannelRTP(packet); err != nil {
 		t.Fatalf("write backchannel RTP: %v", err)
 	}
+
 	if pipeline.backchannelPacket != packet {
 		t.Fatal("audio bridge did not receive backchannel packet")
 	}

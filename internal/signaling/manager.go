@@ -54,6 +54,7 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog, entrypoin
 	if m.incoming != nil {
 		return ErrIncomingDialog
 	}
+
 	if m.active != nil {
 		return dialog.Respond(ctx, 486, "Busy Here", "")
 	}
@@ -143,6 +144,7 @@ func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
 	if m.incoming != nil {
 		return ErrIncomingDialog
 	}
+
 	if m.active != nil {
 		return ErrActiveDialog
 	}

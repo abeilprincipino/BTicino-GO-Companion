@@ -36,6 +36,7 @@ func TestUDPBackchannel_WriteRTP(t *testing.T) {
 	if err := backchannel.WriteRTP(want); err != nil {
 		t.Fatalf("WriteRTP() error = %v", err)
 	}
+
 	wantRaw, err := want.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +45,9 @@ func TestUDPBackchannel_WriteRTP(t *testing.T) {
 	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+
 	buffer := make([]byte, 1500)
+
 	n, _, err := listener.ReadFromUDP(buffer)
 	if err != nil {
 		t.Fatal(err)

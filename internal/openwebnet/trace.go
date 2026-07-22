@@ -1,6 +1,7 @@
 package openwebnet
 
 import (
+	"maps"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ func NewTrace(capacity int) *Trace {
 	if capacity <= 0 {
 		capacity = defaultTraceCapacity
 	}
+
 	return &Trace{capacity: capacity}
 }
 
@@ -44,11 +46,14 @@ func (t *Trace) record(system, raw string, eventCount int) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if len(t.frames) == t.capacity {
 		copy(t.frames, t.frames[1:])
 		t.frames[len(t.frames)-1] = frame
+
 		return
 	}
+
 	t.frames = append(t.frames, frame)
 }
 
@@ -59,12 +64,12 @@ func (t *Trace) Frames() []map[string]any {
 
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+
 	frames := make([]map[string]any, len(t.frames))
 	for index, frame := range t.frames {
 		frames[index] = make(map[string]any, len(frame))
-		for key, value := range frame {
-			frames[index][key] = value
-		}
+		maps.Copy(frames[index], frame)
 	}
+
 	return frames
 }

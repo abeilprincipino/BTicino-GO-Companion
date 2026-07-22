@@ -13,13 +13,16 @@ func TestMapperMapsRingAndStopForConfiguredEntrypoint(t *testing.T) {
 	if len(started) != 2 {
 		t.Fatalf("started events = %d, want 2", len(started))
 	}
+
 	if _, ok := started[0].(core.RingStarted); !ok {
 		t.Fatalf("first event = %T, want core.RingStarted", started[0])
 	}
+
 	incoming, ok := started[1].(core.IncomingCallStarted)
 	if !ok {
 		t.Fatalf("second event = %T, want core.IncomingCallStarted", started[1])
 	}
+
 	if incoming.EntrypointID != "main" || incoming.DialogID == "" {
 		t.Fatalf("incoming event = %#v", incoming)
 	}
@@ -32,9 +35,11 @@ func TestMapperMapsRingAndStopForConfiguredEntrypoint(t *testing.T) {
 	if len(stopped) != 2 {
 		t.Fatalf("stopped events = %d, want 2", len(stopped))
 	}
+
 	if _, ok := stopped[0].(core.RingCleared); !ok {
 		t.Fatalf("first stop event = %T, want core.RingCleared", stopped[0])
 	}
+
 	ended, ok := stopped[1].(core.CallHungUp)
 	if !ok || ended.DialogID != incoming.DialogID {
 		t.Fatalf("hangup event = %#v, want dialog %q", stopped[1], incoming.DialogID)
@@ -55,6 +60,7 @@ func TestMapperMapsAudioStateFrames(t *testing.T) {
 	if len(muted) != 1 {
 		t.Fatalf("muted events = %d, want 1", len(muted))
 	}
+
 	if _, ok := muted[0].(core.AudioMuted); !ok {
 		t.Fatalf("muted event = %T, want core.AudioMuted", muted[0])
 	}
@@ -63,6 +69,7 @@ func TestMapperMapsAudioStateFrames(t *testing.T) {
 	if len(unmuted) != 1 {
 		t.Fatalf("unmuted events = %d, want 1", len(unmuted))
 	}
+
 	if _, ok := unmuted[0].(core.AudioUnmuted); !ok {
 		t.Fatalf("unmuted event = %T, want core.AudioUnmuted", unmuted[0])
 	}
@@ -78,6 +85,7 @@ func TestTraceKeepsMostRecentFrames(t *testing.T) {
 	if len(frames) != 2 || frames[0]["raw"] != "second" || frames[1]["raw"] != "third" {
 		t.Fatalf("frames = %#v", frames)
 	}
+
 	if mapped, ok := frames[0]["mapped"].(bool); !ok || !mapped {
 		t.Fatalf("mapped = %#v", frames[0]["mapped"])
 	}

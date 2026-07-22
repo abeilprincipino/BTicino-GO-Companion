@@ -54,6 +54,7 @@ func (r *Runtime) SetLevel(level string) error {
 	}
 
 	r.level.Set(parsed)
+
 	return nil
 }
 
@@ -79,6 +80,7 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 		if route == "" {
 			route = r.URL.Path
 		}
+
 		if response.status < http.StatusBadRequest {
 			return
 		}
@@ -94,10 +96,12 @@ func HTTP(logger *slog.Logger, next http.Handler) http.Handler {
 			logger.ErrorContext(r.Context(), "http request failed", attributes...)
 			return
 		}
+
 		if response.status == http.StatusTooManyRequests {
 			logger.WarnContext(r.Context(), "http request rejected", attributes...)
 			return
 		}
+
 		logger.DebugContext(r.Context(), "http request rejected", attributes...)
 	})
 }
@@ -107,6 +111,7 @@ func clientIP(remoteAddr string) string {
 	if err == nil {
 		return host
 	}
+
 	return remoteAddr
 }
 
@@ -136,18 +141,21 @@ func (h *humanHandler) Handle(_ context.Context, record slog.Record) error {
 	for _, attr := range h.attrs {
 		appendAttr(&line, h.groups, attr)
 	}
+
 	record.Attrs(func(attr slog.Attr) bool {
 		appendAttr(&line, h.groups, attr)
 		return true
 	})
 
 	_, err := io.WriteString(h.output, line.String()+"\n")
+
 	return err
 }
 
 func (h *humanHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	next := *h
 	next.attrs = append(append([]slog.Attr{}, h.attrs...), attrs...)
+
 	return &next
 }
 
@@ -155,8 +163,10 @@ func (h *humanHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
+
 	next := *h
 	next.groups = append(append([]string{}, h.groups...), name)
+
 	return &next
 }
 
@@ -178,16 +188,20 @@ func appendAttr(line *strings.Builder, groups []string, attr slog.Attr) {
 	if attr.Equal(slog.Attr{}) {
 		return
 	}
+
 	if attr.Value.Kind() == slog.KindGroup {
 		for _, nested := range attr.Value.Group() {
 			appendAttr(line, append(groups, attr.Key), nested)
 		}
+
 		return
 	}
+
 	key := attr.Key
 	if len(groups) > 0 {
 		key = strings.Join(groups, ".") + "." + key
 	}
+
 	line.WriteByte(' ')
 	line.WriteString(key)
 	line.WriteByte('=')
@@ -219,6 +233,7 @@ func quoteIfNeeded(value string) string {
 	if value == "" || strings.ContainsAny(value, " \t\n\r\"") {
 		return strconv.Quote(value)
 	}
+
 	return value
 }
 
@@ -267,7 +282,7 @@ type rotatingFile struct {
 }
 
 func newRotatingFile(path string) (*rotatingFile, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 
@@ -287,6 +302,7 @@ func (r *rotatingFile) Write(data []byte) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stat log file: %w", err)
 	}
+
 	if info.Size()+int64(len(data)) > maxSize {
 		if err := r.rotate(); err != nil {
 			return 0, err
@@ -306,6 +322,7 @@ func (r *rotatingFile) Close() error {
 
 	err := r.file.Close()
 	r.file = nil
+
 	return err
 }
 
@@ -316,13 +333,16 @@ func (r *rotatingFile) rotate() error {
 
 	for index := maxBackups; index >= 1; index-- {
 		source := r.path + "." + strconv.Itoa(index)
+
 		destination := r.path + "." + strconv.Itoa(index+1)
 		if index == maxBackups {
 			if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove old log: %w", err)
 			}
+
 			continue
 		}
+
 		if err := os.Rename(source, destination); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("rotate log: %w", err)
 		}
@@ -338,5 +358,6 @@ func (r *rotatingFile) rotate() error {
 	}
 
 	r.file = file
+
 	return nil
 }

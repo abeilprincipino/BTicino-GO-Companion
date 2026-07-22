@@ -45,7 +45,9 @@ func run(
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	appLogger := logger.With("component", "app")
+
 	if configPath == "" {
 		configPath = config.DefaultPath
 	}
@@ -58,103 +60,34 @@ func run(
 	if created {
 		appLogger.Info("configuration created", "path", configPath)
 	}
+
 	appLogger.Info("application starting", "config_path", configPath)
+
 	if setLogLevel != nil {
 		if err := setLogLevel(configStore.Snapshot().Logging.Level); err != nil {
 			return fmt.Errorf("set log level: %w", err)
 		}
 	}
 
-	projector := core.NewProjector()
-	openWebNetTrace := openwebnet.NewTrace(0)
-	openWebNetControl := openwebnet.NewControl(configStore.Snapshot().Companion.Entrypoints, openWebNetTrace)
-	initialConfig := configStore.Snapshot()
-	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
-	if len(initialConfig.Companion.Entrypoints) == 0 {
-		return errors.New("create sip runtime: no entrypoints configured")
-	}
-	mediaConfig, err := media.ResolveSourceConfig(initialConfig.Companion.Model, initialConfig.Companion.Entrypoints[0])
+	runtime, err := newRuntime(ctx, configStore, logger)
 	if err != nil {
-		return fmt.Errorf("resolve sip runtime source: %w", err)
-	}
-	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{Target: mediaConfig.Target, Domain: signaling.DiscoverFlexisipDomain()})
-	if err != nil {
-		return fmt.Errorf("create sip runtime: %w", err)
-	}
-	defer func() {
-		if err := dialer.Close(); err != nil {
-			appLogger.Warn("sip runtime close failed", "error", err)
-		}
-	}()
-	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events, snapshots)
-	})
-	if err != nil {
-		return fmt.Errorf("create rtsp server: %w", err)
-	}
-	if err := rtspServer.Start(ctx); err != nil {
 		return err
 	}
-	defer func() {
-		if err := rtspServer.Close(); err != nil {
-			appLogger.Warn("RTSP server close failed", "error", err)
-		}
-	}()
+	defer runtime.close(appLogger)
 
-	allowedServices := []string{}
+	projector := runtime.projector
+	openWebNetTrace := runtime.trace
+	openWebNetControl := runtime.control
+	rtspServer := runtime.rtspServer
+	updater := runtime.updater
+	authStore := runtime.authStore
+	mdns := runtime.mdns
+	homeKit := runtime.homeKit
+	server := runtime.server
+	diagnosticService := runtime.diagnosticService
+	rt := runtime.runtime
 
-	for name, svc := range configStore.Snapshot().System.Services {
-		if svc.Enabled {
-			allowedServices = append(allowedServices, name)
-		}
-	}
-
-	rt := system.NewRuntimeControl(system.NewInitServiceAdapter(nil), system.NewRebootAdapter(nil), allowedServices)
-
-	build := system.CurrentBuildInfo()
-	updatePolicy := func() system.UpdatePolicy {
-		cfg := configStore.Snapshot().System
-		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: system.CompanionDataDir}
-	}
-	var updateSource system.ReleaseSource
-	if strings.TrimSpace(build.ReleaseRepo) != "" {
-		updateSource = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
-	}
 	restartCompanion := func(ctx context.Context) error { return rt.Restart(ctx, "companion") }
-	updater := system.NewUpdater(updateSource, build, updatePolicy, restartCompanion)
-
-	webrtc, err := media.NewWebRTCService(rtspServer.Coordinator(), initialConfig.Companion.Entrypoints)
-	if err != nil {
-		return fmt.Errorf("create WebRTC service: %w", err)
-	}
-	defer func() {
-		if err := webrtc.Shutdown(); err != nil {
-			appLogger.Warn("webrtc service shutdown failed", "error", err)
-		}
-	}()
-
-	authStore := auth.NewStore(configStore)
-	authStore.SetLogger(logger.With("component", "auth"))
-	mdns := discovery.NewService(nil)
-	homeKit, err := homekit.NewManager(configStore)
-	if err != nil {
-		return fmt.Errorf("create homekit manager: %w", err)
-	}
-	homeKit.SetControllers(openWebNetControl, openWebNetControl, openWebNetControl)
-	homeKit.SetStreamCoordinator(rtspServer.Coordinator())
-	homeKit.SetSnapshotProvider(snapshots)
-
-	server := api.NewServer(authStore, configStore, projector, logger)
-	server.SetEntrypoints(openWebNetControl)
-	server.SetAudio(openWebNetControl)
-	server.SetVoicemail(openWebNetControl)
-	server.SetWebRTC(webrtc)
-	server.SetSnapshot(snapshots)
-	snapshots.SetOnCaptured(server.BroadcastState)
-	server.SetRuntime(rt)
-	server.SetUpdate(updater)
-	diagnosticService := diagnostics.New(openWebNetControl, configStore.Snapshot().Companion.Model, server.BroadcastState)
-	server.SetDiagnostics(diagnosticService)
 
 	apiListener, err := net.Listen("tcp", apiAddr)
 	if err != nil {
@@ -172,6 +105,7 @@ func run(
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	apiServer.RegisterOnShutdown(server.CloseWebSockets)
+
 	webUI := webui.New(configStore, authStore, logger, restartCompanion, rt.Reboot, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
 	webUI.SetHomeKit(homeKit)
@@ -181,55 +115,15 @@ func run(
 		Handler:           webUI.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go checkUpdates(ctx, updater, server.BroadcastState, logger)
-	applyEvent := func(event core.Event) {
-		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
-			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
-			return
-		}
-		homeKit.Sync(projector.Snapshot())
-		server.BroadcastState()
-		server.BroadcastEvent(map[string]any{"type": event.Type()})
-	}
-	var voicemailRefreshMu sync.Mutex
-	refreshVoicemail := func(refreshCtx context.Context) (bool, error) {
-		voicemailRefreshMu.Lock()
-		defer voicemailRefreshMu.Unlock()
-		status, err := openWebNetControl.VoicemailStatus(refreshCtx)
-		if err != nil {
-			if errors.Is(err, openwebnet.ErrVoicemailUnavailable) {
-				if projector.Snapshot().Voicemail != nil {
-					applyEvent(core.VoicemailUnavailable{})
-				}
-				return false, nil
-			}
-			return false, fmt.Errorf("read voicemail status: %w", err)
-		}
 
-		current := projector.Snapshot().Voicemail
-		if current != nil && current.Enabled == status.Enabled {
-			return true, nil
-		}
-		if status.Enabled {
-			applyEvent(core.VoicemailEnabled{})
-		} else {
-			applyEvent(core.VoicemailDisabled{})
-		}
-		return true, nil
-	}
+	go checkUpdates(ctx, updater, server.BroadcastState, logger)
+
+	applyEvent := newEventApplier(projector, homeKit, server, logger)
+
+	refreshVoicemail := newVoicemailRefresher(openWebNetControl, projector, applyEvent)
 	server.SetVoicemailRefresh(refreshVoicemail)
-	rtspServer.Coordinator().SetStateObserver(func(snapshot media.StreamSnapshot) {
-		streamID := core.StreamID(fmt.Sprintf("media-%d", snapshot.LeaseID))
-		switch {
-		case snapshot.Owner == media.StreamOwnerCompanion:
-			applyEvent(core.PreviewStarted{StreamID: streamID, EntrypointID: core.EntrypointID(snapshot.EntrypointID)})
-		case snapshot.Owner == media.StreamOwnerIdle:
-			preview := projector.Snapshot().PreviewStream
-			if preview != nil && strings.HasPrefix(string(preview.StreamID), "media-") {
-				applyEvent(core.PreviewStopped{StreamID: preview.StreamID})
-			}
-		}
-	})
+	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))
+
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
 		switch {
@@ -241,6 +135,7 @@ func run(
 			rtspServer.ObserveControlStop()
 		}
 	})
+
 	voicemailRefreshRequests := make(chan struct{}, 1)
 	requestVoicemailRefresh := func() {
 		select {
@@ -248,12 +143,15 @@ func run(
 		default:
 		}
 	}
+
 	listener.SetMessageObserver(func(message openwebnet.Message) {
 		if !strings.EqualFold(strings.TrimSpace(message.System), "aswm") || strings.TrimSpace(message.Raw) != openwebnet.FrameACK {
 			return
 		}
+
 		requestVoicemailRefresh()
 	})
+
 	go func() {
 		for {
 			select {
@@ -261,6 +159,7 @@ func run(
 				return
 			case <-voicemailRefreshRequests:
 			}
+
 			timer := time.NewTimer(250 * time.Millisecond)
 			select {
 			case <-ctx.Done():
@@ -268,6 +167,7 @@ func run(
 				return
 			case <-timer.C:
 			}
+
 			draining := true
 			for draining {
 				select {
@@ -276,9 +176,12 @@ func run(
 					draining = false
 				}
 			}
+
 			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			_, err := refreshVoicemail(refreshCtx)
+
 			cancel()
+
 			if err != nil && ctx.Err() == nil {
 				logger.Debug("openwebnet voicemail refresh failed", "error", err)
 			}
@@ -292,6 +195,7 @@ func run(
 	go func() {
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
+
 		if muted, err := openWebNetControl.AudioMutedStatus(probeCtx); err != nil {
 			logger.Debug("openwebnet initial audio state unavailable", "error", err)
 		} else if muted {
@@ -299,21 +203,26 @@ func run(
 		} else {
 			applyEvent(core.AudioUnmuted{})
 		}
+
 		if _, err := refreshVoicemail(probeCtx); err != nil {
 			logger.Debug("openwebnet initial voicemail state unavailable", "error", err)
 		}
+
 		if err := homeKit.Run(ctx, system.CompanionDataDir, logger); err != nil && ctx.Err() == nil {
 			logger.Error("homekit bridge stopped", "component", "homekit", "error", err)
 		}
 	}()
+
 	diagnosticService.Start(ctx)
 	go func() {
 		err := mdns.Run(ctx, func() (discovery.Advertisement, error) {
 			cfg := configStore.Snapshot()
+
 			iface, err := system.PreferredOutboundInterface()
 			if err != nil {
 				return discovery.Advertisement{}, err
 			}
+
 			return discovery.Advertisement{
 				DeviceID:     cfg.Companion.DeviceID,
 				Model:        cfg.Companion.Model,
@@ -327,7 +236,198 @@ func run(
 			logger.Error("mDNS service stopped", "component", "discovery.mdns", "error", err)
 		}
 	}()
+
 	return serve(ctx, appLogger, apiListener, apiServer, webUIListener, webUIServer)
+}
+
+type applicationRuntime struct {
+	projector         *core.Projector
+	trace             *openwebnet.Trace
+	control           *openwebnet.Control
+	rtspServer        *media.RTSPServer
+	updater           *system.Updater
+	webrtc            *media.WebRTCService
+	authStore         *auth.Store
+	mdns              *discovery.Service
+	homeKit           *homekit.Manager
+	server            *api.Server
+	diagnosticService *diagnostics.Service
+	runtime           *system.RuntimeControl
+	dialer            interface {
+		signaling.StreamDialer
+		Close() error
+	}
+}
+
+func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Logger) (*applicationRuntime, error) {
+	initialConfig := configStore.Snapshot()
+	if len(initialConfig.Companion.Entrypoints) == 0 {
+		return nil, errors.New("create sip runtime: no entrypoints configured")
+	}
+
+	mediaConfig, err := media.ResolveSourceConfig(initialConfig.Companion.Model, initialConfig.Companion.Entrypoints[0])
+	if err != nil {
+		return nil, fmt.Errorf("resolve sip runtime source: %w", err)
+	}
+
+	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{Target: mediaConfig.Target, Domain: signaling.DiscoverFlexisipDomain()})
+	if err != nil {
+		return nil, fmt.Errorf("create sip runtime: %w", err)
+	}
+
+	trace := openwebnet.NewTrace(0)
+	control := openwebnet.NewControl(initialConfig.Companion.Entrypoints, trace)
+	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
+
+	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events, snapshots)
+	})
+	if err != nil {
+		_ = dialer.Close()
+		return nil, fmt.Errorf("create rtsp server: %w", err)
+	}
+
+	if err := rtspServer.Start(ctx); err != nil {
+		_ = dialer.Close()
+		return nil, err
+	}
+
+	webrtc, err := media.NewWebRTCService(rtspServer.Coordinator(), initialConfig.Companion.Entrypoints)
+	if err != nil {
+		_ = rtspServer.Close()
+		_ = dialer.Close()
+
+		return nil, fmt.Errorf("create WebRTC service: %w", err)
+	}
+
+	allowed := make([]string, 0)
+
+	for name, service := range initialConfig.System.Services {
+		if service.Enabled {
+			allowed = append(allowed, name)
+		}
+	}
+
+	rt := system.NewRuntimeControl(system.NewInitServiceAdapter(nil), system.NewRebootAdapter(nil), allowed)
+	build := system.CurrentBuildInfo()
+	policy := func() system.UpdatePolicy {
+		cfg := configStore.Snapshot().System
+		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: system.CompanionDataDir}
+	}
+
+	var source system.ReleaseSource
+	if strings.TrimSpace(build.ReleaseRepo) != "" {
+		source = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
+	}
+
+	updater := system.NewUpdater(source, build, policy, func(ctx context.Context) error { return rt.Restart(ctx, "companion") })
+	authStore := auth.NewStore(configStore)
+	authStore.SetLogger(logger.With("component", "auth"))
+
+	homeKit, err := homekit.NewManager(configStore)
+	if err != nil {
+		_ = webrtc.Shutdown()
+		_ = rtspServer.Close()
+		_ = dialer.Close()
+
+		return nil, fmt.Errorf("create homekit manager: %w", err)
+	}
+
+	homeKit.SetControllers(control, control, control)
+	homeKit.SetStreamCoordinator(rtspServer.Coordinator())
+	homeKit.SetSnapshotProvider(snapshots)
+
+	projector := core.NewProjector()
+	server := api.NewServer(authStore, configStore, projector, logger)
+	server.SetEntrypoints(control)
+	server.SetAudio(control)
+	server.SetVoicemail(control)
+	server.SetWebRTC(webrtc)
+	server.SetSnapshot(snapshots)
+	snapshots.SetOnCaptured(server.BroadcastState)
+	server.SetRuntime(rt)
+	server.SetUpdate(updater)
+	diagnosticService := diagnostics.New(control, initialConfig.Companion.Model, server.BroadcastState)
+	server.SetDiagnostics(diagnosticService)
+
+	return &applicationRuntime{projector: projector, trace: trace, control: control, rtspServer: rtspServer, updater: updater, webrtc: webrtc, authStore: authStore, mdns: discovery.NewService(nil), homeKit: homeKit, server: server, diagnosticService: diagnosticService, runtime: rt, dialer: dialer}, nil
+}
+
+func (r *applicationRuntime) close(logger *slog.Logger) {
+	if err := r.webrtc.Shutdown(); err != nil {
+		logger.Warn("webrtc service shutdown failed", "error", err)
+	}
+
+	if err := r.rtspServer.Close(); err != nil {
+		logger.Warn("RTSP server close failed", "error", err)
+	}
+
+	if err := r.dialer.Close(); err != nil {
+		logger.Warn("sip runtime close failed", "error", err)
+	}
+}
+
+func newVoicemailRefresher(control *openwebnet.Control, projector *core.Projector, applyEvent func(core.Event)) func(context.Context) (bool, error) {
+	var mu sync.Mutex
+
+	return func(ctx context.Context) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		status, err := control.VoicemailStatus(ctx)
+		if err != nil {
+			if errors.Is(err, openwebnet.ErrVoicemailUnavailable) {
+				if projector.Snapshot().Voicemail != nil {
+					applyEvent(core.VoicemailUnavailable{})
+				}
+
+				return false, nil
+			}
+
+			return false, fmt.Errorf("read voicemail status: %w", err)
+		}
+
+		current := projector.Snapshot().Voicemail
+		if current != nil && current.Enabled == status.Enabled {
+			return true, nil
+		}
+
+		if status.Enabled {
+			applyEvent(core.VoicemailEnabled{})
+		} else {
+			applyEvent(core.VoicemailDisabled{})
+		}
+
+		return true, nil
+	}
+}
+
+func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) func(core.Event) {
+	return func(event core.Event) {
+		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
+			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
+			return
+		}
+
+		homeKit.Sync(projector.Snapshot())
+		server.BroadcastState()
+		server.BroadcastEvent(map[string]any{"type": event.Type()})
+	}
+}
+
+func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Event)) media.StreamStateObserver {
+	return func(snapshot media.StreamSnapshot) {
+		streamID := core.StreamID(fmt.Sprintf("media-%d", snapshot.LeaseID))
+		switch snapshot.Owner {
+		case media.StreamOwnerCompanion:
+			applyEvent(core.PreviewStarted{StreamID: streamID, EntrypointID: core.EntrypointID(snapshot.EntrypointID)})
+		case media.StreamOwnerIdle:
+			preview := projector.Snapshot().PreviewStream
+			if preview != nil && strings.HasPrefix(string(preview.StreamID), "media-") {
+				applyEvent(core.PreviewStopped{StreamID: preview.StreamID})
+			}
+		}
+	}
 }
 
 func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
@@ -337,11 +437,14 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 	}
 
 	attempt := snapshots.Arm(entrypoint.ID)
+
 	var bridge *media.AudioBridge
+
 	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, func(packet *rtp.Packet) {
 		if attempt != nil {
 			attempt.Consume(packet)
 		}
+
 		if events.VideoRTP != nil {
 			events.VideoRTP(packet)
 		}
@@ -354,15 +457,21 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 		if attempt != nil {
 			attempt.Close()
 		}
+
 		_ = backchannel.Close()
+
 		return nil, nil, err
 	}
+
 	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, backchannel, logger, events.Failed)
+
 	return &bridgeSource{source: source, bridge: bridge}, func() {
 		if attempt != nil {
 			attempt.Close()
 		}
+
 		closeSource()
+
 		if err := backchannel.Close(); err != nil {
 			logger.Warn("close udp backchannel", "error", err)
 		}
@@ -380,10 +489,12 @@ func (s *bridgeSource) Start(ctx context.Context) error {
 	if err := s.bridge.Start(ctx); err != nil {
 		return fmt.Errorf("start audio bridge: %w", err)
 	}
+
 	if err := s.source.Start(ctx); err != nil {
 		_ = s.bridge.StopContext(ctx)
 		return err
 	}
+
 	return nil
 }
 
@@ -392,6 +503,7 @@ func (s *bridgeSource) Close(ctx context.Context) error {
 	if bridgeErr := s.bridge.StopContext(ctx); bridgeErr != nil && err == nil {
 		err = bridgeErr
 	}
+
 	return err
 }
 
@@ -404,6 +516,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
 	}
+
 	logger.Debug("media source configuration resolved",
 		"component", "media.source",
 		"model", sourceConfig.Model,
@@ -416,11 +529,16 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	if dialer == nil {
 		return nil, nil, errors.New("sip runtime is unavailable")
 	}
-	var source *media.SourceSession
-	var sourceLive atomic.Bool
+
+	var (
+		source     *media.SourceSession
+		sourceLive atomic.Bool
+	)
+
 	if callbackSetter, ok := dialer.(interface{ SetRemoteDialogEnded(func()) }); ok {
 		callbackSetter.SetRemoteDialogEnded(func() {
 			source.RemoteDialogEnded()
+
 			if remoteBYE != nil {
 				remoteBYE()
 			}
@@ -428,6 +546,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	} else {
 		return nil, nil, errors.New("sip runtime does not support remote bye callback")
 	}
+
 	source = media.NewSourceSession(
 		logger,
 		sourceConfig,
@@ -446,10 +565,13 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		}),
 	)
 	source.SetStartedCallback(func() { sourceLive.Store(true) })
+
 	return source, func() {
 		sourceLive.Store(false)
+
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
 		if err := source.Close(closeCtx); err != nil {
 			logger.Warn("media source close failed", "error", err)
 		}
@@ -459,6 +581,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func(), logger *slog.Logger) {
 	delay := 20 * time.Second
 	backoff := 2 * time.Minute
+
 	for {
 		timer := time.NewTimer(delay)
 		select {
@@ -470,11 +593,14 @@ func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func()
 
 		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		_, err := updater.Check(checkCtx)
+
 		cancel()
+
 		if errors.Is(err, system.ErrUpdateUnavailable) {
 			logger.Info("companion update checks unavailable")
 			return
 		}
+
 		if err != nil {
 			delay = backoff
 			backoff = min(backoff*2, time.Hour)
@@ -482,6 +608,7 @@ func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func()
 			delay = 3 * time.Hour
 			backoff = 2 * time.Minute
 		}
+
 		broadcast()
 	}
 }
@@ -501,8 +628,10 @@ func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*c
 		if err := store.ApplyMetadata(metadata); err != nil {
 			return nil, false, fmt.Errorf("apply device metadata: %w", err)
 		}
+
 		return store, false, nil
 	}
+
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, false, fmt.Errorf("open config: %w", err)
 	}
@@ -515,6 +644,7 @@ func openConfig(path string, detectMetadata func() (config.Metadata, error)) (*c
 	if err != nil {
 		return nil, false, fmt.Errorf("open created config: %w", err)
 	}
+
 	if err := store.ApplyMetadata(metadata); err != nil {
 		return nil, false, fmt.Errorf("apply device metadata: %w", err)
 	}
@@ -539,12 +669,15 @@ func serve(
 	select {
 	case <-ctx.Done():
 		logger.Info("application stopping", "reason", "context canceled")
+
 		err := shutdown(apiServer, webUIServer)
 		if err != nil {
 			logger.Error("application shutdown failed", "error", err)
 			return err
 		}
+
 		logger.Info("application stopped")
+
 		return nil
 	case err := <-errs:
 		return errors.Join(err, shutdown(apiServer, webUIServer))
@@ -554,6 +687,7 @@ func serve(
 func serveServer(logger *slog.Logger, name string, listener net.Listener, server *http.Server, errs chan<- error) {
 	go func() {
 		logger.Info("server listening", "server", name, "address", listener.Addr().String())
+
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("serve %s: %w", name, err)
 		}
@@ -565,6 +699,7 @@ func shutdown(servers ...*http.Server) error {
 	defer cancel()
 
 	var errs []error
+
 	for _, server := range servers {
 		if err := server.Shutdown(ctx); err != nil {
 			errs = append(errs, err)

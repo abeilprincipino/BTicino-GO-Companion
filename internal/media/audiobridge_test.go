@@ -27,11 +27,12 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer bridge.Stop() //nolint:errcheck // test cleanup
+	defer bridge.Stop()
 
 	if err := bridge.WriteIntercomSpeex(testRTPPacket(4001)); err != nil {
 		t.Fatal(err)
 	}
+
 	if pipeline.intercomCalls != 1 {
 		t.Fatalf("intercom calls = %d, want 1", pipeline.intercomCalls)
 	}
@@ -45,6 +46,7 @@ func TestAudioBridge_ForwardsAudioAcrossMediaAndBackchannel(t *testing.T) {
 	}
 
 	pipeline.opusOut <- testRTPPacket(4002)
+
 	if packet := <-opus; packet.SSRC != 4002 {
 		t.Fatalf("opus packet SSRC = %d, want 4002", packet.SSRC)
 	}
@@ -74,16 +76,18 @@ func TestAudioBridgeReportsPipelineFailure(t *testing.T) {
 		errors:   make(chan error, audioBridgeRestartLimit+1),
 	}
 	failed := make(chan error, 1)
+
 	bridge := NewAudioBridge(fakeGStreamerAudio{pipeline: pipeline}, func(*rtp.Packet) {}, nil, nil, func(err error) { failed <- err })
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer bridge.Stop() //nolint:errcheck // test cleanup
+	defer bridge.Stop()
 
 	want := errors.New("pipeline exited")
 	for range audioBridgeRestartLimit + 1 {
 		pipeline.errors <- want
 	}
+
 	select {
 	case got := <-failed:
 		if !errors.Is(got, want) {
@@ -103,6 +107,7 @@ func TestAudioBridgeStopContextHonorsDeadlineAfterPipelineClose(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	exited := make(chan struct{})
+
 	bridge := NewAudioBridge(fakeGStreamerAudio{pipeline: pipeline}, func(*rtp.Packet) {
 		close(entered)
 		<-release
@@ -111,17 +116,22 @@ func TestAudioBridgeStopContextHonorsDeadlineAfterPipelineClose(t *testing.T) {
 	if err := bridge.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+
 	pipeline.opusOut <- testRTPPacket(4002)
+
 	<-entered
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
+
 	if err := bridge.StopContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("StopContext() error = %v, want %v", err, context.DeadlineExceeded)
 	}
+
 	if !pipeline.closed {
 		t.Fatal("pipeline was not closed before StopContext returned")
 	}
+
 	close(release)
 	<-exited
 }
@@ -131,30 +141,41 @@ func TestGStreamerAudioPipelineCloseReapsChildrenAndReleasesSockets(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := conn.LocalAddr().(*net.UDPAddr)
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("local address is not UDP")
+	}
+
 	command := exec.Command("/bin/sh", "-c", "sleep 30")
+
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
+
 	pipeline := &gstreamerAudioPipeline{
 		commands:  []*exec.Cmd{command},
 		logger:    slog.Default(),
 		opusConn:  conn,
 		closeDone: make(chan struct{}),
 	}
+
 	pipeline.waiters.Add(1)
 	go pipeline.wait(command, "test")
 
 	if err := pipeline.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if command.ProcessState == nil {
 		t.Fatal("GStreamer child was not reaped")
 	}
+
 	if err := syscall.Kill(command.Process.Pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("GStreamer child still exists after Close: %v", err)
 	}
+
 	reopened, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		t.Fatalf("audio socket remains bound after Close: %v", err)

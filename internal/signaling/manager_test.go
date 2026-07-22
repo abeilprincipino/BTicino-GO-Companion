@@ -156,13 +156,16 @@ func TestManager_StartStreamRejectsActiveOutgoingDialog(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
+
 	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{})
 	if err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("first StartStream() error = %v", err)
 	}
+
 	if err := manager.StartStream(context.Background(), "22"); !errors.Is(err, ErrActiveDialog) {
 		t.Fatalf("second StartStream() error = %v, want ErrActiveDialog", err)
 	}
+
 	if dialer.calls != 1 {
 		t.Fatalf("dialer calls = %d, want 1", dialer.calls)
 	}

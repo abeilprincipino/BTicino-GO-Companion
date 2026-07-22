@@ -14,6 +14,7 @@ func TestSetupURI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.HasPrefix(uri, "X-HM://") || !strings.HasSuffix(uri, "ABCD") {
 		t.Fatalf("setup uri = %q", uri)
 	}
@@ -26,6 +27,7 @@ func TestSetupQRCodePNG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.HasPrefix(image, []byte("\x89PNG\r\n\x1a\n")) {
 		t.Fatalf("qr image is not a PNG: %x", image[:min(8, len(image))])
 	}

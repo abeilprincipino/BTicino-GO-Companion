@@ -84,24 +84,32 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 	defer ticker.Stop()
 
 	backoff := retryInitial
-	var current Advertisement
-	var registration Registration
+
+	var (
+		current      Advertisement
+		registration Registration
+	)
 	for {
 		if registration == nil {
 			next, err := snapshot()
 			if err == nil {
 				registration, err = s.Advertise(next)
 			}
+
 			if err == nil {
 				current = next
 				backoff = retryInitial
+
 				s.logger.Info("mDNS advertisement registered", "port", next.Port)
 			} else {
 				s.logger.Warn("mDNS advertisement failed", "error", err, "retry_in", backoff)
+
 				if err := wait(ctx, backoff); err != nil {
 					return err
 				}
+
 				backoff = min(backoff*2, s.retryMax)
+
 				continue
 			}
 		}
@@ -110,14 +118,17 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 		case <-ctx.Done():
 			registration.Shutdown()
 			s.logger.Info("mDNS advertisement stopped")
+
 			return nil
 		case <-ticker.C:
 			next, err := snapshot()
 			if err != nil || advertisementsEqual(current, next) {
 				continue
 			}
+
 			registration.Shutdown()
 			s.logger.Info("mDNS advertisement changed", "port", next.Port)
+
 			registration = nil
 		}
 	}
@@ -126,6 +137,7 @@ func (s *Service) Run(ctx context.Context, snapshot func() (Advertisement, error
 func wait(ctx context.Context, duration time.Duration) error {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

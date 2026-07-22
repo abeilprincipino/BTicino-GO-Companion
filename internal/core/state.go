@@ -261,6 +261,7 @@ func cloneState(state State) State {
 		previewStream := *state.PreviewStream
 		stateCopy.PreviewStream = &previewStream
 	}
+
 	if state.Voicemail != nil {
 		voicemail := *state.Voicemail
 		stateCopy.Voicemail = &voicemail

@@ -17,6 +17,7 @@ func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "companion.log")
+
 	file, err := newRotatingFile(path)
 	if err != nil {
 		t.Fatalf("new rotating file: %v", err)
@@ -26,6 +27,7 @@ func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
 	if _, err := file.file.WriteString(strings.Repeat("a", maxSize)); err != nil {
 		t.Fatalf("seed log: %v", err)
 	}
+
 	if _, err := file.Write([]byte("next\n")); err != nil {
 		t.Fatalf("rotate log: %v", err)
 	}
@@ -34,6 +36,7 @@ func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read archived log: %v", err)
 	}
+
 	if len(archived) != maxSize {
 		t.Fatalf("archive size = %d, want %d", len(archived), maxSize)
 	}
@@ -42,6 +45,7 @@ func TestRotatingFileRotatesAndPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat active log: %v", err)
 	}
+
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("log mode = %o, want 600", info.Mode().Perm())
 	}
@@ -51,11 +55,13 @@ func TestHumanHandlerFormatsReadableLine(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := newHumanHandler(&output, level)
 	record := slog.NewRecord(time.Date(2026, time.July, 15, 13, 49, 48, 0, time.Local), slog.LevelInfo, "api listening", 0)
 	record.AddAttrs(slog.String("addr", ":8080"), slog.String("error", "unexpected reply"))
+
 	if err := handler.Handle(context.Background(), record); err != nil {
 		t.Fatalf("handle record: %v", err)
 	}
@@ -71,6 +77,7 @@ func TestParseLevel(t *testing.T) {
 	if _, err := parseLevel("info"); err != nil {
 		t.Fatalf("parse info: %v", err)
 	}
+
 	if _, err := parseLevel("invalid"); err == nil {
 		t.Fatal("invalid level succeeded")
 	}
@@ -78,6 +85,7 @@ func TestParseLevel(t *testing.T) {
 
 func TestHTTPSuppressesWebUIAPIRequests(t *testing.T) {
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -91,6 +99,7 @@ func TestHTTPSuppressesWebUIAPIRequests(t *testing.T) {
 
 func TestHTTPSuppressesSuccessfulHealthChecks(t *testing.T) {
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -104,6 +113,7 @@ func TestHTTPSuppressesSuccessfulHealthChecks(t *testing.T) {
 
 func TestHTTPSuppressesSuccessfulRequests(t *testing.T) {
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -117,6 +127,7 @@ func TestHTTPSuppressesSuccessfulRequests(t *testing.T) {
 
 func TestHTTPLogsWebUIFailures(t *testing.T) {
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -132,6 +143,7 @@ func TestHTTPLogsWebUIFailures(t *testing.T) {
 
 func TestHTTPLogsFailedHealthChecks(t *testing.T) {
 	var output bytes.Buffer
+
 	level := &slog.LevelVar{}
 	level.Set(slog.LevelDebug)
 	handler := HTTP(slog.New(newHumanHandler(&output, level)), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

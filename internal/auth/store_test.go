@@ -12,6 +12,7 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	t.Parallel()
 
 	store, backend := newTestStore(t)
+
 	code, err := store.InitialClaimCode()
 	if err != nil {
 		t.Fatalf("initial claim code: %v", err)
@@ -34,6 +35,7 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	if !store.ValidateBearer(token) {
 		t.Fatal("issued bearer token was not valid")
 	}
+
 	if stored := backend.Snapshot().Auth.BearerTokenHash; stored == token || len(stored) != 64 {
 		t.Fatalf("persisted bearer value = %q, want SHA-256 hash", stored)
 	}
@@ -45,6 +47,7 @@ func TestStore_ClaimLifecycle(t *testing.T) {
 	if backend.Snapshot().Auth.PairingState != config.PairingStateClaimed {
 		t.Fatal("successful claim did not update pairing state")
 	}
+
 	if _, err := store.CreateChallenge("192.0.2.1"); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("challenge after claim error = %v, want ErrAlreadyClaimed", err)
 	}
@@ -80,6 +83,7 @@ func TestStore_ClaimRejectsInvalidChallenges(t *testing.T) {
 			if err != nil {
 				t.Fatalf("initial claim code: %v", err)
 			}
+
 			_, err = store.Claim(tt.source, challenge.ID, code)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("claim error = %v, want %v", err, tt.wantErr)
@@ -92,6 +96,7 @@ func TestStore_ClaimRateLimit(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t)
+
 	code, err := store.InitialClaimCode()
 	if err != nil {
 		t.Fatalf("initial claim code: %v", err)
@@ -210,6 +215,7 @@ func TestStore_RepairCodeIssueAndRecoverBearer(t *testing.T) {
 	if !config.ValidClaimCode(issued) {
 		t.Fatalf("issued repair code = %q", issued)
 	}
+
 	if !expiresAt.After(testNow) {
 		t.Fatalf("repair code expires at %s", expiresAt)
 	}
@@ -264,12 +270,14 @@ func newTestStore(t *testing.T) (*Store, *config.Store) {
 
 	store := NewStore(backend)
 	store.now = func() time.Time { return testNow }
+
 	if err := backend.Update(func(cfg *config.Config) error {
 		cfg.WebUI.SessionSecret = "test-session-secret"
 		return nil
 	}); err != nil {
 		t.Fatalf("set session secret: %v", err)
 	}
+
 	if _, err := store.StartInitialClaim(); err != nil {
 		t.Fatalf("issue initial claim code: %v", err)
 	}

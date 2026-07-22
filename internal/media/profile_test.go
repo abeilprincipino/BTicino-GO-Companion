@@ -29,11 +29,14 @@ func TestResolveSourceConfig(t *testing.T) {
 				if !errors.Is(err, ErrUnsupportedModel) && !errors.Is(err, ErrC100XDevAddr) {
 					t.Fatalf("ResolveSourceConfig(%q) error = %v", test.model, err)
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if sourceConfig != test.sourceConfig {
 				t.Fatalf("ResolveSourceConfig(%q) = %#v, want %#v", test.model, sourceConfig, test.sourceConfig)
 			}
@@ -46,14 +49,17 @@ func TestResolveSourceConfigDiscoversC100XDevAddr(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"modules":[{"id":"12","system":"videodoorentry","deviceType":"EU","privateAddress":{"addressValues":[{"value":"20"}]}},{"id":"34","system":"lighting","deviceType":"EU","privateAddress":{"addressValues":[{"value":"20"}]}}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	originalPath := c100xModulesPath
 	c100xModulesPath = path
+
 	t.Cleanup(func() { c100xModulesPath = originalPath })
 
 	sourceConfig, err := ResolveSourceConfig("C100X", config.Entrypoint{DevAddr: "21"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if sourceConfig.DevAddr != "12" {
 		t.Fatalf("DEVADDR = %q, want 12", sourceConfig.DevAddr)
 	}

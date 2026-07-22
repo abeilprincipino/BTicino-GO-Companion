@@ -2,10 +2,11 @@ package signaling
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
 	"net"
 	"strconv"
 	"strings"
@@ -73,14 +74,17 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 
 	fromUser, fromHost, fromPort := parseAddress(firstNonEmpty(cfg.From, "companion@127.0.0.1"))
 	if fromUser == "" {
-		return nil, fmt.Errorf("sip: invalid from address")
+		return nil, errors.New("sip: invalid from address")
 	}
+
 	if fromHost == "" {
 		fromHost = "127.0.0.1"
 	}
+
 	if fromPort == 0 {
 		_, fromPort = hostPort(cfg.Listen)
 	}
+
 	if fromPort == 0 {
 		fromPort = 5070
 	}
@@ -89,11 +93,13 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create sip user agent: %w", err)
 	}
+
 	client, err := sipgo.NewClient(ua)
 	if err != nil {
 		_ = ua.Close()
 		return nil, fmt.Errorf("create sip client: %w", err)
 	}
+
 	server, err := sipgo.NewServer(ua)
 	if err != nil {
 		_ = ua.Close()
@@ -101,10 +107,12 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 	}
 
 	contact := sip.ContactHeader{Address: sip.Uri{User: fromUser, Host: fromHost, Port: fromPort}}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	listenerCtx, listenerCancel := context.WithCancel(context.Background())
 	registerCtx, registerCancel := context.WithCancel(context.Background())
 	dialer := &streamDialer{
@@ -125,10 +133,12 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 	server.OnBye(dialer.onBye)
 
 	listenAddr := strings.TrimSpace(cfg.Listen)
+
 	if listenAddr == "" {
 		listenAddr = net.JoinHostPort(fromHost, strconv.Itoa(fromPort))
 	}
 	go dialer.listen(listenerCtx, listenAddr)
+
 	dialer.registerWG.Add(1)
 	go dialer.registrationLoop(registerCtx)
 
@@ -142,11 +152,13 @@ func (d *streamDialer) Close() error {
 		d.registerWG.Wait()
 		d.closeErr = errors.Join(d.server.Close(), d.ua.Close())
 	})
+
 	return d.closeErr
 }
 
 func (d *streamDialer) listen(ctx context.Context, addr string) {
 	d.logger.Info("sip listener started", "listen_addr", addr)
+
 	if err := d.server.ListenAndServe(ctx, d.transport, addr); err != nil && ctx.Err() == nil {
 		d.logger.Error("sip listener stopped", "listen_addr", addr, "error", err)
 	}
@@ -162,6 +174,7 @@ func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	d.callbackMu.RLock()
 	callback := d.remoteDialogEnded
 	d.callbackMu.RUnlock()
+
 	if callback != nil {
 		go callback()
 	}
@@ -180,29 +193,36 @@ func (d *streamDialer) Register(ctx context.Context) error {
 	if d.client == nil || d.target.URI.Host == "" {
 		return errors.New("sip: registration unavailable")
 	}
+
 	req := sip.NewRequest(sip.REGISTER, sip.Uri{Scheme: "sip", Host: d.target.URI.Host})
 	req.SetTransport(strings.ToUpper(d.transport))
 	req.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:%s@%s>", d.authUser, d.target.URI.Host)))
 	req.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:%s@%s>;tag=%s", d.authUser, d.target.URI.Host, sip.GenerateTagN(16))))
 	req.AppendHeader(sip.NewHeader("Contact", fmt.Sprintf("<sip:%s@%s:%d>", d.contact.Address.User, d.contact.Address.Host, d.contact.Address.Port)))
 	req.AppendHeader(sip.NewHeader("Expires", "600"))
+
 	response, err := d.client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
 	if err != nil {
 		return fmt.Errorf("send register: %w", err)
 	}
+
 	if response == nil || !response.IsSuccess() {
 		if response == nil {
 			return errors.New("sip: empty register response")
 		}
+
 		return fmt.Errorf("sip: register response status=%d", response.StatusCode)
 	}
+
 	return nil
 }
 
 func (d *streamDialer) registrationLoop(ctx context.Context) {
 	defer d.registerWG.Done()
+
 	delay := time.Duration(0)
 	failed := false
+
 	for {
 		if delay > 0 {
 			timer := time.NewTimer(delay)
@@ -213,37 +233,51 @@ func (d *streamDialer) registrationLoop(ctx context.Context) {
 			case <-timer.C:
 			}
 		}
+
 		registerCtx, cancel := context.WithTimeout(ctx, registerTimeout)
 		err := d.Register(registerCtx)
+
 		cancel()
+
 		if err != nil {
 			if delay == 0 {
 				delay = registerCheckInterval
 			} else {
 				delay = min(delay*2, registerRetryMaximum)
 			}
+
 			retryIn := jitter(delay)
 			d.logger.Warn("sip registration failed", "error", err, "retry_in", retryIn)
+
 			failed = true
 			delay = retryIn
+
 			continue
 		}
+
 		if failed {
 			d.logger.Info("sip registration recovered")
 		} else {
 			d.logger.Debug("sip registration succeeded")
 		}
+
 		failed = false
 		delay = registerRefreshInterval
 	}
 }
 
 func jitter(delay time.Duration) time.Duration {
-	return min(delay*time.Duration(80+rand.IntN(41))/100, registerRetryMaximum)
+	percent := int64(100)
+	if value, err := rand.Int(rand.Reader, big.NewInt(41)); err == nil {
+		percent = 80 + value.Int64()
+	}
+
+	return min(delay*time.Duration(percent)/100, registerRetryMaximum)
 }
 
 func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeout time.Duration, register func(context.Context) error) {
 	var lastSuccess time.Time
+
 	tryRegister := func() {
 		if !lastSuccess.IsZero() && time.Since(lastSuccess) < refreshInterval {
 			return
@@ -251,14 +285,17 @@ func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeo
 
 		registerCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
 		if err := register(registerCtx); err == nil {
 			lastSuccess = time.Now()
 		}
 	}
 
 	tryRegister()
+
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -269,13 +306,15 @@ func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeo
 	}
 }
 
-func (d *streamDialer) StartStream(ctx context.Context, _ string, offer string) (OutgoingDialog, error) {
+func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (OutgoingDialog, error) {
 	d.logger.InfoContext(ctx, "sip stream dial starting")
 	req := sip.NewRequest(sip.INVITE, d.target.URI)
 	req.SetTransport(strings.ToUpper(d.transport))
+
 	if d.target.destination != "" {
 		req.SetDestination(d.target.destination)
 	}
+
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	req.SetBody([]byte(offer))
 
@@ -286,16 +325,19 @@ func (d *streamDialer) StartStream(ctx context.Context, _ string, offer string) 
 	if err != nil {
 		return nil, fmt.Errorf("outgoing invite: %w", err)
 	}
+
 	if err := dialog.WaitAnswer(callCtx, sipgo.AnswerOptions{Username: d.authUser, Password: d.authPass}); err != nil {
 		_ = dialog.Close()
 		return nil, fmt.Errorf("wait for invite answer: %w", err)
 	}
+
 	if err := dialog.Ack(callCtx); err != nil {
 		_ = dialog.Close()
 		return nil, fmt.Errorf("ack invite: %w", err)
 	}
 
 	d.logger.InfoContext(ctx, "sip stream established")
+
 	return outgoingDialog{dialog: dialog, logger: d.logger}, nil
 }
 
@@ -307,13 +349,17 @@ type outgoingDialog struct {
 func (d outgoingDialog) Bye(ctx context.Context) error {
 	d.logger.InfoContext(ctx, "sip stream bye starting")
 	defer func() { _ = d.dialog.Close() }()
+
 	if err := d.dialog.Bye(ctx); err != nil {
 		return err
 	}
+
 	if err := waitForDialogEnd(ctx, d.dialog.Context().Done()); err != nil {
 		return err
 	}
+
 	d.logger.InfoContext(ctx, "sip stream bye completed")
+
 	return nil
 }
 
@@ -348,13 +394,16 @@ func resolveInviteTarget(rawTarget, domain string) (inviteTarget, error) {
 	}
 
 	destination := uriHostPort(uri)
+
 	domain = strings.TrimSpace(domain)
 	if !hadAt && uri.User == "" && uri.Host != "" && domain != "" {
 		uri.User, uri.Host = uri.Host, domain
 	}
+
 	if domain != "" && isIPAddressOrLocal(uri.Host) {
 		uri.Host = domain
 	}
+
 	if uri.Host == "" || uri.User == "" {
 		return inviteTarget{}, ErrStreamTargetUnset
 	}
@@ -364,15 +413,19 @@ func resolveInviteTarget(rawTarget, domain string) (inviteTarget, error) {
 
 func parseAddress(raw string) (string, string, int) {
 	raw = strings.TrimPrefix(strings.TrimSpace(raw), "sip:")
+
 	parts := strings.SplitN(raw, "@", 2)
 	if len(parts) != 2 {
 		return "", "", 0
 	}
+
 	user, host := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+
 	parsedHost, port, err := net.SplitHostPort(host)
 	if err == nil {
 		return user, parsedHost, portNumber(port)
 	}
+
 	return user, host, 0
 }
 
@@ -381,6 +434,7 @@ func hostPort(raw string) (string, int) {
 	if err != nil {
 		return "", 0
 	}
+
 	return host, portNumber(port)
 }
 
@@ -393,9 +447,11 @@ func uriHostPort(uri sip.Uri) string {
 	if uri.Host == "" {
 		return ""
 	}
+
 	if uri.Port == 0 {
 		return net.JoinHostPort(uri.Host, "5060")
 	}
+
 	return net.JoinHostPort(uri.Host, strconv.Itoa(uri.Port))
 }
 
@@ -419,5 +475,6 @@ func firstNonEmpty(values ...string) string {
 			return value
 		}
 	}
+
 	return ""
 }

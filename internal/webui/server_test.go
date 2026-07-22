@@ -62,17 +62,21 @@ func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
+
 	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
+
 	store, err := config.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	server := New(store, auth.NewStore(store), slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
 	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
 	response := request(t, server, http.MethodPost, "/webui/api/bootstrap/account", passwordRequest{
@@ -84,6 +88,7 @@ func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "password confirmation does not match") {
 		t.Fatalf("mismatched confirmation response = %d: %s", response.Code, response.Body.String())
 	}
+
 	if store.Snapshot().WebUI.AdminPasswordHash != "" || store.Snapshot().Auth.PairingState != config.PairingStateSetupRequired {
 		t.Fatalf("mismatched confirmation changed bootstrap state: %#v", store.Snapshot())
 	}
@@ -91,35 +96,44 @@ func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
 
 func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
+
 	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
+
 	store, err := config.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	authStore := auth.NewStore(store)
 	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
 
 	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
 	setup := request(t, server, http.MethodPost, "/webui/api/bootstrap/account", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, sessionCookieFrom(t, login))
+
 	claimCode, err := authStore.InitialClaimCode()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if setup.Code != http.StatusOK || !config.ValidClaimCode(claimCode) || strings.Contains(setup.Body.String(), "claim_code") {
 		t.Fatalf("owner setup response = %d: %s", setup.Code, setup.Body.String())
 	}
+
 	pairing := request(t, server, http.MethodGet, "/webui/api/config/homeassistant", nil, passwordSession(t, server, "correct-horse"))
+
 	var pairingStatus struct {
 		ClaimCode    string `json:"claim_code"`
 		PairingState string `json:"pairing_state"`
 	}
 	decodeResponse(t, pairing, &pairingStatus)
+
 	if pairing.Code != http.StatusOK || pairingStatus.PairingState != string(config.PairingStateClaimable) || pairingStatus.ClaimCode != claimCode {
 		t.Fatalf("pairing status = %d: %s", pairing.Code, pairing.Body.String())
 	}
@@ -127,6 +141,7 @@ func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
 	if _, err := authStore.RotateBearer(); err != nil {
 		t.Fatal(err)
 	}
+
 	repair := request(t, server, http.MethodPost, "/webui/api/config/homeassistant/recovery-code", map[string]string{}, passwordSession(t, server, "correct-horse"))
 	if repair.Code != http.StatusOK || !strings.Contains(repair.Body.String(), "repair_code") {
 		t.Fatalf("repair code response = %d: %s", repair.Code, repair.Body.String())
@@ -151,11 +166,14 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"id":"main"`) || !strings.Contains(response.Body.String(), `"devaddr":"20"`) || !strings.Contains(response.Body.String(), `"capabilities":{"stream":true,"unlock":true,"ring":true}`) {
 		t.Fatalf("entrypoint JSON contract = %s", response.Body.String())
 	}
+
 	var editable intercomConfig
 	decodeResponse(t, response, &editable)
+
 	if len(editable.Entrypoints) != 1 || editable.Entrypoints[0].ID != "main" || editable.Entrypoints[0].DevAddr != "20" {
 		t.Fatalf("default entrypoint = %#v", editable.Entrypoints)
 	}
+
 	editable.Entrypoints[0].Label = "Updated Gate"
 
 	response = request(t, server, http.MethodPut, "/webui/api/config/entrypoints", editable, cookie)
@@ -182,8 +200,10 @@ func TestHomeKitConfigExposesPairingDetailsAndSavesBridgeSettings(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("get homekit config status = %d: %s", response.Code, response.Body.String())
 	}
+
 	var current editableHomeKit
 	decodeResponse(t, response, &current)
+
 	if current.PIN != "" || current.SetupID != "" || current.Name == "" || current.Running || current.Paired {
 		t.Fatalf("homekit config = %#v, want disabled bridge without credentials", current)
 	}
@@ -195,6 +215,7 @@ func TestHomeKitConfigExposesPairingDetailsAndSavesBridgeSettings(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("save homekit config status = %d: %s", response.Code, response.Body.String())
 	}
+
 	if got := store.Snapshot().HomeKit; !got.Enabled || got.Name != "Front Door" {
 		t.Fatalf("saved homekit config = %#v", got)
 	}
@@ -204,31 +225,38 @@ func TestHomeKitQRCodeRequiresSessionAndReturnsPNG(t *testing.T) {
 	t.Parallel()
 
 	server, store := testServer(t, nil)
+
 	response := request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, nil)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated qr status = %d", response.Code)
 	}
 
 	cookie := configuredSession(t, server)
+
 	response = request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, cookie)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("uninitialized qr status = %d: %s", response.Code, response.Body.String())
 	}
+
 	if err := store.Update(func(cfg *config.Config) error {
 		cfg.HomeKit.Enabled = true
 		cfg.HomeKit.PIN = "123-45-678"
 		cfg.HomeKit.SetupID = "ABCD"
+
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	response = request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, cookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("qr status = %d: %s", response.Code, response.Body.String())
 	}
+
 	if got := response.Header().Get("Content-Type"); got != "image/png" {
 		t.Fatalf("content type = %q, want image/png", got)
 	}
+
 	if !bytes.HasPrefix(response.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
 		t.Fatal("qr response is not a PNG")
 	}
@@ -249,9 +277,11 @@ func TestHomeKitResetClearsThroughProviderAndRestarts(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("reset status = %d: %s", response.Code, response.Body.String())
 	}
+
 	if provider.resetDataDir != system.CompanionDataDir {
 		t.Fatalf("reset data directory = %q, want %q", provider.resetDataDir, system.CompanionDataDir)
 	}
+
 	select {
 	case <-restarted:
 	case <-time.After(time.Second):
@@ -267,11 +297,14 @@ func TestStatusIncludesRuntimeMetrics(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 	}
+
 	var payload map[string]any
 	decodeResponse(t, response, &payload)
+
 	if _, ok := payload["uptime_seconds"].(float64); !ok {
 		t.Fatalf("uptime_seconds missing or invalid: %#v", payload["uptime_seconds"])
 	}
+
 	if _, ok := payload["free_ram_kb"].(float64); !ok {
 		t.Fatalf("free_ram_kb missing or invalid: %#v", payload["free_ram_kb"])
 	}
@@ -285,8 +318,10 @@ func TestSessionIncludesBuildInfoAndUpdateStatusEndpoint(t *testing.T) {
 	cookie := configuredSession(t, server)
 
 	session := request(t, server, http.MethodGet, "/webui/api/session", nil, cookie)
+
 	var sessionBody map[string]any
 	decodeResponse(t, session, &sessionBody)
+
 	if sessionBody["version"] == "" || sessionBody["git_sha"] == "" {
 		t.Fatalf("session build info = %#v", sessionBody)
 	}
@@ -302,6 +337,7 @@ func TestSessionDoesNotExposeOwnerOrBuildMetadataWithoutAuthentication(t *testin
 
 	server, _ := testServer(t, nil)
 	response := request(t, server, http.MethodGet, "/webui/api/session", nil, nil)
+
 	var sessionBody map[string]any
 	decodeResponse(t, response, &sessionBody)
 
@@ -382,6 +418,7 @@ func TestUpdateInstallRequiresConfiguredSessionAndInvokesUpdater(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("install status = %d: %s", response.Code, response.Body.String())
 	}
+
 	select {
 	case <-installed:
 	case <-time.After(time.Second):
@@ -408,6 +445,7 @@ func TestUpdateCheckRequiresConfiguredSessionAndInvokesUpdater(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("check status = %d: %s", response.Code, response.Body.String())
 	}
+
 	select {
 	case <-checked:
 	case <-time.After(time.Second):
@@ -440,12 +478,15 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 	}); err != nil {
 		t.Fatalf("set session secret: %v", err)
 	}
+
 	if _, err := authStore.StartInitialClaim(); err != nil {
 		t.Fatalf("start initial claim: %v", err)
 	}
+
 	if _, err := authStore.RotateBearer(); err != nil {
 		t.Fatalf("create bearer: %v", err)
 	}
+
 	return New(store, authStore, slog.New(slog.DiscardHandler), restart, nil, func(string) error { return nil }), store
 }
 
@@ -559,6 +600,7 @@ func (f fakeUpdateProvider) Check(ctx context.Context) (system.UpdateStatus, err
 	if f.check == nil {
 		return f.status, nil
 	}
+
 	return f.check(ctx)
 }
 
@@ -566,5 +608,6 @@ func (f fakeUpdateProvider) Install(ctx context.Context) (system.UpdateStatus, e
 	if f.install == nil {
 		return f.status, nil
 	}
+
 	return f.install(ctx)
 }

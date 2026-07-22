@@ -5,7 +5,7 @@ import (
 	"bticino-go-companion/internal/openwebnet"
 	"bticino-go-companion/internal/system"
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -27,7 +27,7 @@ type Local struct {
 type Snapshot struct {
 	OpenWebNet   openwebnet.DiagnosticSnapshot `json:"openwebnet"`
 	Local        Local                         `json:"local"`
-	RefreshedAt  time.Time                     `json:"refreshed_at,omitempty"`
+	RefreshedAt  time.Time                     `json:"refreshed_at,omitzero"`
 	RefreshError string                        `json:"refresh_error,omitempty"`
 }
 
@@ -48,6 +48,7 @@ func New(reader Reader, model string, onChange func()) *Service {
 func (s *Service) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	return s.snapshot
 }
 
@@ -55,8 +56,10 @@ func (s *Service) Snapshot() Snapshot {
 func (s *Service) Start(ctx context.Context) {
 	go func() {
 		s.Refresh(ctx)
+
 		ticker := time.NewTicker(refreshInterval)
 		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -70,19 +73,26 @@ func (s *Service) Start(ctx context.Context) {
 
 func (s *Service) Refresh(ctx context.Context) {
 	local := detectLocal(s.model)
-	var value openwebnet.DiagnosticSnapshot
-	var err error
+
+	var (
+		value openwebnet.DiagnosticSnapshot
+		err   error
+	)
 	if s.reader == nil {
-		err = fmt.Errorf("diagnostics reader is unavailable")
+		err = errors.New("diagnostics reader is unavailable")
 	} else {
 		value, err = s.reader.DiagnosticSnapshot(ctx)
 	}
+
 	s.mu.Lock()
+
 	hadError := s.snapshot.RefreshError != ""
 	if err == nil {
 		s.snapshot.OpenWebNet = value
 	}
+
 	s.snapshot.Local = local
+
 	s.snapshot.RefreshedAt = time.Now().UTC()
 	if err != nil {
 		s.snapshot.RefreshError = err.Error()
@@ -90,13 +100,16 @@ func (s *Service) Refresh(ctx context.Context) {
 		s.snapshot.RefreshError = ""
 	}
 	s.mu.Unlock()
-	if err != nil {
+
+	switch {
+	case err != nil:
 		s.logger.WarnContext(ctx, "diagnostics refresh failed", "error", err)
-	} else if hadError {
+	case hadError:
 		s.logger.InfoContext(ctx, "diagnostics refresh recovered")
-	} else {
+	default:
 		s.logger.DebugContext(ctx, "diagnostics refresh completed")
 	}
+
 	if s.onChange != nil {
 		s.onChange()
 	}
@@ -104,11 +117,14 @@ func (s *Service) Refresh(ctx context.Context) {
 
 func detectLocal(model string) Local {
 	local := Local{Model: model}
+
 	network, ok := system.DetectNetworkSnapshot()
 	if !ok {
 		return local
 	}
+
 	local.Interface = network.Interface
 	local.WiFiStrength = network.WiFiStrength
+
 	return local
 }

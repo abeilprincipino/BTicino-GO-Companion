@@ -98,6 +98,7 @@ func TestServer_Pair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/claim", strings.NewReader(`{"challenge_id":"`+challenge.ChallengeID+`","claim_code":"`+claimCode+`"}`))
 	request.RemoteAddr = "192.0.2.1:1234"
 	response := httptest.NewRecorder()
@@ -126,9 +127,11 @@ func TestServer_AuthStatusPublishesSafePairingState(t *testing.T) {
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &status) != nil {
 		t.Fatalf("auth status response = %d: %s", response.Code, response.Body.String())
 	}
+
 	if status.PairingState != string(config.PairingStateClaimable) {
 		t.Fatalf("pairing state = %q, want claimable", status.PairingState)
 	}
+
 	if status.InstanceID != store.Snapshot().Auth.InstanceID {
 		t.Fatalf("instance id = %q, want %q", status.InstanceID, store.Snapshot().Auth.InstanceID)
 	}
@@ -138,6 +141,7 @@ func TestServer_RepairRecovery(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newTestServer(t)
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
@@ -147,10 +151,13 @@ func TestServer_RepairRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	withoutRepair := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/auth/recover", strings.NewReader(`{}`))
 	withoutRepair.Header.Set("Authorization", "Bearer "+token)
+
 	withoutRepairResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(withoutRepairResponse, withoutRepair)
+
 	if withoutRepairResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("old bearer recovery status = %d: %s", withoutRepairResponse.Code, withoutRepairResponse.Body.String())
 	}
@@ -158,12 +165,14 @@ func TestServer_RepairRecovery(t *testing.T) {
 	recoverRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/auth/recover", strings.NewReader(`{"repair_code":"`+repair+`"}`))
 	recoverResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recoverResponse, recoverRequest)
+
 	var recovered struct {
 		AccessToken string `json:"access_token"`
 	}
 	if recoverResponse.Code != http.StatusOK || json.Unmarshal(recoverResponse.Body.Bytes(), &recovered) != nil || recovered.AccessToken == "" {
 		t.Fatalf("recover bearer response = %s", recoverResponse.Body.String())
 	}
+
 	if server.auth.ValidateBearer(token) {
 		t.Fatal("recovery did not replace bearer")
 	}
@@ -200,11 +209,13 @@ func TestServer_WebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close() //nolint:errcheck // test cleanup
+	defer connection.Close()
+
 	reader := io.Reader(connection)
 	if bufferedReader != nil {
 		reader = bufferedReader
 	}
+
 	transport := struct {
 		io.Reader
 		io.Writer
@@ -217,19 +228,21 @@ func TestServer_WebSocket(t *testing.T) {
 	}
 
 	assertMessage(t, transport, "pong", "ping-1")
-
 }
 
 func TestServer_StateIncludesPublicEntrypoints(t *testing.T) {
 	t.Parallel()
 
 	server, store := newTestServer(t)
+
 	token, err := auth.NewStore(store).RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/state", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 
@@ -248,6 +261,7 @@ func TestServer_StateIncludesPublicEntrypoints(t *testing.T) {
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil {
 		t.Fatalf("state response = %s", response.Body.String())
 	}
+
 	if len(body.State.Entrypoints) != 1 || body.State.Entrypoints[0].ID != "main" || !body.State.Entrypoints[0].Capabilities.Unlock || body.State.Entrypoints[0].DevAddr != "" {
 		t.Fatalf("entrypoints = %#v", body.State.Entrypoints)
 	}
@@ -259,22 +273,28 @@ func TestServer_UnlockEntrypoint(t *testing.T) {
 	server, store := newTestServer(t)
 	control := &unlockRecorder{}
 	server.SetEntrypoints(control)
+
 	token, err := auth.NewStore(store).RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/entrypoints/main/unlock", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusOK || control.entrypoint != "main" {
 		t.Fatalf("unlock response = %d, entrypoint = %q", response.Code, control.entrypoint)
 	}
 
 	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/entrypoints/missing/unlock", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unknown entrypoint response = %d", response.Code)
 	}
@@ -284,95 +304,118 @@ func TestServer_WebRTCContract(t *testing.T) {
 	server, _ := newTestServer(t)
 	control := &webRTCRecorder{answer: "answer-sdp"}
 	server.SetWebRTC(control)
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
+
 	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/webrtc/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close() //nolint:errcheck // test cleanup
+	defer connection.Close()
+
 	reader := io.Reader(connection)
 	if bufferedReader != nil {
 		reader = bufferedReader
 	}
+
 	transport := struct {
 		io.Reader
 		io.Writer
 	}{Reader: reader, Writer: connection}
 	write := func(message string) map[string]any {
 		t.Helper()
+
 		if err := wsutil.WriteClientText(connection, []byte(message)); err != nil {
 			t.Fatal(err)
 		}
+
 		data, err := wsutil.ReadServerText(transport)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var response map[string]any
 		if err := json.Unmarshal(data, &response); err != nil {
 			t.Fatal(err)
 		}
+
 		return response
 	}
+
 	offer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
 	if offer["type"] != "answer" || control.sessionID != "session-1" || control.entrypointID != "main" || control.offerSDP != "offer-sdp" {
 		t.Fatalf("offer response = %#v, call = %#v", offer, control)
 	}
+
 	candidate := write(`{"type":"candidate","id":"session-1","payload":{"session_id":"session-1","candidate":{"candidate":"candidate:1 1 udp 1 192.0.2.1 12345 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}}}`)
 	if candidate["type"] != "ack" || control.candidateSessionID != "session-1" || control.candidate.Candidate == "" {
 		t.Fatalf("candidate response = %#v, call = %#v", candidate, control)
 	}
-	close := write(`{"type":"close","id":"session-1","payload":{"session_id":"session-1","reason":"test"}}`)
-	if close["type"] != "ack" || control.closed != "session-1" {
-		t.Fatalf("close response = %#v, call = %#v", close, control)
+
+	closeMessage := write(`{"type":"close","id":"session-1","payload":{"session_id":"session-1","reason":"test"}}`)
+	if closeMessage["type"] != "ack" || control.closed != "session-1" {
+		t.Fatalf("close response = %#v, call = %#v", closeMessage, control)
 	}
 }
 
 func TestServer_WebRTCDoesNotSendLocalCandidatesOutOfBand(t *testing.T) {
 	server, _ := newTestServer(t)
 	server.SetWebRTC(&webRTCRecorder{answer: "answer-sdp", localCandidates: []*media.ICECandidate{{Candidate: "candidate:1"}, nil}})
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
+
 	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/webrtc/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close() //nolint:errcheck // test cleanup
+	defer connection.Close()
+
 	reader := io.Reader(connection)
 	if bufferedReader != nil {
 		reader = bufferedReader
 	}
+
 	transport := struct {
 		io.Reader
 		io.Writer
 	}{Reader: reader, Writer: connection}
 	write := func(payload string) map[string]any {
 		t.Helper()
+
 		if err := wsutil.WriteClientText(connection, []byte(payload)); err != nil {
 			t.Fatal(err)
 		}
+
 		data, err := wsutil.ReadServerText(transport)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var response map[string]any
 		if err := json.Unmarshal(data, &response); err != nil {
 			t.Fatal(err)
 		}
+
 		return response
 	}
+
 	answer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
 	if answer["type"] != "answer" {
 		t.Fatalf("offer response type = %q, want answer", answer["type"])
 	}
+
 	ack := write(`{"type":"candidate","id":"session-1","payload":{"session_id":"session-1","candidate":{"candidate":"candidate:1"}}}`)
 	if ack["type"] != "ack" {
 		t.Fatalf("candidate response type = %q, want ack", ack["type"])
@@ -382,18 +425,23 @@ func TestServer_WebRTCDoesNotSendLocalCandidatesOutOfBand(t *testing.T) {
 func TestServer_VoicemailRefresh(t *testing.T) {
 	server, _ := newTestServer(t)
 	called := false
+
 	server.SetVoicemailRefresh(func(context.Context) (bool, error) {
 		called = true
 		return false, nil
 	})
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/voicemail/refresh", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	var body struct {
 		OK        bool `json:"ok"`
 		Available bool `json:"available"`
@@ -406,6 +454,7 @@ func TestServer_VoicemailRefresh(t *testing.T) {
 func TestServer_SnapshotLatest(t *testing.T) {
 	server, _ := newTestServer(t)
 	server.SetSnapshot(snapshotRecorder{image: []byte{0xff, 0xd8, 1, 0xff, 0xd9}})
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
@@ -413,15 +462,19 @@ func TestServer_SnapshotLatest(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v3/entrypoints/main/snapshot/latest.jpg", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/jpeg" || string(response.Body.Bytes()) != string([]byte{0xff, 0xd8, 1, 0xff, 0xd9}) {
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/jpeg" || response.Body.String() != string([]byte{0xff, 0xd8, 1, 0xff, 0xd9}) {
 		t.Fatalf("snapshot response = %d, headers = %#v, body = %v", response.Code, response.Header(), response.Body.Bytes())
 	}
 
 	server.SetSnapshot(snapshotRecorder{err: media.ErrSnapshotNotFound})
+
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing snapshot response = %d", response.Code)
 	}
@@ -435,6 +488,7 @@ func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 	server.logger = slog.New(slog.NewTextHandler(logs, nil))
 	runtime := &runtimeRecorder{rebootErr: errors.New("shutdown failed"), rebooted: make(chan struct{})}
 	server.SetRuntime(runtime)
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
@@ -442,20 +496,25 @@ func TestServer_SystemRebootRespondsBeforeTerminalError(t *testing.T) {
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/reboot", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusOK {
 		t.Fatalf("reboot response = %d: %s", response.Code, response.Body.String())
 	}
+
 	select {
 	case <-runtime.rebooted:
 	case <-time.After(time.Second):
 		t.Fatal("reboot was not called")
 	}
+
 	deadline := time.Now().Add(time.Second)
 	for strings.Count(logs.String(), "system reboot failed") != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+
 	if strings.Count(logs.String(), "system reboot failed") != 1 {
 		t.Fatalf("reboot logs = %q", logs.String())
 	}
@@ -466,6 +525,7 @@ func TestServer_StateRebootRequiresAvailableRuntime(t *testing.T) {
 
 	server, _ := newTestServer(t)
 	server.SetRuntime(&runtimeRecorder{})
+
 	if server.currentPayload().SystemControl.RebootEnabled {
 		t.Fatal("reboot should not be enabled without an available adapter")
 	}
@@ -476,20 +536,25 @@ func TestServer_SystemRebootRespectsConfig(t *testing.T) {
 
 	server, store := newTestServer(t)
 	server.SetRuntime(&runtimeRecorder{available: true})
+
 	if err := store.Update(func(cfg *config.Config) error {
 		cfg.System.RebootEnabled = false
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/reboot", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusConflict {
 		t.Fatalf("reboot response = %d: %s", response.Code, response.Body.String())
 	}
@@ -501,14 +566,17 @@ func TestServer_SystemServiceRestartAcknowledgesBeforeRestart(t *testing.T) {
 	server, store := newTestServer(t)
 	runtime := &runtimeRecorder{restarted: make(chan string, 1)}
 	server.SetRuntime(runtime)
+
 	if err := store.Update(func(cfg *config.Config) error {
 		cfg.System.Services = map[string]config.Service{
 			"companion": {Enabled: true, Exposed: true},
 		}
+
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	token, err := server.auth.RotateBearer()
 	if err != nil {
 		t.Fatal(err)
@@ -516,11 +584,14 @@ func TestServer_SystemServiceRestartAcknowledgesBeforeRestart(t *testing.T) {
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/system/services/companion/restart", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
+
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("restart response = %d: %s", response.Code, response.Body.String())
 	}
+
 	select {
 	case service := <-runtime.restarted:
 		if service != "companion" {
@@ -549,8 +620,10 @@ func TestServer_CloseWebSocketsClosesStateAndWebRTCConnections(t *testing.T) {
 	server, _ := newTestServer(t)
 	stateConn, statePeer := net.Pipe()
 	webrtcConn, webrtcPeer := net.Pipe()
-	defer statePeer.Close()  //nolint:errcheck // test cleanup
-	defer webrtcPeer.Close() //nolint:errcheck // test cleanup
+
+	defer statePeer.Close()
+	defer webrtcPeer.Close()
+
 	server.clients.add(&client{conn: stateConn})
 	server.webrtcClients.add(&client{conn: webrtcConn})
 
@@ -597,6 +670,7 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := authStore.StartInitialClaim(); err != nil {
 		t.Fatal(err)
 	}
@@ -635,6 +709,7 @@ func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offer
 			onLocalCandidate(candidate)
 		}
 	}
+
 	return r.answer, nil
 }
 
@@ -671,14 +746,17 @@ type signalWriter struct {
 func (w *signalWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	n, err := w.value.Write(data)
 	w.once.Do(func() { close(w.written) })
+
 	return n, err
 }
 
 func (w *signalWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	return w.value.String()
 }
 
@@ -686,6 +764,7 @@ func (r *runtimeRecorder) Reboot(context.Context) error {
 	if r.rebooted != nil {
 		r.once.Do(func() { close(r.rebooted) })
 	}
+
 	return r.rebootErr
 }
 
@@ -695,8 +774,10 @@ func (r *runtimeRecorder) Restart(_ context.Context, service string) error {
 	if r.restarted != nil {
 		r.restarted <- service
 	}
+
 	return nil
 }
+
 func (*runtimeRecorder) Status(context.Context, string) (system.ServiceStatus, error) {
 	return system.ServiceStatus{}, nil
 }

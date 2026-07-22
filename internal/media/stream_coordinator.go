@@ -86,8 +86,10 @@ type ManagedSourceBackchannel interface {
 	WriteBackchannelRTP(*rtp.Packet) error
 }
 
-type ManagedSourceFactory func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error)
-type StreamStateObserver func(StreamSnapshot)
+type (
+	ManagedSourceFactory func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error)
+	StreamStateObserver  func(StreamSnapshot)
+)
 
 // StreamCoordinator is the sole owner of the intercom's single media source.
 // OpenWebNet frames describe requested tracks; RTP metadata proves actual flow.
@@ -114,6 +116,7 @@ func (c *StreamCoordinator) SetStateObserver(observer StreamStateObserver) {
 	c.observer = observer
 	snapshot := c.snapshot
 	c.mu.Unlock()
+
 	if observer != nil {
 		observer(snapshot)
 	}
@@ -123,6 +126,7 @@ func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *St
 	if logger == nil {
 		logger = slog.Default()
 	}
+
 	return &StreamCoordinator{factory: factory, logger: logger.With("component", "media.coordinator"), snapshot: StreamSnapshot{Owner: StreamOwnerIdle}}
 }
 
@@ -137,17 +141,55 @@ func (c *StreamCoordinator) AcquireWithStartup(lifecycleCtx, startupCtx context.
 }
 
 func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
+	lease, err := c.reserve(lifecycleCtx, entrypoint)
+	if err != nil {
+		return nil, err
+	}
+
+	source, cleanup, err := c.factory(entrypoint, c.sourceEvents(lease, events))
+	if err != nil || source == nil {
+		c.finishStop(lease, nil, cleanup, "source creation failed")
+
+		if err != nil {
+			c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
+			return nil, err
+		}
+
+		c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "factory returned nil")
+
+		return nil, ErrStreamBusy
+	}
+
+	if !c.attachSource(lease, source, cleanup) {
+		return nil, ErrStreamBusy
+	}
+
+	if err := c.startSource(lifecycleCtx, startupCtx, lease, source, entrypoint.ID); err != nil {
+		return nil, err
+	}
+
+	c.finishStart(lease)
+	go c.watch(lifecycleCtx, lease)
+
+	return lease, nil
+}
+
+func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint) (*StreamLease, error) {
 	c.mu.Lock()
 	if c.snapshot.Owner == StreamOwnerExternal {
 		c.mu.Unlock()
-		c.logger.DebugContext(lifecycleCtx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
+
 		return nil, ErrExternalStream
 	}
+
 	if c.leaseID != 0 || c.factory == nil {
 		c.mu.Unlock()
-		c.logger.DebugContext(lifecycleCtx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
+
 		return nil, ErrStreamBusy
 	}
+
 	c.nextID++
 	c.leaseID = c.nextID
 	c.controlLeaseID = 0
@@ -155,23 +197,30 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.logger.InfoContext(lifecycleCtx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
+	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
 
-	source, cleanup, err := c.factory(entrypoint, SourceEvents{
+	return lease, nil
+}
+
+func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents) SourceEvents {
+	return SourceEvents{
 		VideoRTP: func(packet *rtp.Packet) {
 			c.ObserveRTPPacket(lease, true, packet)
+
 			if events.VideoRTP != nil {
 				events.VideoRTP(packet)
 			}
 		},
 		AudioRTP: func(packet *rtp.Packet) {
 			c.ObserveRTPPacket(lease, false, packet)
+
 			if events.AudioRTP != nil {
 				events.AudioRTP(packet)
 			}
 		},
 		RemoteBYE: func() {
 			c.stop(lease, "remote sip bye")
+
 			if events.RemoteBYE != nil {
 				events.RemoteBYE()
 			}
@@ -179,67 +228,82 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 		Failed: func(err error) {
 			c.logger.Error("media source failed", "lease_id", lease.id, "error", err)
 			c.stop(lease, "managed source failure")
+
 			if events.Failed != nil {
 				events.Failed(err)
 			}
 		},
-	})
-	if err != nil || source == nil {
-		c.finishStop(lease, nil, cleanup, "source creation failed")
-		if err != nil {
-			c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
-			return nil, err
-		}
-		c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "factory returned nil")
-		return nil, ErrStreamBusy
 	}
+}
+
+func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSource, cleanup func()) bool {
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
+
 		_ = source.Close(context.Background())
+
 		if cleanup != nil {
 			cleanup()
 		}
-		return nil, ErrStreamBusy
+
+		return false
 	}
+
 	c.source, c.cleanup = source, cleanup
 	c.mu.Unlock()
+
+	return true
+}
+
+func (c *StreamCoordinator) startSource(lifecycleCtx, startupCtx context.Context, lease *StreamLease, source ManagedSource, entrypointID string) error {
 	startResult := make(chan error, 1)
 	go func() {
 		startResult <- source.Start(lifecycleCtx)
 	}()
+
 	select {
 	case err := <-startResult:
 		if err != nil {
-			c.logger.ErrorContext(lifecycleCtx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
+			c.logger.ErrorContext(lifecycleCtx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypointID, "error", err)
 			c.stop(lease, "source startup failed")
-			return nil, err
+
+			return err
 		}
 	case <-startupCtx.Done():
 		// Teardown may need to wait for a cooperative source startup, but the
 		// signaling request must not remain blocked beyond its startup budget.
 		go c.stop(lease, "source startup timed out")
-		return nil, startupCtx.Err()
+		return startupCtx.Err()
 	}
+
+	return nil
+}
+
+func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 	c.mu.Lock()
-	var snapshot StreamSnapshot
-	var observer StreamStateObserver
+
+	var (
+		snapshot StreamSnapshot
+		observer StreamStateObserver
+	)
+
 	if c.leaseID == lease.id {
 		c.starting = false
 		snapshot = c.snapshot
 		observer = c.observer
 	}
 	c.mu.Unlock()
+
 	if observer != nil {
 		observer(snapshot)
 	}
-	go c.watch(lifecycleCtx, lease)
-	return lease, nil
 }
 
 func (c *StreamCoordinator) watch(ctx context.Context, lease *StreamLease) {
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -258,21 +322,26 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 	if lease == nil {
 		return true
 	}
+
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
 		return true
 	}
+
 	c.snapshot.Health = streamHealth(c.snapshot, now)
 	stalled := c.snapshot.Health == StreamHealthStalled
 	videoLastPacket := c.snapshot.Video.LastPacket
 	audioLastPacket := c.snapshot.Audio.LastPacket
 	c.mu.Unlock()
+
 	if stalled {
 		c.logger.Warn("stream stalled; stopping source", "lease_id", lease.id, "video_last_packet_at", videoLastPacket, "audio_last_packet_at", audioLastPacket)
 		c.stop(lease, "rtp tracks stalled")
+
 		return true
 	}
+
 	return false
 }
 
@@ -291,12 +360,14 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
+
 	backchannel, ok := c.source.(ManagedSourceBackchannel)
 	if !ok || backchannel == nil {
 		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
 	c.mu.Unlock()
+
 	return backchannel.WriteBackchannelRTP(packet)
 }
 
@@ -304,36 +375,46 @@ func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {
 	if lease == nil {
 		return false
 	}
+
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
 		c.logger.Debug("stream stop ignored; lease is no longer active", "lease_id", lease.id, "reason", reason)
+
 		return false
 	}
+
 	if c.stopping {
 		c.mu.Unlock()
 		c.logger.Debug("stream stop ignored; teardown already in progress", "lease_id", lease.id, "reason", reason)
+
 		return false
 	}
+
 	c.stopping = true
 	source, cleanup := c.source, c.cleanup
 	c.source, c.cleanup = nil, nil
 	c.mu.Unlock()
 	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", reason)
 	c.finishStop(lease, source, cleanup, reason)
+
 	return true
 }
 
 func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource, cleanup func(), reason string) {
 	var closeErr error
+
 	if source != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		closeErr = source.Close(ctx)
+
 		cancel()
 	}
+
 	if cleanup != nil {
 		cleanup()
 	}
+
 	c.mu.Lock()
 	if c.leaseID == lease.id {
 		c.leaseID = 0
@@ -342,16 +423,20 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.stopping = false
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
 	}
+
 	snapshot := c.snapshot
 	observer := c.observer
 	c.mu.Unlock()
+
 	if observer != nil {
 		observer(snapshot)
 	}
+
 	if closeErr != nil {
 		c.logger.Error("stream teardown failed", "lease_id", lease.id, "reason", reason, "error", fmt.Errorf("close managed source: %w", closeErr))
 		return
 	}
+
 	c.logger.Info("stream teardown completed", "lease_id", lease.id, "reason", reason)
 }
 
@@ -359,13 +444,16 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 func (c *StreamCoordinator) ObserveControlTrack(video bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.leaseID != 0 {
 		if !c.starting {
 			c.logger.Debug("openwebnet stream start ignored; source attempt is not starting", "lease_id", c.leaseID)
 			return
 		}
+
 		c.controlLeaseID = c.leaseID
 	}
+
 	c.observeRequestedTrackLocked(video)
 }
 
@@ -380,20 +468,26 @@ func (c *StreamCoordinator) ObserveControlStop() {
 			c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
 		}
 		c.mu.Unlock()
+
 		return
 	}
+
 	if c.controlLeaseID != c.leaseID {
 		leaseID := c.leaseID
 		c.mu.Unlock()
 		c.logger.Debug("openwebnet stream stop ignored; no matching start", "lease_id", leaseID)
+
 		return
 	}
+
 	if c.starting {
 		leaseID := c.leaseID
 		c.mu.Unlock()
 		c.logger.Debug("openwebnet stream stop ignored during source startup", "lease_id", leaseID)
+
 		return
 	}
+
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
 	c.stop(lease, "openwebnet stream stop")
@@ -404,19 +498,24 @@ func (c *StreamCoordinator) observeRequestedTrackLocked(video bool) {
 		c.snapshot.Owner = StreamOwnerExternal
 		c.logger.Warn("external stream detected")
 	}
+
 	if video {
 		c.snapshot.Video.Requested = true
 		if c.snapshot.Video.RequestedAt.IsZero() {
 			c.snapshot.Video.RequestedAt = time.Now()
 		}
+
 		c.snapshot.Health = streamHealth(c.snapshot, time.Now())
 		c.logger.Debug("stream control track requested", "track", "video", "owner", c.snapshot.Owner, "health", c.snapshot.Health)
+
 		return
 	}
+
 	c.snapshot.Audio.Requested = true
 	if c.snapshot.Audio.RequestedAt.IsZero() {
 		c.snapshot.Audio.RequestedAt = time.Now()
 	}
+
 	c.snapshot.Health = streamHealth(c.snapshot, time.Now())
 	c.logger.Debug("stream control track requested", "track", "audio", "owner", c.snapshot.Owner, "health", c.snapshot.Health)
 }
@@ -425,22 +524,28 @@ func (c *StreamCoordinator) ObserveRTP(lease *StreamLease, video bool, metadata 
 	if lease == nil {
 		return
 	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.leaseID != lease.id {
 		return
 	}
+
 	track := &c.snapshot.Audio
 	if video {
 		track = &c.snapshot.Video
 	}
+
 	track.PacketCount = metadata.PacketCount
 	track.InvalidCount = metadata.InvalidCount
 	track.SSRC = metadata.SSRC
+
 	track.LastPacket = metadata.LastPacketAt
 	if track.FirstPacket.IsZero() && !metadata.LastPacketAt.IsZero() {
 		track.FirstPacket = metadata.LastPacketAt
 	}
+
 	c.snapshot.Health = streamHealth(c.snapshot, time.Now())
 }
 
@@ -450,35 +555,43 @@ func (c *StreamCoordinator) ObserveRTPPacket(lease *StreamLease, video bool, pac
 	if lease == nil || packet == nil {
 		return
 	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.leaseID != lease.id {
 		return
 	}
+
 	track := &c.snapshot.Audio
 	if video {
 		track = &c.snapshot.Video
 	}
+
 	now := time.Now()
 	track.PacketCount++
 	track.SSRC = packet.SSRC
 	track.Sequence = packet.SequenceNumber
+
 	track.LastPacket = now
 	if track.FirstPacket.IsZero() {
 		track.FirstPacket = now
 	}
+
 	c.snapshot.Health = streamHealth(c.snapshot, now)
 }
 
 func (c *StreamCoordinator) Snapshot() StreamSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.snapshot
 }
 
 func streamHealth(snapshot StreamSnapshot, now time.Time) StreamHealth {
 	videoRequested, audioRequested := snapshot.Video.Requested, snapshot.Audio.Requested
 	videoFlowing := snapshot.Video.Flowing(now, trackFlowTimeout)
+
 	audioFlowing := snapshot.Audio.Flowing(now, trackFlowTimeout)
 	switch {
 	case videoFlowing && audioFlowing:
@@ -491,6 +604,7 @@ func streamHealth(snapshot StreamSnapshot, now time.Time) StreamHealth {
 		if now.Sub(snapshot.Video.RequestedAt) > trackFlowTimeout && now.Sub(snapshot.Audio.RequestedAt) > trackFlowTimeout {
 			return StreamHealthStalled
 		}
+
 		return StreamHealthStarting
 	default:
 		return StreamHealthStarting

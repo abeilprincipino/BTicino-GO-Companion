@@ -32,6 +32,7 @@ func ResolveSourceConfig(model string, entrypoint config.Entrypoint) (SourceConf
 		if devAddr == "" {
 			return SourceConfig{}, ErrC100XDevAddr
 		}
+
 		return SourceConfig{Model: "C100X", DevAddr: devAddr, HighResVideo: false, Target: "c100x@127.0.0.1"}, nil
 	default:
 		return SourceConfig{}, ErrUnsupportedModel
@@ -67,21 +68,26 @@ func detectC100XStreamDevAddr() string {
 	}
 
 	var matches []string
+
 	for _, module := range modules.Modules {
 		if !strings.EqualFold(module.System, "videodoorentry") || !strings.EqualFold(module.DeviceType, "EU") {
 			continue
 		}
+
 		for _, address := range module.PrivateAddress.AddressValues {
 			if strings.TrimSpace(address.Value) == "20" {
 				if id := strings.TrimSpace(module.ID); id != "" {
 					matches = append(matches, id)
 				}
+
 				break
 			}
 		}
 	}
+
 	if len(matches) == 1 {
 		return matches[0]
 	}
+
 	return ""
 }

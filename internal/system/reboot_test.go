@@ -13,6 +13,7 @@ func TestRebootAdapter_UsesIntercomShutdownCommand(t *testing.T) {
 	if err := NewRebootAdapter(runner).Reboot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+
 	if runner.name != shutdownPath || len(runner.args) != 2 || runner.args[0] != "-r" || runner.args[1] != "now" {
 		t.Fatalf("command = %q %#v", runner.name, runner.args)
 	}
@@ -36,5 +37,6 @@ type rebootRunner struct {
 func (r *rebootRunner) Run(_ context.Context, name string, args ...string) error {
 	r.name = name
 	r.args = args
+
 	return r.err
 }
