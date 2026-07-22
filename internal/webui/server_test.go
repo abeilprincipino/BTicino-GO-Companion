@@ -41,6 +41,9 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 	}
 
 	cookie := sessionCookieFrom(t, response)
+	if cookie.Secure {
+		t.Fatal("WebUI session cookie must work over the LAN HTTP listener")
+	}
 
 	response = request(t, server, http.MethodGet, "/webui/api/config/entrypoints", nil, cookie)
 	if response.Code != http.StatusForbidden {

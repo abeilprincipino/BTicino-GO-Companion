@@ -941,7 +941,9 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	// The WebUI is intentionally LAN-only HTTP, so Secure cookies would be
+	// discarded by browsers and make every post-login request unauthenticated.
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
@@ -952,7 +954,7 @@ func refreshSessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
 func (s *Server) staticHandler() http.Handler {
