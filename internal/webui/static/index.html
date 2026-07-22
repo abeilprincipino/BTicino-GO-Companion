@@ -225,10 +225,17 @@
         <label class="form-check"><input id="homeKitEnabled" type="checkbox"> Enable HomeKit</label>
         <label class="form-label" for="homeKitName">Bridge name</label>
         <input id="homeKitName" class="form-input" type="text" maxlength="64">
-        <label class="form-label" for="homeKitPort">Port</label>
-        <input id="homeKitPort" class="form-input" type="number" min="1" max="65535">
-        <p class="card-desc">Pairing code: <code id="homeKitPIN">-</code></p>
-        <div class="flex-between"><span id="homeKitStatus" class="form-status"></span><button class="btn btn-primary" onclick="saveHomeKitConfig(this)">Save</button></div>
+        <p class="info-label">Bridge status</p>
+        <span id="homeKitPairingState" class="badge badge-info">Checking</span>
+        <div class="homekit-pairing">
+          <div>
+            <p class="info-label">HomeKit pairing code</p>
+            <code id="homeKitPIN" class="pairing-code-value">-</code>
+            <p class="form-hint">Scan the QR code in Apple Home, or enter this eight-digit HomeKit code manually.</p>
+          </div>
+          <img id="homeKitQRCode" class="homekit-qr" alt="HomeKit pairing QR code">
+        </div>
+        <div class="flex-between"><span id="homeKitStatus" class="form-status"></span><span><button class="btn btn-secondary" onclick="resetHomeKit()">Reset HomeKit</button> <button class="btn btn-primary" onclick="saveHomeKitConfig(this)">Save</button></span></div>
       </div>
     </div>
 

@@ -112,8 +112,8 @@ type Service struct {
 type HomeKit struct {
 	Enabled bool   `yaml:"enabled"`
 	PIN     string `yaml:"pin"`
+	SetupID string `yaml:"setup_id"`
 	Name    string `yaml:"name"`
-	Port    uint16 `yaml:"port"`
 }
 
 // persistedConfig defines the on-disk boundary. Device metadata is refreshed at
@@ -172,10 +172,6 @@ func Default(metadata Metadata) (Config, error) {
 		return Config{}, err
 	}
 
-	homeKitPIN, err := GenerateHomeKitPIN()
-	if err != nil {
-		return Config{}, fmt.Errorf("generate homekit pin: %w", err)
-	}
 	instanceID, err := RandomHex(16)
 	if err != nil {
 		return Config{}, fmt.Errorf("generate pairing instance id: %w", err)
@@ -216,9 +212,7 @@ func Default(metadata Metadata) (Config, error) {
 		},
 		HomeKit: HomeKit{
 			Enabled: false,
-			PIN:     homeKitPIN,
 			Name:    "BTicino Companion",
-			Port:    51826,
 		},
 	}
 	if err := ApplyMetadata(&cfg, metadata); err != nil {
@@ -352,10 +346,6 @@ func Validate(cfg Config) error {
 		seen[entrypoint.ID] = struct{}{}
 	}
 
-	if cfg.HomeKit.Enabled && !validHomeKitPIN(cfg.HomeKit.PIN) {
-		return ErrInvalidHomeKitPIN
-	}
-
 	if cfg.HomeKit.PIN != "" && !validHomeKitPIN(cfg.HomeKit.PIN) {
 		return ErrInvalidHomeKitPIN
 	}
@@ -486,6 +476,21 @@ func GenerateHomeKitPIN() (string, error) {
 	}
 
 	return "", errors.New("failed to generate homekit pin after 10 attempts")
+}
+
+func GenerateHomeKitSetupID() (string, error) {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+	setupID := make([]byte, 4)
+	for i := range setupID {
+		value, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		setupID[i] = alphabet[value.Int64()]
+	}
+
+	return string(setupID), nil
 }
 
 func validHomeKitPIN(pin string) bool {

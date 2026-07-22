@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/diagnostics"
+	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
 	"bticino-go-companion/internal/system"
@@ -46,6 +47,10 @@ type UpdateProvider interface {
 	Check(context.Context) (system.UpdateStatus, error)
 	Install(context.Context) (system.UpdateStatus, error)
 }
+type HomeKitProvider interface {
+	Status() homekit.Status
+	Reset(dataDir string) error
+}
 
 type Server struct {
 	config      *config.Store
@@ -57,6 +62,7 @@ type Server struct {
 	frames      FrameProvider
 	diagnostics DiagnosticsProvider
 	update      UpdateProvider
+	homeKit     HomeKitProvider
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -87,8 +93,10 @@ type editableSystem struct {
 type editableHomeKit struct {
 	Enabled bool   `json:"enabled"`
 	PIN     string `json:"pin"`
+	SetupID string `json:"setup_id"`
 	Name    string `json:"name"`
-	Port    uint16 `json:"port"`
+	Running bool   `json:"running"`
+	Paired  bool   `json:"paired"`
 }
 
 type loginRequest struct {
@@ -118,6 +126,7 @@ func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restar
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
 func (s *Server) SetDiagnostics(provider DiagnosticsProvider) { s.diagnostics = provider }
 func (s *Server) SetUpdate(provider UpdateProvider)           { s.update = provider }
+func (s *Server) SetHomeKit(provider HomeKitProvider)         { s.homeKit = provider }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -133,7 +142,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /webui/api/config/entrypoints", s.requireReady(s.handleEntrypointsConfig))
 	mux.HandleFunc("PUT /webui/api/config/entrypoints", s.requireReady(s.handleEntrypointsConfig))
 	mux.HandleFunc("GET /webui/api/config/homekit", s.requireReady(s.handleHomeKitConfig))
+	mux.HandleFunc("GET /webui/api/config/homekit/qr", s.requireReady(s.handleHomeKitQRCode))
 	mux.HandleFunc("PUT /webui/api/config/homekit", s.requireReady(s.handleHomeKitConfig))
+	mux.HandleFunc("POST /webui/api/config/homekit/reset", s.requireReady(s.handleHomeKitReset))
 	mux.HandleFunc("GET /webui/api/management/system", s.requireReady(s.handleSystemConfig))
 	mux.HandleFunc("PUT /webui/api/management/system", s.requireReady(s.handleSystemConfig))
 	mux.HandleFunc("GET /webui/api/management/diagnostics", s.requireReady(s.handleStatus))
@@ -530,12 +541,16 @@ func (s *Server) handleEntrypointsConfig(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		cfg, ok := s.snapshot()
-		if !ok {
+		cfg, err := s.homeKitConfig()
+		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
 			return
 		}
-		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.HomeKit.Enabled, PIN: cfg.HomeKit.PIN, Name: cfg.HomeKit.Name, Port: cfg.HomeKit.Port})
+		status := homekit.Status{Enabled: cfg.Enabled}
+		if s.homeKit != nil {
+			status = s.homeKit.Status()
+		}
+		writeJSON(w, http.StatusOK, editableHomeKit{Enabled: cfg.Enabled, PIN: cfg.PIN, SetupID: cfg.SetupID, Name: cfg.Name, Running: status.Running, Paired: status.Paired})
 		return
 	}
 	if !s.sameOrigin(w, r) {
@@ -550,15 +565,70 @@ func (s *Server) handleHomeKitConfig(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(next.Name) != "" {
 			cfg.HomeKit.Name = strings.TrimSpace(next.Name)
 		}
-		if next.Port != 0 {
-			cfg.HomeKit.Port = next.Port
-		}
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "configuration is invalid")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+}
+
+func (s *Server) handleHomeKitQRCode(w http.ResponseWriter, _ *http.Request) {
+	cfg, err := s.homeKitConfig()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "configuration is unavailable")
+		return
+	}
+	if !cfg.Enabled || cfg.PIN == "" || cfg.SetupID == "" {
+		writeError(w, http.StatusConflict, "restart Companion before pairing HomeKit")
+		return
+	}
+	image, err := homekit.SetupQRCodePNG(cfg)
+	if err != nil {
+		s.logger.Error("render homekit qr code", "error", err)
+		writeError(w, http.StatusInternalServerError, "homekit qr code is unavailable")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(image)
+}
+
+func (s *Server) homeKitConfig() (config.HomeKit, error) {
+	if s.config == nil {
+		return config.HomeKit{}, errors.New("configuration is unavailable")
+	}
+
+	return s.config.Snapshot().HomeKit, nil
+}
+
+func (s *Server) handleHomeKitReset(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var request confirmationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if !request.Confirm {
+		writeError(w, http.StatusBadRequest, "confirmation required")
+		return
+	}
+	if s.homeKit == nil || s.restart == nil {
+		writeError(w, http.StatusServiceUnavailable, "HomeKit reset is unavailable")
+		return
+	}
+	if err := s.homeKit.Reset(system.CompanionDataDir); err != nil {
+		s.logger.Error("reset HomeKit", "error", err)
+		writeError(w, http.StatusInternalServerError, "reset HomeKit failed")
+		return
+	}
+	if err := s.requestRestart(r.Context()); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
 }
 
 func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
@@ -604,24 +674,28 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.restart == nil {
-		writeError(w, http.StatusServiceUnavailable, "restart is unavailable")
+	if err := s.requestRestart(r.Context()); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
+}
 
+func (s *Server) requestRestart(requestCtx context.Context) error {
+	if s.restart == nil {
+		return errors.New("restart is unavailable")
+	}
 	s.restartMu.Lock()
 	if s.restartPending {
 		s.restartMu.Unlock()
-		writeError(w, http.StatusConflict, "restart is already in progress")
-		return
+		return errors.New("restart is already in progress")
 	}
 	s.restartPending = true
 	s.restartMu.Unlock()
 
-	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), restartTimeout)
+	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), restartTimeout)
 	go s.runRestart(restartCtx, cancel)
-
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
+	return nil
 }
 
 func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {

@@ -247,22 +247,50 @@ function buildNav() {
 
 function renderHomeKitConfig() {
    apiGet('/webui/api/config/homekit').then(function(data) {
-     document.getElementById('homeKitEnabled').checked = !!data.enabled;
-     document.getElementById('homeKitName').value = data.name || 'BTicino Companion';
-     document.getElementById('homeKitPort').value = data.port || 51826;
-     document.getElementById('homeKitPIN').textContent = data.pin || '-';
-     setStatus('homeKitStatus', '');
+      document.getElementById('homeKitEnabled').checked = !!data.enabled;
+      document.getElementById('homeKitName').value = data.name || 'BTicino Companion';
+      document.getElementById('homeKitPIN').textContent = data.pin || '-';
+      var qr = document.getElementById('homeKitQRCode');
+      var hasCredentials = !!data.enabled && !!data.pin && !!data.setup_id;
+      qr.hidden = !hasCredentials;
+      if (hasCredentials) qr.src = '/webui/api/config/homekit/qr?setup_id=' + encodeURIComponent(data.setup_id);
+      else qr.removeAttribute('src');
+      var pairing = document.getElementById('homeKitPairingState');
+      if (!data.enabled) {
+        pairing.textContent = 'Disabled';
+        pairing.className = 'badge badge-info';
+      } else if (!data.running) {
+        pairing.textContent = 'Restart required';
+        pairing.className = 'badge badge-info';
+      } else if (data.paired) {
+        pairing.textContent = 'Paired';
+        pairing.className = 'badge badge-success';
+      } else {
+        pairing.textContent = 'Ready to pair';
+        pairing.className = 'badge badge-info';
+      }
+      setStatus('homeKitStatus', '');
   }).catch(function(err) { handleApiError(err, 'Failed to load HomeKit configuration'); });
 }
 
 function saveHomeKitConfig(button) {
   apiPut('/webui/api/config/homekit', {
     enabled: document.getElementById('homeKitEnabled').checked,
-    name: document.getElementById('homeKitName').value,
-    port: Number(document.getElementById('homeKitPort').value)
+    name: document.getElementById('homeKitName').value
   }).then(function() {
     setStatus('homeKitStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)');
   }).catch(function(err) { handleApiError(err); });
+}
+
+function resetHomeKit() {
+  requestConfirmation('Reset HomeKit?', 'This removes every Apple Home pairing and creates a new QR code after Companion restarts.', 'Reset', function() {
+    toast.show({ kind: 'attention', message: 'Resetting HomeKit and restarting Companion...' });
+    apiPost('/webui/api/config/homekit/reset', { confirm: true }).then(function() {
+      setTimeout(pollRestartReady, 1500);
+    }).catch(function(err) {
+      toast.show({ kind: 'error', message: err.message || 'HomeKit reset failed' });
+    });
+  });
 }
 
 function renderSystemConfig() {
@@ -1019,6 +1047,7 @@ function startPolling(page) {
   if (page === 'logs') { loadLoggingState(); fetchLogs(); _logTimer = setInterval(fetchLogs, 3000); }
   if (page === 'busframes') { fetchFrames(); _frameTimer = setInterval(fetchFrames, 2000); }
   if (page === 'configHa') { _pairingTimer = setInterval(renderHomeAssistantConfig, 3000); }
+  if (page === 'configHomeKit') { _pairingTimer = setInterval(renderHomeKitConfig, 3000); }
 }
 
 function stopPolling() {

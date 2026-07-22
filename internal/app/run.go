@@ -141,6 +141,8 @@ func run(
 		return fmt.Errorf("create homekit manager: %w", err)
 	}
 	homeKit.SetControllers(openWebNetControl, openWebNetControl, openWebNetControl)
+	homeKit.SetStreamCoordinator(rtspServer.Coordinator())
+	homeKit.SetSnapshotProvider(snapshots)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
 	server.SetEntrypoints(openWebNetControl)
@@ -172,6 +174,7 @@ func run(
 	apiServer.RegisterOnShutdown(server.CloseWebSockets)
 	webUI := webui.New(configStore, authStore, logger, restartCompanion, rt.Reboot, setLogLevel)
 	webUI.SetFrames(openWebNetTrace)
+	webUI.SetHomeKit(homeKit)
 	webUI.SetDiagnostics(diagnosticService)
 	webUI.SetUpdate(updater)
 	webUIServer := &http.Server{

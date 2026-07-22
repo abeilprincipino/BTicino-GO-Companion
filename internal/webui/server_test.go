@@ -3,6 +3,7 @@ package webui
 import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/system"
 	"bytes"
 	"context"
@@ -16,6 +17,18 @@ import (
 	"testing"
 	"time"
 )
+
+type testHomeKitStatus struct {
+	status       homekit.Status
+	resetDataDir string
+}
+
+func (s *testHomeKitStatus) Status() homekit.Status { return s.status }
+
+func (s *testHomeKitStatus) Reset(dataDir string) error {
+	s.resetDataDir = dataDir
+	return nil
+}
 
 func TestBootstrapRequiresPasswordChange(t *testing.T) {
 	t.Parallel()
@@ -171,20 +184,78 @@ func TestHomeKitConfigExposesPairingDetailsAndSavesBridgeSettings(t *testing.T) 
 	}
 	var current editableHomeKit
 	decodeResponse(t, response, &current)
-	if current.PIN == "" || current.Name == "" || current.Port == 0 {
-		t.Fatalf("homekit config = %#v, want PIN, name, and port", current)
+	if current.PIN != "" || current.SetupID != "" || current.Name == "" || current.Running || current.Paired {
+		t.Fatalf("homekit config = %#v, want disabled bridge without credentials", current)
 	}
 
 	response = request(t, server, http.MethodPut, "/webui/api/config/homekit", editableHomeKit{
 		Enabled: true,
 		Name:    "Front Door",
-		Port:    12345,
 	}, cookie)
 	if response.Code != http.StatusOK {
 		t.Fatalf("save homekit config status = %d: %s", response.Code, response.Body.String())
 	}
-	if got := store.Snapshot().HomeKit; !got.Enabled || got.Name != "Front Door" || got.Port != 12345 {
+	if got := store.Snapshot().HomeKit; !got.Enabled || got.Name != "Front Door" {
 		t.Fatalf("saved homekit config = %#v", got)
+	}
+}
+
+func TestHomeKitQRCodeRequiresSessionAndReturnsPNG(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServer(t, nil)
+	response := request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated qr status = %d", response.Code)
+	}
+
+	cookie := configuredSession(t, server)
+	response = request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, cookie)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("uninitialized qr status = %d: %s", response.Code, response.Body.String())
+	}
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.HomeKit.Enabled = true
+		cfg.HomeKit.PIN = "123-45-678"
+		cfg.HomeKit.SetupID = "ABCD"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response = request(t, server, http.MethodGet, "/webui/api/config/homekit/qr", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("qr status = %d: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("content type = %q, want image/png", got)
+	}
+	if !bytes.HasPrefix(response.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatal("qr response is not a PNG")
+	}
+}
+
+func TestHomeKitResetClearsThroughProviderAndRestarts(t *testing.T) {
+	t.Parallel()
+
+	restarted := make(chan struct{})
+	server, _ := testServer(t, func(context.Context) error {
+		close(restarted)
+		return nil
+	})
+	provider := &testHomeKitStatus{}
+	server.SetHomeKit(provider)
+
+	response := request(t, server, http.MethodPost, "/webui/api/config/homekit/reset", confirmationRequest{Confirm: true}, configuredSession(t, server))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("reset status = %d: %s", response.Code, response.Body.String())
+	}
+	if provider.resetDataDir != system.CompanionDataDir {
+		t.Fatalf("reset data directory = %q, want %q", provider.resetDataDir, system.CompanionDataDir)
+	}
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("HomeKit reset did not request restart")
 	}
 }
 

@@ -89,8 +89,8 @@ func TestCreateWritesCompleteConfigYAML(t *testing.T) {
 		"system.services.dropbear.exposed",
 		"homekit.enabled",
 		"homekit.pin",
+		"homekit.setup_id",
 		"homekit.name",
-		"homekit.port",
 	} {
 		if _, ok := yamlPath(document, path); !ok {
 			t.Errorf("missing YAML key path %q", path)
@@ -221,14 +221,12 @@ func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(cfg.HomeKit.PIN) != 10 || cfg.HomeKit.PIN[3] != '-' || cfg.HomeKit.PIN[6] != '-' {
-		t.Fatalf("homekit pin = %q, want XXX-XX-XXX", cfg.HomeKit.PIN)
+	if cfg.HomeKit.PIN != "" || cfg.HomeKit.SetupID != "" {
+		t.Fatalf("disabled HomeKit credentials = %#v, want empty", cfg.HomeKit)
 	}
-	if cfg.HomeKit.Name == "" || cfg.HomeKit.Port == 0 {
-		t.Fatalf("homekit runtime defaults = %#v, want name and port", cfg.HomeKit)
+	if cfg.HomeKit.Name == "" {
+		t.Fatalf("homekit runtime defaults = %#v, want name", cfg.HomeKit)
 	}
-
-	cfg.HomeKit.Enabled = true
 
 	cfg.HomeKit.PIN = "invalid"
 	if err := Validate(cfg); !errors.Is(err, ErrInvalidHomeKitPIN) {

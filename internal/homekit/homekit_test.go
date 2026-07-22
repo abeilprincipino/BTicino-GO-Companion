@@ -13,7 +13,7 @@ import (
 	"github.com/brutella/hap/characteristic"
 )
 
-func TestManager_EnableDisablePreservesPIN(t *testing.T) {
+func TestManager_EnableDisableLeavesCredentialsForStartup(t *testing.T) {
 	t.Parallel()
 
 	store := testConfigStore(t)
@@ -40,12 +40,12 @@ func TestManager_EnableDisablePreservesPIN(t *testing.T) {
 		t.Fatal("Enabled() = true, want false")
 	}
 
-	if got := store.Snapshot().HomeKit.PIN; got != pin {
-		t.Fatalf("pin = %q, want %q", got, pin)
+	if pin != "" || store.Snapshot().HomeKit.PIN != "" || store.Snapshot().HomeKit.SetupID != "" {
+		t.Fatalf("enabled HomeKit credentials = %#v, want empty until restart", store.Snapshot().HomeKit)
 	}
 }
 
-func TestManager_EnableGeneratesPersistentPIN(t *testing.T) {
+func TestManager_RunGeneratesPersistentCredentials(t *testing.T) {
 	t.Parallel()
 
 	store := testConfigStore(t)
@@ -56,22 +56,26 @@ func TestManager_EnableGeneratesPersistentPIN(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.HomeKit.Enabled = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	manager, err := NewManager(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	pin, err := manager.Enable()
-	if err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.Run(ctx, t.TempDir(), nil); err != nil {
 		t.Fatal(err)
 	}
-
-	if len(pin) != 10 || pin[3] != '-' || pin[6] != '-' {
+	if pin := store.Snapshot().HomeKit.PIN; len(pin) != 10 || pin[3] != '-' || pin[6] != '-' {
 		t.Fatalf("pin = %q, want XXX-XX-XXX", pin)
 	}
-
-	if got := store.Snapshot().HomeKit.PIN; got != pin {
-		t.Fatalf("stored pin = %q, want %q", got, pin)
+	if setupID := store.Snapshot().HomeKit.SetupID; len(setupID) != 4 {
+		t.Fatalf("setup id = %q, want four characters", setupID)
 	}
 }
 
@@ -111,10 +115,9 @@ func TestNewRuntimeConfigUsesConfiguredValues(t *testing.T) {
 
 	runtime := newRuntimeConfig(config.Config{HomeKit: config.HomeKit{
 		Name: "Front Door",
-		Port: 12345,
 		PIN:  "123-45-678",
 	}})
-	if runtime.name != "Front Door" || runtime.address != ":12345" {
+	if runtime.name != "Front Door" || runtime.address != ":51826" {
 		t.Fatalf("runtime config = %#v", runtime)
 	}
 }
@@ -132,6 +135,42 @@ func TestManager_RunSkipsDisabledHomeKit(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("disabled Run() created %q: %v", dataDir, err)
+	}
+}
+
+func TestManager_ResetClearsCredentialsAndStore(t *testing.T) {
+	t.Parallel()
+
+	store := testConfigStore(t)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.HomeKit.Enabled = true
+		cfg.HomeKit.PIN = "123-45-678"
+		cfg.HomeKit.SetupID = "ABCD"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	storePath := filepath.Join(dataDir, "homekit")
+	if err := os.MkdirAll(storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storePath, "pairing"), []byte("paired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Reset(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := store.Snapshot().HomeKit; !cfg.Enabled || cfg.PIN != "" || cfg.SetupID != "" {
+		t.Fatalf("reset HomeKit config = %#v", cfg)
+	}
+	if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("HomeKit store exists after reset: %v", err)
 	}
 }
 
@@ -154,23 +193,20 @@ func TestManager_BuildsStableControlAccessories(t *testing.T) {
 
 	manager.mu.Lock()
 	bridge, accessories := manager.buildAccessoriesLocked(cfg, newRuntimeConfig(cfg))
-	manager.syncLocked(false)
+	manager.syncLocked()
 	manager.mu.Unlock()
 
 	if bridge.Id != 1 {
 		t.Fatalf("bridge id = %d, want 1", bridge.Id)
 	}
-	if len(accessories) != 5 {
-		t.Fatalf("accessory count = %d, want 5", len(accessories))
+	if len(accessories) != 4 {
+		t.Fatalf("accessory count = %d, want 4", len(accessories))
 	}
 	if manager.ringer == nil || !manager.ringer.Switch.On.Value() {
 		t.Fatal("ringer mute switch did not reflect projected state")
 	}
 	if manager.mailbox == nil || !manager.mailbox.Switch.On.Value() {
 		t.Fatal("voicemail switch did not reflect projected state")
-	}
-	if manager.doorbell == nil {
-		t.Fatal("doorbell accessory was not created")
 	}
 	for _, id := range []core.EntrypointID{"main", "side"} {
 		lock := manager.locks[id]
@@ -204,15 +240,17 @@ func TestManager_UnlockRestoresSecuredState(t *testing.T) {
 
 	manager.mu.Lock()
 	manager.buildAccessoriesLocked(cfg, newRuntimeConfig(cfg))
-	manager.syncLocked(false)
+	manager.syncLocked()
 	manager.mu.Unlock()
 
-	manager.unlock("main", characteristic.LockTargetStateUnsecured)
+	if err := manager.unlock("main"); err != nil {
+		t.Fatal(err)
+	}
 	if controls.unlocked != "main" {
 		t.Fatalf("unlock entrypoint = %q, want main", controls.unlocked)
 	}
-	if got := manager.locks["main"].lock.LockTargetState.Value(); got != characteristic.LockTargetStateSecured {
-		t.Fatalf("lock target state = %d, want secured", got)
+	if got := manager.locks["main"].lock.LockTargetState.Value(); got != characteristic.LockTargetStateUnsecured {
+		t.Fatalf("lock target state = %d, want unsecured", got)
 	}
 }
 
@@ -230,7 +268,7 @@ func TestManager_ControlsRestoreProjectedState(t *testing.T) {
 
 	manager.mu.Lock()
 	manager.buildAccessoriesLocked(cfg, newRuntimeConfig(cfg))
-	manager.syncLocked(false)
+	manager.syncLocked()
 	manager.mu.Unlock()
 
 	manager.setRingerMute(true)

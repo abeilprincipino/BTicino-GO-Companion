@@ -424,6 +424,10 @@ a:hover { color: var(--primary-hover); }
 }
 .pairing-code code { font: 700 22px 'Courier New', Consolas, monospace; letter-spacing: 1px; }
 .pairing-code .form-hint { width: 100%; margin: 0; }
+.homekit-pairing { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 16px 0; padding: 16px; background: var(--primary-light); border-radius: var(--radius); }
+.pairing-code-value { display: block; margin: 2px 0 6px; font: 700 22px 'Courier New', Consolas, monospace; letter-spacing: 1px; }
+.homekit-qr { width: 148px; height: 148px; flex: 0 0 148px; border-radius: 4px; background: #fff; image-rendering: pixelated; }
+@media (max-width: 440px) { .homekit-pairing { align-items: flex-start; flex-direction: column; } }
 
 /* Section */
 .section { margin-bottom: 24px; }

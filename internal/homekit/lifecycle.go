@@ -3,10 +3,14 @@ package homekit
 import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
+	"bticino-go-companion/internal/media"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,18 +41,22 @@ type Manager struct {
 	config ConfigStore
 	logger *slog.Logger
 
-	mu        sync.Mutex
-	unlocker  Unlocker
-	audio     AudioController
-	voicemail VoicemailController
-	state     core.State
+	mu           sync.Mutex
+	unlocker     Unlocker
+	audio        AudioController
+	voicemail    VoicemailController
+	state        core.State
+	unlockTimers map[core.EntrypointID]*time.Timer
 
 	bridge    *accessory.Bridge
 	accessory []*accessory.A
 	locks     map[core.EntrypointID]*lockAccessory
 	ringer    *accessory.Switch
 	mailbox   *accessory.Switch
-	doorbell  *doorbellAccessory
+	doorbells map[core.EntrypointID]*videoDoorbellAccessory
+	stream    *media.StreamCoordinator
+	snapshots SnapshotProvider
+	server    *hap.Server
 }
 
 type Unlocker interface {
@@ -65,14 +73,29 @@ type VoicemailController interface {
 	Disable(context.Context) error
 }
 
+// SnapshotProvider returns the last captured JPEG without starting media.
+type SnapshotProvider interface {
+	Latest(entrypointID string) ([]byte, error)
+}
+
+// Status reports the bridge lifecycle and persistent HomeKit pairing state.
+type Status struct {
+	Enabled bool `json:"enabled"`
+	Running bool `json:"running"`
+	Paired  bool `json:"paired"`
+}
+
 type lockAccessory struct {
 	lock *service.LockMechanism
 	id   core.EntrypointID
 	aid  uint64
 }
 
-type doorbellAccessory struct {
-	service *service.Doorbell
+type videoDoorbellAccessory struct {
+	stream   *cameraSessionManager
+	doorbell *service.Doorbell
+	id       core.EntrypointID
+	aid      uint64
 }
 
 type runtimeConfig struct {
@@ -93,7 +116,7 @@ func NewManager(store ConfigStore) (*Manager, error) {
 		return nil, err
 	}
 
-	return &Manager{config: store, logger: slog.Default(), locks: make(map[core.EntrypointID]*lockAccessory)}, nil
+	return &Manager{config: store, logger: slog.Default(), locks: make(map[core.EntrypointID]*lockAccessory), unlockTimers: make(map[core.EntrypointID]*time.Timer), doorbells: make(map[core.EntrypointID]*videoDoorbellAccessory)}, nil
 }
 
 // SetControllers supplies the existing Companion controls used by HomeKit
@@ -110,6 +133,28 @@ func (m *Manager) SetControllers(unlocker Unlocker, audio AudioController, voice
 	m.voicemail = voicemail
 }
 
+// SetStreamCoordinator supplies the sole owner of the intercom media source.
+// It must be called before Run to publish stream-capable camera accessories.
+func (m *Manager) SetStreamCoordinator(coordinator *media.StreamCoordinator) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stream = coordinator
+}
+
+// SetSnapshotProvider supplies cached still images for HomeKit /resource requests.
+// It must be called before Run.
+func (m *Manager) SetSnapshotProvider(provider SnapshotProvider) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snapshots = provider
+}
+
 // Sync projects Companion state into already published HomeKit accessories.
 func (m *Manager) Sync(state core.State) {
 	if m == nil {
@@ -120,7 +165,10 @@ func (m *Manager) Sync(state core.State) {
 	defer m.mu.Unlock()
 	previousRing := m.state.PhysicalRing
 	m.state = state
-	m.syncLocked(previousRing == nil && state.PhysicalRing != nil)
+	if state.PhysicalRing != nil && (previousRing == nil || previousRing.EntrypointID != state.PhysicalRing.EntrypointID) {
+		m.ringDoorbellLocked(state.PhysicalRing.EntrypointID)
+	}
+	m.syncLocked()
 }
 
 func (m *Manager) Enable() (string, error) {
@@ -128,30 +176,15 @@ func (m *Manager) Enable() (string, error) {
 		return "", ErrConfigStoreUnavailable
 	}
 
-	var pin string
-
 	err := m.config.Update(func(cfg *config.Config) error {
-		pin = cfg.HomeKit.PIN
-		if pin == "" {
-			var err error
-
-			pin, err = config.GenerateHomeKitPIN()
-			if err != nil {
-				return err
-			}
-
-			cfg.HomeKit.PIN = pin
-		}
-
 		cfg.HomeKit.Enabled = true
-
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
 
-	return pin, nil
+	return "", nil
 }
 
 func (m *Manager) Disable() error {
@@ -167,6 +200,44 @@ func (m *Manager) Disable() error {
 
 func (m *Manager) Enabled() bool {
 	return m != nil && m.config != nil && m.config.Snapshot().HomeKit.Enabled
+}
+
+func (m *Manager) Status() Status {
+	if m == nil || m.config == nil {
+		return Status{}
+	}
+
+	status := Status{Enabled: m.config.Snapshot().HomeKit.Enabled}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.server != nil {
+		status.Running = true
+		status.Paired = m.server.IsPaired()
+	}
+	return status
+}
+
+// Reset clears the HAP identity and pairing store. The next Companion restart
+// creates new setup credentials before the bridge starts.
+func (m *Manager) Reset(dataDir string) error {
+	if m == nil || m.config == nil {
+		return ErrConfigStoreUnavailable
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		return errors.New("homekit: data directory is required")
+	}
+	if err := m.config.Update(func(cfg *config.Config) error {
+		cfg.HomeKit.Enabled = true
+		cfg.HomeKit.PIN = ""
+		cfg.HomeKit.SetupID = ""
+		return nil
+	}); err != nil {
+		return fmt.Errorf("clear HomeKit setup credentials: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(dataDir, "homekit")); err != nil {
+		return fmt.Errorf("remove HomeKit store: %w", err)
+	}
+	return nil
 }
 
 // Run serves the persistent HomeKit bridge until ctx is canceled. It returns
@@ -192,6 +263,28 @@ func (m *Manager) Run(ctx context.Context, dataDir string, logger *slog.Logger) 
 	if !cfg.HomeKit.Enabled {
 		return nil
 	}
+	if cfg.HomeKit.PIN == "" || cfg.HomeKit.SetupID == "" {
+		if err := m.config.Update(func(cfg *config.Config) error {
+			if cfg.HomeKit.PIN == "" {
+				pin, err := config.GenerateHomeKitPIN()
+				if err != nil {
+					return err
+				}
+				cfg.HomeKit.PIN = pin
+			}
+			if cfg.HomeKit.SetupID == "" {
+				setupID, err := config.GenerateHomeKitSetupID()
+				if err != nil {
+					return err
+				}
+				cfg.HomeKit.SetupID = setupID
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("generate HomeKit setup credentials: %w", err)
+		}
+		cfg = m.config.Snapshot()
+	}
 	if err := config.Validate(cfg); err != nil {
 		return fmt.Errorf("validate homekit configuration: %w", err)
 	}
@@ -207,7 +300,7 @@ func (m *Manager) Run(ctx context.Context, dataDir string, logger *slog.Logger) 
 	runtime := newRuntimeConfig(cfg)
 	m.mu.Lock()
 	bridge, accessories := m.buildAccessoriesLocked(cfg, runtime)
-	m.syncLocked(false)
+	m.syncLocked()
 	m.mu.Unlock()
 
 	server, err := hap.NewServer(hap.NewFsStore(storePath), bridge.A, accessories...)
@@ -215,7 +308,19 @@ func (m *Manager) Run(ctx context.Context, dataDir string, logger *slog.Logger) 
 		return fmt.Errorf("create homekit server: %w", err)
 	}
 	server.Pin = runtime.setupPIN
+	server.SetupId = cfg.HomeKit.SetupID
 	server.Addr = runtime.address
+	server.ServeMux().HandleFunc("/resource", m.resourceHandler(server.IsAuthorized))
+	m.mu.Lock()
+	m.server = server
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.server == server {
+			m.server = nil
+		}
+		m.mu.Unlock()
+	}()
 
 	logger.Info("homekit bridge starting", "name", runtime.name, "address", server.Addr, "store", storePath)
 	if err := server.ListenAndServe(ctx); err != nil && ctx.Err() == nil {
@@ -235,10 +340,14 @@ func (m *Manager) buildAccessoriesLocked(cfg config.Config, runtime runtimeConfi
 
 	m.bridge = bridge
 	m.accessory = nil
+	for _, timer := range m.unlockTimers {
+		timer.Stop()
+	}
+	m.unlockTimers = make(map[core.EntrypointID]*time.Timer)
 	m.locks = make(map[core.EntrypointID]*lockAccessory)
 	m.ringer = nil
 	m.mailbox = nil
-	m.doorbell = nil
+	m.doorbells = make(map[core.EntrypointID]*videoDoorbellAccessory)
 
 	if m.audio != nil {
 		ringer := accessory.NewSwitch(accessory.Info{
@@ -266,22 +375,39 @@ func (m *Manager) buildAccessoriesLocked(cfg config.Config, runtime runtimeConfi
 		m.accessory = append(m.accessory, mailbox.A)
 	}
 
-	doorbell := accessory.New(accessory.Info{
-		Name:         "Doorbell",
-		Manufacturer: runtime.manufacturer,
-		Model:        runtime.model,
-		SerialNumber: runtime.serialNumber + "-doorbell",
-	}, accessory.TypeVideoDoorbell)
-	doorbell.Id = 4
-	doorbellService := service.NewDoorbell()
-	doorbell.AddS(doorbellService.S)
-	m.doorbell = &doorbellAccessory{service: doorbellService}
-	m.accessory = append(m.accessory, doorbell)
-
 	entrypoints := append([]config.Entrypoint(nil), cfg.Companion.Entrypoints...)
 	sort.Slice(entrypoints, func(i, j int) bool { return entrypoints[i].ID < entrypoints[j].ID })
-	usedIDs := map[uint64]struct{}{1: {}, 2: {}, 3: {}, 4: {}}
+	usedIDs := map[uint64]struct{}{1: {}, 2: {}, 3: {}}
 	for _, entrypoint := range entrypoints {
+		entrypointID := core.EntrypointID(entrypoint.ID)
+		if entrypoint.Capabilities.Stream && m.stream != nil {
+			doorbell := accessory.New(accessory.Info{
+				Name:         entrypoint.Label,
+				Manufacturer: runtime.manufacturer,
+				Model:        runtime.model,
+				SerialNumber: runtime.serialNumber + "-doorbell-" + entrypoint.ID,
+			}, accessory.TypeVideoDoorbell)
+			doorbell.Id = stableEntrypointAccessoryID("doorbell-"+entrypoint.ID, usedIDs)
+			doorbellService := service.NewDoorbell()
+			doorbellService.Primary = true
+			cameraControl := service.NewCameraControl()
+			cameraControl.On.SetValue(true)
+			cameraService := service.NewCameraRTPStreamManagement()
+			cameraActive := characteristic.NewActive()
+			cameraActive.SetValue(characteristic.ActiveActive)
+			cameraService.AddC(cameraActive.C)
+			doorbell.AddS(doorbellService.S)
+			doorbell.AddS(cameraControl.S)
+			doorbell.AddS(cameraService.S)
+			m.doorbells[entrypointID] = &videoDoorbellAccessory{
+				stream:   newCameraSessionManager(m.stream, entrypoint, cameraService, m.logger),
+				doorbell: doorbellService,
+				id:       entrypointID,
+				aid:      doorbell.Id,
+			}
+			m.accessory = append(m.accessory, doorbell)
+		}
+
 		if !entrypoint.Capabilities.Unlock || m.unlocker == nil {
 			continue
 		}
@@ -294,15 +420,85 @@ func (m *Manager) buildAccessoriesLocked(cfg config.Config, runtime runtimeConfi
 		}, accessory.TypeDoorLock)
 		lock.Id = stableEntrypointAccessoryID(entrypoint.ID, usedIDs)
 		mechanism := service.NewLockMechanism()
-		mechanism.LockTargetState.OnValueRemoteUpdate(func(target int) {
-			m.unlock(core.EntrypointID(entrypoint.ID), target)
+		mechanism.LockTargetState.OnSetRemoteValue(func(target int) error {
+			if target != characteristic.LockTargetStateUnsecured {
+				return nil
+			}
+			return m.unlock(entrypointID)
 		})
 		lock.AddS(mechanism.S)
-		m.locks[core.EntrypointID(entrypoint.ID)] = &lockAccessory{lock: mechanism, id: core.EntrypointID(entrypoint.ID), aid: lock.Id}
+		lockAccessory := &lockAccessory{lock: mechanism, id: entrypointID, aid: lock.Id}
+		m.locks[entrypointID] = lockAccessory
+		m.setLockState(lockAccessory, characteristic.LockTargetStateSecured)
 		m.accessory = append(m.accessory, lock)
 	}
 
 	return bridge, m.accessory
+}
+
+func (m *Manager) ringDoorbellLocked(entrypointID core.EntrypointID) {
+	doorbell := m.doorbells[entrypointID]
+	if doorbell == nil || doorbell.doorbell == nil {
+		return
+	}
+	doorbell.doorbell.ProgrammableSwitchEvent.SetValue(characteristic.ProgrammableSwitchEventSinglePress)
+	m.logger.Info("homekit doorbell pressed", "entrypoint_id", entrypointID)
+}
+
+type resourceRequest struct {
+	AccessoryID  uint64 `json:"aid"`
+	ResourceType string `json:"resource-type"`
+}
+
+func (m *Manager) resourceHandler(authorized func(*http.Request) bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if authorized == nil || !authorized(r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		var request resourceRequest
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+		if err := decoder.Decode(&request); err != nil || request.AccessoryID == 0 || request.ResourceType != "image" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		m.mu.Lock()
+		var entrypointID string
+		for _, doorbell := range m.doorbells {
+			if doorbell.aid == request.AccessoryID {
+				entrypointID = string(doorbell.id)
+				break
+			}
+		}
+		provider := m.snapshots
+		m.mu.Unlock()
+		if entrypointID == "" || provider == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		image, err := provider.Latest(entrypointID)
+		if err != nil {
+			if errors.Is(err, media.ErrSnapshotNotFound) || errors.Is(err, media.ErrSnapshotUnavailable) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			m.logger.Warn("read HomeKit snapshot", "entrypoint_id", entrypointID, "error", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(image)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(image)
+	}
 }
 
 func stableEntrypointAccessoryID(entrypointID string, used map[uint64]struct{}) uint64 {
@@ -322,44 +518,34 @@ func stableEntrypointAccessoryID(entrypointID string, used map[uint64]struct{}) 
 	}
 }
 
-func (m *Manager) syncLocked(ringStarted bool) {
+func (m *Manager) syncLocked() {
 	if m.ringer != nil {
 		m.ringer.Switch.On.SetValue(m.state.Audio.Muted)
 	}
 	if m.mailbox != nil && m.state.Voicemail != nil {
 		m.mailbox.Switch.On.SetValue(m.state.Voicemail.Enabled)
 	}
-	for _, lock := range m.locks {
-		m.setLockState(lock, characteristic.LockTargetStateSecured)
-	}
-	if ringStarted && m.doorbell != nil {
-		if err := m.doorbell.service.ProgrammableSwitchEvent.SetValue(characteristic.ProgrammableSwitchEventSinglePress); err != nil {
-			m.logger.Error("set homekit doorbell event", "error", err)
-		}
-	}
 }
 
-func (m *Manager) unlock(entrypointID core.EntrypointID, target int) {
-	if target != characteristic.LockTargetStateUnsecured {
-		m.restoreState()
-		return
-	}
-
+func (m *Manager) unlock(entrypointID core.EntrypointID) error {
 	m.mu.Lock()
 	unlocker := m.unlocker
 	m.mu.Unlock()
 	if unlocker == nil {
-		m.restoreState()
-		return
+		return errors.New("homekit unlock control is unavailable")
 	}
 
+	m.logger.Info("homekit unlock requested", "entrypoint_id", entrypointID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := unlocker.Unlock(ctx, entrypointID)
 	cancel()
 	if err != nil {
 		m.logger.Error("homekit unlock failed", "entrypoint_id", entrypointID, "error", err)
+		return err
 	}
-	m.restoreState()
+	m.markUnlocking(entrypointID)
+	m.logger.Info("homekit unlock completed", "entrypoint_id", entrypointID)
+	return nil
 }
 
 func (m *Manager) setRingerMute(muted bool) {
@@ -411,7 +597,33 @@ func (m *Manager) setVoicemail(enabled bool) {
 func (m *Manager) restoreState() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.syncLocked(false)
+	m.syncLocked()
+}
+
+func (m *Manager) markUnlocking(entrypointID core.EntrypointID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lock := m.locks[entrypointID]
+	if lock == nil {
+		return
+	}
+	if timer := m.unlockTimers[entrypointID]; timer != nil {
+		timer.Stop()
+	}
+	m.setLockState(lock, characteristic.LockCurrentStateUnsecured)
+
+	var timer *time.Timer
+	timer = time.AfterFunc(1500*time.Millisecond, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.unlockTimers[entrypointID] != timer {
+			return
+		}
+		delete(m.unlockTimers, entrypointID)
+		m.setLockState(lock, characteristic.LockTargetStateSecured)
+	})
+	m.unlockTimers[entrypointID] = timer
 }
 
 func (m *Manager) setLockState(lock *lockAccessory, target int) {
@@ -428,14 +640,9 @@ func newRuntimeConfig(cfg config.Config) runtimeConfig {
 	if name == "" {
 		name = "BTicino Companion"
 	}
-	port := cfg.HomeKit.Port
-	if port == 0 {
-		port = 51826
-	}
-
 	return runtimeConfig{
 		name:         name,
-		address:      fmt.Sprintf(":%d", port),
+		address:      ":51826",
 		setupPIN:     strings.ReplaceAll(cfg.HomeKit.PIN, "-", ""),
 		manufacturer: "BTicino",
 		model:        cfg.Companion.Model,
