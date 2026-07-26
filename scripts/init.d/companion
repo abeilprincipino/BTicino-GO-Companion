@@ -27,6 +27,8 @@ START_ATTEMPTS=3
 RETRY_DELAY_SECONDS=2
 WATCHDOG_INTERVAL_SECONDS=15
 WATCHDOG_MAX_BACKOFF_SECONDS=120
+BINARY_WAIT_SECONDS="${COMPANION_BINARY_WAIT_SECONDS:-60}"
+LAN_IP_WAIT_SECONDS=30
 
 if [ -f /etc/init.d/functions ]; then
 	# shellcheck source=/dev/null
@@ -61,6 +63,41 @@ remove_firewall() {
 	[ -x /usr/sbin/iptables ] || return 0
 	for port in $(tcp_listen_ports); do remove_firewall_rule tcp "${port}"; done
 	for port in $(udp_listen_ports); do remove_firewall_rule udp "${port}"; done
+}
+
+device_lan_ip() {
+	for ifc in wlan0 eth0; do
+		addr="$(ip -4 addr show "${ifc}" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
+		[ -n "${addr}" ] || continue
+		printf '%s' "${addr}"
+		return 0
+	done
+	return 1
+}
+
+wait_for_lan_ip() {
+	attempt=0
+	while [ "${attempt}" -lt "${LAN_IP_WAIT_SECONDS}" ]; do
+		device_lan_ip >/dev/null 2>&1 && return 0
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+flexisip_listening() {
+	netstat -lnt 2>/dev/null | grep -q '127.0.0.1:5060'
+}
+
+# ensure_flexisip brings up the device's on-demand SIP proxy if it is not
+# already listening. flexisip must be up *before* the BTicino stack registers,
+# so the device registers c100x to it and the local SIP camera path works
+# without the cloud. flexisip does not touch the hardware watchdog, so safe.
+ensure_flexisip() {
+	flexisip_listening && return 0
+	[ -x /etc/init.d/flexisipsh ] || return 0
+	ip="$(device_lan_ip)" || return 0
+	/etc/init.d/flexisipsh start "${ip}" >/dev/null 2>&1 || true
 }
 
 process_running() {
@@ -129,6 +166,18 @@ with_lifecycle_lock() {
 cleanup_stale_pidfile() {
 	[ -f "${PIDFILE}" ] || return 0
 	process_running || rm -f "${PIDFILE}"
+}
+
+# The binary lives on the ${BASE_DIR} partition. At boot this script can run
+# before that partition is mounted, so wait for it instead of giving up.
+wait_for_binary() {
+	attempt=0
+	while [ "${attempt}" -lt "${BINARY_WAIT_SECONDS}" ]; do
+		if [ -x "${BIN_PATH}" ] || [ -x "${STAGED_BIN_PATH}" ]; then return 0; fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	[ -x "${BIN_PATH}" ] || [ -x "${STAGED_BIN_PATH}" ]
 }
 
 activate_staged_binary() {
@@ -240,6 +289,7 @@ do_watchdog() {
 	trap 'rm -f "${WATCHDOG_PIDFILE}"; exit 0' INT TERM
 	backoff="${WATCHDOG_INTERVAL_SECONDS}"
 	while [ -f "${WATCHDOG_ENABLE_FILE}" ]; do
+		ensure_flexisip
 		if companion_healthy; then
 			backoff="${WATCHDOG_INTERVAL_SECONDS}"
 			sleep "${WATCHDOG_INTERVAL_SECONDS}"
@@ -259,8 +309,22 @@ do_watchdog() {
 }
 
 do_start() {
-	with_lifecycle_lock start true || return 1
-	start_watchdog
+	wait_for_binary || echo "Companion binary still missing after ${BINARY_WAIT_SECONDS}s" >&2
+
+	# Bring flexisip up before the BTicino stack registers (so c100x registers
+	# locally and the SIP camera works without the cloud). Waiting for the LAN
+	# IP also delays bt_daemon's start enough to win the race.
+	wait_for_lan_ip || true
+	ensure_flexisip
+
+	with_lifecycle_lock start true
+	start_status=$?
+
+	# Start the watchdog even when the first attempt failed: it retries with
+	# backoff, so a late partition mount no longer leaves the device
+	# unsupervised for good.
+	start_watchdog || return 1
+	return "${start_status}"
 }
 
 do_stop() {
