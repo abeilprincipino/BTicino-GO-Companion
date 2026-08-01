@@ -241,6 +241,69 @@ func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
 	}
 }
 
+func TestDefaultSIPSettings(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Default(Metadata{Model: "C300X", MAC: "aa:bb:cc:dd:ee:ff"})
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	sip := cfg.Companion.SIP
+	if sip.From != "companion@127.0.0.1:5070" {
+		t.Fatalf("From = %q, want companion@127.0.0.1:5070", sip.From)
+	}
+
+	if sip.Listen != "127.0.0.1:5070" {
+		t.Fatalf("Listen = %q, want 127.0.0.1:5070", sip.Listen)
+	}
+
+	if sip.Transport != "tcp" {
+		t.Fatalf("Transport = %q, want tcp", sip.Transport)
+	}
+
+	if sip.Inbound {
+		t.Fatal("Inbound = true, want false by default")
+	}
+}
+
+func TestSIPSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	if _, err := Create(path, Metadata{Model: "C300X", MAC: "aa:bb:cc:dd:ee:ff"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Companion.SIP.Inbound = true
+		cfg.Companion.SIP.From = "companion@127.0.0.1:5075"
+
+		return nil
+	}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !loaded.Companion.SIP.Inbound {
+		t.Fatal("Inbound was not persisted")
+	}
+
+	if loaded.Companion.SIP.From != "companion@127.0.0.1:5075" {
+		t.Fatalf("From = %q, want companion@127.0.0.1:5075", loaded.Companion.SIP.From)
+	}
+}
+
 func TestClaimCodeFormat(t *testing.T) {
 	t.Parallel()
 

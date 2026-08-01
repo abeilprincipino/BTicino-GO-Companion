@@ -50,6 +50,7 @@ type Companion struct {
 	DeviceID    string       `yaml:"-"`
 	Model       string       `yaml:"-"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
+	SIP         SIP          `yaml:"sip"`
 }
 
 type Entrypoint struct {
@@ -63,6 +64,19 @@ type Capabilities struct {
 	Stream bool `yaml:"stream" json:"stream"`
 	Unlock bool `yaml:"unlock" json:"unlock"`
 	Ring   bool `yaml:"ring" json:"ring"`
+}
+
+// SIP holds the companion's SIP identity. Defaults reproduce the values that
+// were hardcoded before inbound calls were supported, so existing
+// installations behave identically until Inbound is enabled.
+type SIP struct {
+	From      string `yaml:"from"`
+	AuthUser  string `yaml:"auth_user"`
+	AuthPass  string `yaml:"auth_pass"`
+	Listen    string `yaml:"listen"`
+	Transport string `yaml:"transport"`
+	Domain    string `yaml:"domain"`
+	Inbound   bool   `yaml:"inbound"`
 }
 
 type Auth struct {
@@ -128,6 +142,7 @@ type persistedConfig struct {
 
 type persistedCompanion struct {
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
+	SIP         SIP          `yaml:"sip"`
 }
 
 type Metadata struct {
@@ -189,6 +204,15 @@ func Default(metadata Metadata) (Config, error) {
 					Ring:   true,
 				},
 			}},
+			SIP: SIP{
+				From:      "companion@127.0.0.1:5070",
+				AuthUser:  "",
+				AuthPass:  "",
+				Listen:    "127.0.0.1:5070",
+				Transport: "tcp",
+				Domain:    "",
+				Inbound:   false,
+			},
 		},
 		Auth: Auth{
 			PairingState:    PairingStateSetupRequired,
@@ -253,6 +277,7 @@ func Load(path string) (Config, error) {
 	cfg := Config{
 		Companion: Companion{
 			Entrypoints: persisted.Companion.Entrypoints,
+			SIP:         persisted.Companion.SIP,
 		},
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
@@ -269,7 +294,26 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 
+	applySIPDefaults(&cfg.Companion.SIP)
+
 	return cfg, nil
+}
+
+// applySIPDefaults fills in the values that were hardcoded before inbound
+// calls were supported, so config.yaml files written before this section
+// existed keep behaving identically instead of picking up empty SIP settings.
+func applySIPDefaults(sip *SIP) {
+	if strings.TrimSpace(sip.From) == "" {
+		sip.From = "companion@127.0.0.1:5070"
+	}
+
+	if strings.TrimSpace(sip.Listen) == "" {
+		sip.Listen = "127.0.0.1:5070"
+	}
+
+	if strings.TrimSpace(sip.Transport) == "" {
+		sip.Transport = "tcp"
+	}
 }
 
 func (s *Store) Snapshot() Config {
@@ -375,6 +419,7 @@ func save(path string, cfg Config, exclusive bool) error {
 	data, err := yaml.Marshal(persistedConfig{
 		Companion: persistedCompanion{
 			Entrypoints: cfg.Companion.Entrypoints,
+			SIP:         cfg.Companion.SIP,
 		},
 		Logging: cfg.Logging,
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
