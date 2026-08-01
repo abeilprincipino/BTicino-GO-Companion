@@ -277,6 +277,21 @@ func TestIncomingCallStartedClearsPreviousEndReason(t *testing.T) {
 	}
 }
 
+func TestProjector_SnapshotDoesNotExposeLastIncomingCallEnd(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, IncomingCallStarted{DialogID: "d1", EntrypointID: "main"})
+	applyEvent(t, projector, IncomingCallEnded{DialogID: "d1", Reason: CallEndReasonElsewhere})
+
+	snapshot := projector.Snapshot()
+	snapshot.LastIncomingCallEnd.Reason = CallEndReasonCancelled
+
+	if got := projector.Snapshot().LastIncomingCallEnd.Reason; got != CallEndReasonElsewhere {
+		t.Fatalf("internal last incoming call end reason = %q, want elsewhere", got)
+	}
+}
+
 func applyEvent(t *testing.T, projector *Projector, event Event) {
 	t.Helper()
 
