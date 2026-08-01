@@ -26,6 +26,11 @@ type IncomingCall struct {
 	EntrypointID EntrypointID `json:"entrypoint_id"`
 }
 
+type IncomingCallEnd struct {
+	DialogID DialogID      `json:"dialog_id"`
+	Reason   CallEndReason `json:"reason"`
+}
+
 type ActiveCall struct {
 	DialogID     DialogID     `json:"dialog_id"`
 	EntrypointID EntrypointID `json:"entrypoint_id"`
@@ -45,14 +50,15 @@ type VoicemailState struct {
 }
 
 type State struct {
-	Revision      uint64          `json:"revision"`
-	CallState     CallState       `json:"call_state"`
-	PhysicalRing  *PhysicalRing   `json:"physical_ring,omitempty"`
-	IncomingCall  *IncomingCall   `json:"incoming_call,omitempty"`
-	ActiveCall    *ActiveCall     `json:"active_call,omitempty"`
-	PreviewStream *PreviewStream  `json:"preview_stream,omitempty"`
-	Audio         AudioState      `json:"audio"`
-	Voicemail     *VoicemailState `json:"voicemail,omitempty"`
+	Revision            uint64           `json:"revision"`
+	CallState           CallState        `json:"call_state"`
+	PhysicalRing        *PhysicalRing    `json:"physical_ring,omitempty"`
+	IncomingCall        *IncomingCall    `json:"incoming_call,omitempty"`
+	LastIncomingCallEnd *IncomingCallEnd `json:"last_incoming_call_end,omitempty"`
+	ActiveCall          *ActiveCall      `json:"active_call,omitempty"`
+	PreviewStream       *PreviewStream   `json:"preview_stream,omitempty"`
+	Audio               AudioState       `json:"audio"`
+	Voicemail           *VoicemailState  `json:"voicemail,omitempty"`
 }
 
 type Projector struct {
@@ -114,6 +120,7 @@ func apply(state *State, event Event) error {
 			return transitionError("an incoming or active call already exists")
 		}
 
+		state.LastIncomingCallEnd = nil
 		state.IncomingCall = &IncomingCall{DialogID: event.DialogID, EntrypointID: event.EntrypointID}
 	case IncomingCallEnded:
 		if state.IncomingCall == nil {
@@ -125,12 +132,14 @@ func apply(state *State, event Event) error {
 		}
 
 		state.IncomingCall = nil
+		state.LastIncomingCallEnd = &IncomingCallEnd{DialogID: event.DialogID, Reason: event.Reason}
 	case CallAnswered:
 		incoming, err := matchingIncoming(state, event.DialogID)
 		if err != nil {
 			return err
 		}
 
+		state.LastIncomingCallEnd = nil
 		state.ActiveCall = &ActiveCall{DialogID: incoming.DialogID, EntrypointID: incoming.EntrypointID}
 		state.IncomingCall = nil
 	case CallDeclined:
@@ -250,6 +259,11 @@ func cloneState(state State) State {
 	if state.IncomingCall != nil {
 		incomingCall := *state.IncomingCall
 		stateCopy.IncomingCall = &incomingCall
+	}
+
+	if state.LastIncomingCallEnd != nil {
+		lastEnd := *state.LastIncomingCallEnd
+		stateCopy.LastIncomingCallEnd = &lastEnd
 	}
 
 	if state.ActiveCall != nil {

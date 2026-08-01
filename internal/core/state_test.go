@@ -224,6 +224,59 @@ func TestProjector_ConcurrentSnapshotsAndEvents(t *testing.T) {
 	}
 }
 
+func TestIncomingCallEndedRecordsReason(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+
+	if _, err := projector.Apply(IncomingCallStarted{DialogID: "d1", EntrypointID: "main"}); err != nil {
+		t.Fatalf("IncomingCallStarted error = %v", err)
+	}
+
+	if _, err := projector.Apply(IncomingCallEnded{DialogID: "d1", Reason: CallEndReasonElsewhere}); err != nil {
+		t.Fatalf("IncomingCallEnded error = %v", err)
+	}
+
+	state := projector.Snapshot()
+	if state.IncomingCall != nil {
+		t.Fatal("IncomingCall must be cleared")
+	}
+
+	if state.LastIncomingCallEnd == nil {
+		t.Fatal("LastIncomingCallEnd must be recorded")
+	}
+
+	if state.LastIncomingCallEnd.Reason != CallEndReasonElsewhere {
+		t.Fatalf("Reason = %q, want elsewhere", state.LastIncomingCallEnd.Reason)
+	}
+
+	if state.CallState != CallStateIdle {
+		t.Fatalf("CallState = %q, want idle", state.CallState)
+	}
+}
+
+func TestIncomingCallStartedClearsPreviousEndReason(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+
+	if _, err := projector.Apply(IncomingCallStarted{DialogID: "d1", EntrypointID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := projector.Apply(IncomingCallEnded{DialogID: "d1", Reason: CallEndReasonElsewhere}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := projector.Apply(IncomingCallStarted{DialogID: "d2", EntrypointID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if projector.Snapshot().LastIncomingCallEnd != nil {
+		t.Fatal("a new incoming call must clear the previous end reason")
+	}
+}
+
 func applyEvent(t *testing.T, projector *Projector, event Event) {
 	t.Helper()
 

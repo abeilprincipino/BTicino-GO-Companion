@@ -52,8 +52,19 @@ type IncomingCallStarted struct {
 func (IncomingCallStarted) Type() EventType { return EventIncomingCallStarted }
 func (IncomingCallStarted) event()          {}
 
+// CallEndReason explains why a pending incoming call stopped without being
+// answered on this endpoint.
+type CallEndReason string
+
+const (
+	CallEndReasonCancelled CallEndReason = "cancelled"
+	CallEndReasonTimeout   CallEndReason = "timeout"
+	CallEndReasonElsewhere CallEndReason = "elsewhere"
+)
+
 type IncomingCallEnded struct {
 	DialogID DialogID
+	Reason   CallEndReason
 }
 
 func (IncomingCallEnded) Type() EventType { return EventIncomingCallEnded }
