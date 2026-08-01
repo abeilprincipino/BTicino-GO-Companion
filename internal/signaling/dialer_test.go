@@ -842,6 +842,22 @@ func waitDialogState(t *testing.T, session *sipgo.DialogServerSession, want sip.
 	t.Fatalf("dialog state = %v, want at least %v", session.LoadState(), want)
 }
 
+// inboundDialogCount reports how many entries are currently tracked in the
+// dialer's inbound dialog map. Its keys are per-call dialog IDs, so a stale
+// entry can never be matched by a later call - the map should be empty once
+// every dialog it ever held has ended.
+func inboundDialogCount(dialer *streamDialer) int {
+	count := 0
+
+	dialer.inboundDialogs.Range(func(_, _ any) bool {
+		count++
+
+		return true
+	})
+
+	return count
+}
+
 func waitClosed(t *testing.T, done <-chan struct{}, message string) {
 	t.Helper()
 
@@ -892,8 +908,13 @@ func TestStreamDialerOnInviteReportsACancelAndLeavesNoSessionBehind(t *testing.T
 
 	waitClosed(t, returned, "onInvite() did not return after the CANCEL")
 
-	if statuses := responseStatuses(recorder.Result()); len(statuses) != 2 || statuses[0] != 180 || statuses[1] != 487 {
-		t.Fatalf("recorded responses = %v, want [180 487]", statuses)
+	// siptest.NewServerTxRecorder arms sipgo's Timer_1xx at 200ms, which injects
+	// an extra 100 Trying ahead of the 180 if the provisional is delayed past
+	// that on a loaded machine. Checking only the last two statuses tolerates
+	// that without weakening what the assertion actually pins: the 180 must
+	// still be followed by the 487.
+	if statuses := responseStatuses(recorder.Result()); len(statuses) < 2 || statuses[len(statuses)-2] != 180 || statuses[len(statuses)-1] != 487 {
+		t.Fatalf("recorded responses = %v, want the last two to be [180 487]", statuses)
 	}
 
 	if inboundSessionCached(t, dialer, session) {
@@ -954,6 +975,76 @@ func TestStreamDialerOnInviteLeavesAnAnsweredDialogAlive(t *testing.T) {
 
 	if dialer.loadInboundDialog(session.ID) == nil {
 		t.Fatal("the answered dialog was dropped from the inbound map when its INVITE transaction retired, 32 seconds into a live call")
+	}
+}
+
+// TestStreamDialerOnInviteDeletesDialogWhenSessionEndsAfterHandlerReturned
+// pins the OnState hook itself, not merely the teardown defer. An answered
+// call's onInvite goroutine returns 32 seconds early, while the dialog itself
+// stays alive - so the defer's close branch never runs for it, and it takes
+// the early-return in its switch instead. The only code left that can ever
+// remove such a dialog from the map once it later ends is the OnState hook
+// registered while the dialog was still live.
+func TestStreamDialerOnInviteDeletesDialogWhenSessionEndsAfterHandlerReturned(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	dialog := waitRinging(t, handler)
+	session := serverSessionOf(t, dialog)
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(context.Background(), 200, "OK", "v=0\r\n") }()
+
+	waitDialogState(t, session, sip.DialogStateEstablished)
+
+	ack := testAckRequest(session)
+	dialer.onAck(ack, siptest.NewServerTxRecorder(ack))
+
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("Respond(200) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never completed after the ACK")
+	}
+
+	// Retiring the transaction here, exactly as
+	// TestStreamDialerOnInviteLeavesAnAnsweredDialogAlive does, sends onInvite's
+	// own goroutine through its defer while the dialog is still Established:
+	// that switch takes the early return and never touches the map.
+	recorder.Terminate()
+
+	waitClosed(t, returned, "onInvite() did not return once its INVITE transaction had retired")
+
+	if dialer.loadInboundDialog(session.ID) == nil {
+		t.Fatal("the answered dialog was dropped from the inbound map when its INVITE transaction retired, before it had actually ended")
+	}
+
+	// End the call now, entirely through a separate goroutine (onBye), long
+	// after onInvite's own goroutine has already returned. Nothing but the
+	// OnState hook registered inside onInvite can delete the map entry here.
+	bye := testByeRequest(session)
+	dialer.onBye(bye, siptest.NewServerTxRecorder(bye))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for dialer.loadInboundDialog(session.ID) != nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	if dialer.loadInboundDialog(session.ID) != nil {
+		t.Fatal("the dialog was not removed from the inbound map once the session reached Ended: the OnState hook never fired")
 	}
 }
 
@@ -1090,6 +1181,14 @@ func TestStreamDialerOnInviteDropsAnAlreadyCancelledInvite(t *testing.T) {
 	case reason := <-handler.ended:
 		t.Fatalf("EndIncoming(%q) was called for a dialog the manager was never told about", reason)
 	default:
+	}
+
+	// The dialog reached Ended before the OnState hook was registered, so that
+	// hook never fires for it. The teardown's close branch is what has to
+	// delete it instead; a stale key here can never be matched by a later
+	// call, so a miss here leaks for the life of the process.
+	if count := inboundDialogCount(dialer); count != 0 {
+		t.Fatalf("inbound dialog map has %d entries after an already-cancelled INVITE, want 0", count)
 	}
 }
 

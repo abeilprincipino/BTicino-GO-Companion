@@ -713,6 +713,7 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		_ = session.Close()
+		d.inboundDialogs.Delete(session.ID)
 		d.logger.Debug("inbound sip dialog closed", "dialog_id", string(dialogID))
 	}()
 
