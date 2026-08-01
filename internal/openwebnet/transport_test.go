@@ -10,21 +10,17 @@ func TestMapperMapsRingAndStopForConfiguredEntrypoint(t *testing.T) {
 	mapper := NewMapper([]config.Entrypoint{{ID: "main", DevAddr: "21"}})
 
 	started := mapper.Map(Message{System: "OPEN", Raw: "*8*1#1#4#10*21##"})
-	if len(started) != 2 {
-		t.Fatalf("started events = %d, want 2", len(started))
+	if len(started) != 1 {
+		t.Fatalf("started events = %d, want 1", len(started))
 	}
 
-	if _, ok := started[0].(core.RingStarted); !ok {
+	ringStarted, ok := started[0].(core.RingStarted)
+	if !ok {
 		t.Fatalf("first event = %T, want core.RingStarted", started[0])
 	}
 
-	incoming, ok := started[1].(core.IncomingCallStarted)
-	if !ok {
-		t.Fatalf("second event = %T, want core.IncomingCallStarted", started[1])
-	}
-
-	if incoming.EntrypointID != "main" || incoming.DialogID == "" {
-		t.Fatalf("incoming event = %#v", incoming)
+	if ringStarted.EntrypointID != "main" {
+		t.Fatalf("ring started event = %#v", ringStarted)
 	}
 
 	if repeated := mapper.Map(Message{System: "OPEN", Raw: "*8*1#1#4#10*21##"}); len(repeated) != 0 {
@@ -32,17 +28,12 @@ func TestMapperMapsRingAndStopForConfiguredEntrypoint(t *testing.T) {
 	}
 
 	stopped := mapper.Map(Message{System: "ASWM", Raw: FrameFreeAVResources})
-	if len(stopped) != 2 {
-		t.Fatalf("stopped events = %d, want 2", len(stopped))
+	if len(stopped) != 1 {
+		t.Fatalf("stopped events = %d, want 1", len(stopped))
 	}
 
 	if _, ok := stopped[0].(core.RingCleared); !ok {
 		t.Fatalf("first stop event = %T, want core.RingCleared", stopped[0])
-	}
-
-	ended, ok := stopped[1].(core.CallHungUp)
-	if !ok || ended.DialogID != incoming.DialogID {
-		t.Fatalf("hangup event = %#v, want dialog %q", stopped[1], incoming.DialogID)
 	}
 }
 

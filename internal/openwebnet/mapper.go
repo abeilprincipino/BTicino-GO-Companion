@@ -3,7 +3,6 @@ package openwebnet
 import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +13,6 @@ type Mapper struct {
 	mu               sync.Mutex
 	entrypoints      map[string]core.EntrypointID
 	recentFrames     map[string]time.Time
-	dialog           core.DialogID
 	activeEntrypoint core.EntrypointID
 }
 
@@ -46,7 +44,7 @@ func (m *Mapper) Map(message Message) []core.Event {
 	}
 
 	if IsRingStart(raw) {
-		if m.dialog != "" {
+		if m.activeEntrypoint != "" {
 			return nil
 		}
 
@@ -56,9 +54,8 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		m.activeEntrypoint = id
-		m.dialog = core.DialogID(fmt.Sprintf("openwebnet-%d", now.UnixNano()))
 
-		return []core.Event{core.RingStarted{EntrypointID: id}, core.IncomingCallStarted{DialogID: m.dialog, EntrypointID: id}}
+		return []core.Event{core.RingStarted{EntrypointID: id}}
 	}
 
 	if raw == FrameAudioMuted {
@@ -83,11 +80,6 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		events := []core.Event{core.RingCleared{EntrypointID: m.activeEntrypoint}}
-		if m.dialog != "" {
-			events = append(events, core.CallHungUp{DialogID: m.dialog})
-		}
-
-		m.dialog = ""
 		m.activeEntrypoint = ""
 
 		return events
