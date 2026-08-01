@@ -37,19 +37,29 @@ type EventSink interface {
 
 // EntrypointResolver attributes an inbound call to a configured entrypoint and
 // returns its devaddr. An empty ID means the call cannot be attributed.
+//
+// It is invoked with the Manager's state lock held, so an implementation must be
+// a side-effect-free lookup: it must not block, must not do I/O, and must never
+// call back into the Manager, which would deadlock on that lock.
 type EntrypointResolver func() (core.EntrypointID, string)
 
 // Manager owns the single inbound and the single outbound SIP dialog. It is the
 // only component that knows whether a real dialog exists.
 type Manager struct {
-	// mu guards the dialog state below. publishMu serializes deliveries to the
-	// sink so they reach it in the order their transitions committed: a
-	// publisher takes publishMu while it still holds mu, drops mu, and only
-	// then calls the sink, which is external code and must never run under the
-	// state lock. Lock ordering is therefore mu then publishMu, never the
-	// reverse — nothing may take mu while holding publishMu.
-	mu        sync.Mutex
-	publishMu sync.Mutex
+	// mu guards every field below, including the publish queue.
+	mu sync.Mutex
+
+	// pending holds committed events waiting for the sink, and draining says a
+	// drain loop already owns them. The invariant is: an event is appended under
+	// mu at the exact point its transition commits, so the queue order is commit
+	// order; exactly one goroutine drains at a time, and it calls the sink with
+	// mu released. A publisher that finds a drain already running hands its
+	// event over and returns immediately. That gives commit-ordered, never
+	// overlapping deliveries without ever holding a lock across the sink — the
+	// sink is external code (it broadcasts to WebSocket clients synchronously)
+	// and may even call back into the Manager, which simply enqueues.
+	pending  []core.Event
+	draining bool
 
 	host    string
 	dialer  StreamDialer
@@ -109,22 +119,32 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog) error {
 	// and this reservation have to be a single operation, or a second INVITE —
 	// or a concurrent StartStream — slips in between them and one of the two
 	// dialogs is left with nobody holding a reference to it.
+	//
+	// The start event is published from inside that same critical section, at
+	// the commit point, exactly as Decline and Hangup do. Publishing it after
+	// the 180 instead would leave a window in which the expiry, a CANCEL
+	// answered elsewhere, a Decline or a Hangup commits first: the projector
+	// would then see IncomingCallEnded for a call it has never seen, drop it,
+	// apply the late IncomingCallStarted, and stay stuck in "ringing" for good,
+	// rejecting every later inbound call.
 	m.incoming = dialog
 	m.incomingDevAddr = devAddr
 	m.startIncomingExpiryLocked(dialog)
-	m.mu.Unlock()
+	m.publishLocked(core.IncomingCallStarted{DialogID: dialog.ID(), EntrypointID: entrypointID})
 
 	if err := dialog.Respond(ctx, 180, "Ringing", ""); err != nil {
-		// The call never started, so the reservation is rolled back silently:
-		// publishing IncomingCallEnded here would end a call nobody was told
-		// about.
-		m.releaseIncoming(dialog)
+		// The call was already announced, so the rollback has to end it too, or
+		// the projector keeps a call that never rang. clearIncoming publishes
+		// only if this dialog is still the reserved one, so a publisher that got
+		// there first is not doubled up.
+		m.clearIncoming(dialog, core.CallEndReasonCancelled)
+
+		// Best effort: without a final response the INVITE has had no answer at
+		// all and the far end sits out its whole transaction timeout.
+		_ = dialog.Respond(ctx, 500, "Server Error", "")
 
 		return fmt.Errorf("sip ringing response: %w", err)
 	}
-
-	m.mu.Lock()
-	m.publishLocked(core.IncomingCallStarted{DialogID: dialog.ID(), EntrypointID: entrypointID})
 
 	return nil
 }
@@ -156,6 +176,16 @@ func (m *Manager) Answer(ctx context.Context) error {
 	m.mu.Lock()
 
 	if m.incoming != dialog {
+		// A concurrent Answer — a double tap on the card, or a retried request —
+		// may have promoted this very dialog while both were on the wire with
+		// their 200 OK. The call is live and referenced; BYEing it here would
+		// tear down the call that was just answered.
+		if m.active == dialog {
+			m.mu.Unlock()
+
+			return nil
+		}
+
 		m.mu.Unlock()
 
 		// The expiry timer — or a Decline — cleared the slot while the 200 OK
@@ -204,6 +234,13 @@ func (m *Manager) Decline(ctx context.Context) error {
 
 // Hangup is idempotent: tearing down a call that is already gone is not an
 // error, because SourceSession.Close runs it again on every normal teardown.
+//
+// It deliberately has no counterpart to StartStream's no-op on an answered
+// inbound call: media.SourceSession.Close runs Hangup on every lease teardown,
+// and that ends a live doorbell call on purpose. Without the WebRTC session
+// there is no audio path to the user, so keeping the SIP call up would leave the
+// visitor talking to nobody. The asymmetry with StartStream — which does nothing
+// rather than dial while such a call is up — is intended.
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 
@@ -216,12 +253,15 @@ func (m *Manager) Hangup(ctx context.Context) error {
 		// activeID is empty exactly for an outbound preview, because
 		// StartStream publishes nothing: the projector never saw a dialog, and
 		// CallHungUp{DialogID: ""} would be rejected as an invalid transition.
-		// The guard discriminates preview teardown from a real call.
+		// The guard says nothing about why Hangup was called — it discriminates
+		// which dialog is being torn down, an outbound preview or a dialog the
+		// projector knows about, which for an answered inbound call it does.
+		var event core.Event
 		if dialogID != "" {
-			m.publishLocked(core.CallHungUp{DialogID: dialogID})
-		} else {
-			m.mu.Unlock()
+			event = core.CallHungUp{DialogID: dialogID}
 		}
+
+		m.publishLocked(event)
 
 		if err := active.Bye(ctx); err != nil {
 			return fmt.Errorf("sip bye: %w", err)
@@ -266,20 +306,21 @@ func (m *Manager) RemoteDialogEnded() {
 
 	// See Hangup: an empty dialog ID is an outbound preview, which the
 	// projector knows nothing about.
-	if dialogID == "" {
-		m.mu.Unlock()
-
-		return
+	var event core.Event
+	if dialogID != "" {
+		event = core.CallHungUp{DialogID: dialogID}
 	}
 
-	m.publishLocked(core.CallHungUp{DialogID: dialogID})
+	m.publishLocked(event)
 }
 
 // EndIncoming clears a pending inbound call that will never be answered here.
 func (m *Manager) EndIncoming(reason core.CallEndReason) {
-	// The core layer does not validate the reason, so a bare one must never
-	// leave the manager.
-	if reason == "" {
+	// The core layer does not validate the reason, so neither a bare nor an
+	// unknown one may leave the manager.
+	switch reason {
+	case core.CallEndReasonCancelled, core.CallEndReasonTimeout, core.CallEndReasonElsewhere:
+	default:
 		reason = core.CallEndReasonCancelled
 	}
 
@@ -299,14 +340,6 @@ func (m *Manager) clearIncoming(expected IncomingDialog, reason core.CallEndReas
 	m.publishLocked(core.IncomingCallEnded{DialogID: dialog.ID(), Reason: reason})
 
 	return true
-}
-
-// releaseIncoming detaches a reserved inbound dialog without publishing: it is
-// the rollback for a call that never made it to ringing.
-func (m *Manager) releaseIncoming(expected IncomingDialog) {
-	m.mu.Lock()
-	m.takeIncomingLocked(expected)
-	m.mu.Unlock()
 }
 
 // takeIncomingLocked detaches the pending inbound dialog and disarms its expiry,
@@ -371,7 +404,7 @@ func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
 
 	dialog, err := m.dialer.StartStream(ctx, devAddr, BuildOffer(m.host, devAddr))
 	if err != nil {
-		return err
+		return fmt.Errorf("outgoing stream: %w", err)
 	}
 
 	m.active = dialog
@@ -380,18 +413,57 @@ func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
 }
 
 // publishLocked hands a committed state transition to the sink. It must be
-// called with m.mu held and it releases it: it takes publishMu first, so that
-// deliveries are serialized in the order the transitions committed, then drops
-// m.mu so the sink never runs under the state lock. Callers must not defer
-// m.mu.Unlock() and must not touch guarded state after calling it.
+// called with m.mu held and it releases it, so callers must not defer
+// m.mu.Unlock() and must not touch guarded state afterwards.
+//
+// The event is queued under m.mu, at the commit point, and delivered by a drain
+// loop that runs with the lock released — see the pending/draining fields. The
+// caller that starts the drain carries it, and any publisher that arrives while
+// a drain is running simply enqueues and returns. A nil event releases the lock
+// without publishing, which keeps the branches that commit without telling the
+// projector on the same single unlock path as the ones that do.
 func (m *Manager) publishLocked(event core.Event) {
-	m.publishMu.Lock()
-	defer m.publishMu.Unlock()
+	if event != nil {
+		m.pending = append(m.pending, event)
+	}
 
-	events := m.events
+	if m.draining || len(m.pending) == 0 {
+		m.mu.Unlock()
+
+		return
+	}
+
+	m.draining = true
 	m.mu.Unlock()
 
-	if events != nil {
-		events.Publish(event)
+	m.drainEvents()
+}
+
+// drainEvents delivers queued events in commit order, one at a time, with m.mu
+// released across every call into the sink.
+func (m *Manager) drainEvents() {
+	for {
+		m.mu.Lock()
+
+		if len(m.pending) == 0 {
+			m.draining = false
+			m.mu.Unlock()
+
+			return
+		}
+
+		event := m.pending[0]
+
+		m.pending = m.pending[1:]
+		if len(m.pending) == 0 {
+			m.pending = nil
+		}
+
+		events := m.events
+		m.mu.Unlock()
+
+		if events != nil {
+			events.Publish(event)
+		}
 	}
 }
