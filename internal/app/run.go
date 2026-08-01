@@ -120,6 +120,24 @@ func run(
 
 	applyEvent := newEventApplier(projector, homeKit, server, logger)
 
+	// The sink first, the inbound handler second, and never the other way
+	// round. Manager.SetEvents drops what is published while the sink is still
+	// nil, so an INVITE served in between would publish IncomingCallStarted
+	// into nothing: the manager would believe it is ringing while the projector
+	// had never heard of the call, and every later inbound call would be
+	// rejected as busy for good.
+	//
+	// The dialer's SIP listener is already running by now — newRuntime starts it
+	// — but until SetInboundHandler is called onInvite has no handler and
+	// answers 503 Service Unavailable. Refusing the one call that can arrive in
+	// this startup window is honest and self-correcting; dropping its event is
+	// neither.
+	runtime.calls.SetEvents(eventSinkFunc(applyEvent))
+
+	if runtime.inboundSIP {
+		runtime.dialer.SetInboundHandler(runtime.calls)
+	}
+
 	refreshVoicemail := newVoicemailRefresher(openWebNetControl, projector, applyEvent)
 	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))
@@ -255,7 +273,45 @@ type applicationRuntime struct {
 	runtime           *system.RuntimeControl
 	dialer            interface {
 		signaling.StreamDialer
+		SetInboundHandler(signaling.InboundHandler)
 		Close() error
+	}
+
+	// calls is the process-wide SIP dialog owner, shared by the API and by
+	// every media source.
+	calls *signaling.Manager
+
+	// inboundSIP records whether the dialer was built with inbound handling, so
+	// Run installs the inbound handler only where an INVITE can actually arrive.
+	inboundSIP bool
+}
+
+// newInboundEntrypointResolver attributes an inbound SIP call to an entrypoint.
+// The in-flight physical ring is the strongest signal; a single configured
+// entrypoint is the safe fallback. Ambiguity is reported as "unattributable"
+// so the manager rejects the call rather than inventing state.
+//
+// It runs with the manager's state lock held, so it is a side-effect-free
+// lookup and nothing more: two snapshot reads, each taking a lock of its own
+// that no path holds while entering the manager, and no call back into the
+// manager, which would deadlock on that lock.
+func newInboundEntrypointResolver(entrypoints func() []config.Entrypoint, projector *core.Projector) signaling.EntrypointResolver {
+	return func() (core.EntrypointID, string) {
+		configured := entrypoints()
+
+		if ring := projector.Snapshot().PhysicalRing; ring != nil {
+			for _, entrypoint := range configured {
+				if core.EntrypointID(entrypoint.ID) == ring.EntrypointID {
+					return ring.EntrypointID, entrypoint.DevAddr
+				}
+			}
+		}
+
+		if len(configured) == 1 {
+			return core.EntrypointID(configured[0].ID), configured[0].DevAddr
+		}
+
+		return "", ""
 	}
 }
 
@@ -270,17 +326,59 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		return nil, fmt.Errorf("resolve sip runtime source: %w", err)
 	}
 
-	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{Target: mediaConfig.Target, Domain: signaling.DiscoverFlexisipDomain()})
+	// The whole SIP block is handed to the dialer, not just the target: the
+	// identity it registers with, where it listens and — above all — Inbound,
+	// without which no inbound handler is registered at all and the doorbell
+	// call never reaches the companion.
+	sipConfig := initialConfig.Companion.SIP
+
+	// A configured domain wins over discovery. Discovery probes the device for
+	// the Flexisip realm and is the fallback for an installation that has not
+	// been told one; an explicit value is an operator overriding exactly that.
+	domain := strings.TrimSpace(sipConfig.Domain)
+	if domain == "" {
+		domain = signaling.DiscoverFlexisipDomain()
+	}
+
+	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{
+		Target:    mediaConfig.Target,
+		Domain:    domain,
+		From:      sipConfig.From,
+		AuthUser:  sipConfig.AuthUser,
+		AuthPass:  sipConfig.AuthPass,
+		Transport: sipConfig.Transport,
+		Listen:    sipConfig.Listen,
+		Inbound:   sipConfig.Inbound,
+		Logger:    logger,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create sip runtime: %w", err)
 	}
+
+	// The projector is built here, before the source factory closure that
+	// captures it, because the resolver below reads its snapshot. The closure
+	// only captures it; it does not dereference it at construction time.
+	projector := core.NewProjector()
+
+	// One manager for the whole process. It owns the single inbound and the
+	// single outbound dialog, so the API and every media source have to be
+	// looking at the same one: a per-source manager would answer a call whose
+	// dialog another manager holds.
+	//
+	// The sink is nil here and installed in Run, once the projector-backed
+	// applier exists. Nothing can publish into it before then, because the
+	// inbound handler is installed in Run too, after the sink.
+	calls := signaling.NewManager("127.0.0.1", dialer, nil, newInboundEntrypointResolver(
+		func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints },
+		projector,
+	))
 
 	trace := openwebnet.NewTrace(0)
 	control := openwebnet.NewControl(initialConfig.Companion.Entrypoints, trace)
 	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
 
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, entrypoint, events, snapshots)
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots)
 	})
 	if err != nil {
 		_ = dialer.Close()
@@ -337,7 +435,6 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	homeKit.SetStreamCoordinator(rtspServer.Coordinator())
 	homeKit.SetSnapshotProvider(snapshots)
 
-	projector := core.NewProjector()
 	server := api.NewServer(authStore, configStore, projector, logger)
 	server.SetEntrypoints(control)
 	server.SetAudio(control)
@@ -350,7 +447,30 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	diagnosticService := diagnostics.New(control, initialConfig.Companion.Model, server.BroadcastState)
 	server.SetDiagnostics(diagnosticService)
 
-	return &applicationRuntime{projector: projector, trace: trace, control: control, rtspServer: rtspServer, updater: updater, webrtc: webrtc, authStore: authStore, mdns: discovery.NewService(nil), homeKit: homeKit, server: server, diagnosticService: diagnosticService, runtime: rt, dialer: dialer}, nil
+	// The answer and hangup routes are exposed only where a call can actually
+	// arrive. Left registered on an outbound-only installation they would offer
+	// the user a button that can never do anything but fail.
+	if sipConfig.Inbound {
+		server.SetCall(calls)
+	}
+
+	return &applicationRuntime{
+		projector:         projector,
+		trace:             trace,
+		control:           control,
+		rtspServer:        rtspServer,
+		updater:           updater,
+		webrtc:            webrtc,
+		authStore:         authStore,
+		mdns:              discovery.NewService(nil),
+		homeKit:           homeKit,
+		server:            server,
+		diagnosticService: diagnosticService,
+		runtime:           rt,
+		dialer:            dialer,
+		calls:             calls,
+		inboundSIP:        sipConfig.Inbound,
+	}, nil
 }
 
 func (r *applicationRuntime) close(logger *slog.Logger) {
@@ -402,6 +522,11 @@ func newVoicemailRefresher(control *openwebnet.Control, projector *core.Projecto
 	}
 }
 
+// eventSinkFunc adapts the applier closure to signaling.EventSink.
+type eventSinkFunc func(core.Event)
+
+func (f eventSinkFunc) Publish(event core.Event) { f(event) }
+
 func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) func(core.Event) {
 	return func(event core.Event) {
 		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
@@ -430,7 +555,7 @@ func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Even
 	}
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
 	backchannel, err := media.NewUDPBackchannel("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
@@ -440,7 +565,7 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 
 	var bridge *media.AudioBridge
 
-	source, closeSource, err := newSource(cfg, logger, dialer, entrypoint, func(packet *rtp.Packet) {
+	source, closeSource, err := newSource(cfg, logger, dialer, calls, entrypoint, func(packet *rtp.Packet) {
 		if attempt != nil {
 			attempt.Consume(packet)
 		}
@@ -511,7 +636,7 @@ func (s *bridgeSource) WriteBackchannelRTP(packet *rtp.Packet) error {
 	return s.bridge.WriteBackchannelOpus(packet)
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -551,7 +676,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		logger,
 		sourceConfig,
 		core.EntrypointID(entrypoint.ID),
-		signaling.NewManager("127.0.0.1", dialer, nil),
+		calls,
 		openwebnet.NewAVClient(logger),
 		media.NewVideoRTPReceiver(logger, func(packet *rtp.Packet) {
 			if sourceLive.Load() && videoPacket != nil {

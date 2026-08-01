@@ -2,6 +2,7 @@ package app
 
 import (
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/media"
 	"context"
 	"errors"
@@ -64,6 +65,50 @@ func TestOpenConfigReturnsMetadataFailure(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("open config succeeded")
+	}
+}
+
+func TestResolveInboundEntrypointPrefersPhysicalRing(t *testing.T) {
+	t.Parallel()
+
+	entrypoints := []config.Entrypoint{
+		{ID: "main", DevAddr: "20"},
+		{ID: "side", DevAddr: "21"},
+	}
+
+	projector := core.NewProjector()
+	if _, err := projector.Apply(core.RingStarted{EntrypointID: "side"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, projector)
+
+	id, devAddr := resolve()
+	if id != "side" || devAddr != "21" {
+		t.Fatalf("resolve() = %q/%q, want side/21", id, devAddr)
+	}
+}
+
+func TestResolveInboundEntrypointFallsBackToSoleEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	entrypoints := []config.Entrypoint{{ID: "main", DevAddr: "20"}}
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, core.NewProjector())
+
+	id, devAddr := resolve()
+	if id != "main" || devAddr != "20" {
+		t.Fatalf("resolve() = %q/%q, want main/20", id, devAddr)
+	}
+}
+
+func TestResolveInboundEntrypointRefusesAmbiguity(t *testing.T) {
+	t.Parallel()
+
+	entrypoints := []config.Entrypoint{{ID: "main", DevAddr: "20"}, {ID: "side", DevAddr: "21"}}
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, core.NewProjector())
+
+	if id, _ := resolve(); id != "" {
+		t.Fatalf("resolve() = %q, want empty when the call cannot be attributed", id)
 	}
 }
 
