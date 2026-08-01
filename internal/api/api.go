@@ -38,6 +38,7 @@ type Server struct {
 	snapshot         SnapshotControl
 	runtime          RuntimeControl
 	update           UpdateControl
+	call             CallControl
 	diagnostics      interface {
 		Snapshot() diagnostics.Snapshot
 		Refresh(context.Context)
@@ -63,6 +64,7 @@ func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
 func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
 func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
 func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
+func (s *Server) SetCall(v CallControl)         { s.call = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
@@ -93,6 +95,8 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "POST", "/api/v3/entrypoints/{id}/unlock", s.unlockEntrypoint)
 	s.handleProtected(mux, "POST", "/api/v3/audio/mute", s.muteAudio)
 	s.handleProtected(mux, "POST", "/api/v3/audio/unmute", s.unmuteAudio)
+	s.handleProtected(mux, "POST", "/api/v3/call/answer", s.answerCall)
+	s.handleProtected(mux, "POST", "/api/v3/call/hangup", s.hangupCall)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/enable", s.enableVoicemail)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/disable", s.disableVoicemail)
 	s.handleProtected(mux, "POST", "/api/v3/voicemail/refresh", s.voicemailRefresh)

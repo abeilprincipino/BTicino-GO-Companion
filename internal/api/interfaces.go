@@ -45,3 +45,8 @@ type WebRTCControl interface {
 type SnapshotControl interface {
 	Latest(entrypointID string) ([]byte, error)
 }
+
+type CallControl interface {
+	Answer(ctx context.Context) error
+	Hangup(ctx context.Context) error
+}

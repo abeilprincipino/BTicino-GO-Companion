@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/media"
+	"bticino-go-companion/internal/signaling"
 	"bticino-go-companion/internal/system"
 	"context"
 	"encoding/json"
@@ -633,6 +634,119 @@ func TestServer_CloseWebSocketsClosesStateAndWebRTCConnections(t *testing.T) {
 		if _, err := peer.Write([]byte("x")); err == nil {
 			t.Fatal("websocket peer remained connected")
 		}
+	}
+}
+
+type fakeCallControl struct {
+	answers   int
+	hangups   int
+	answerErr error
+}
+
+func (c *fakeCallControl) Answer(context.Context) error {
+	c.answers++
+	return c.answerErr
+}
+
+func (c *fakeCallControl) Hangup(context.Context) error {
+	c.hangups++
+	return nil
+}
+
+func TestCallAnswerRoute(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	call := &fakeCallControl{}
+	server.SetCall(call)
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/call/answer", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+
+	if call.answers != 1 {
+		t.Fatalf("answers = %d, want 1", call.answers)
+	}
+}
+
+func TestCallAnswerConflictWhenCallGone(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	server.SetCall(&fakeCallControl{answerErr: signaling.ErrNoIncomingDialog})
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/call/answer", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCallHangupRoute(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+	call := &fakeCallControl{}
+	server.SetCall(call)
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/call/hangup", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+
+	if call.hangups != 1 {
+		t.Fatalf("hangups = %d, want 1", call.hangups)
+	}
+}
+
+func TestCallRoutesUnavailableWithoutController(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/call/answer", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.Code)
 	}
 }
 
