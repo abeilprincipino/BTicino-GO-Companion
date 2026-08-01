@@ -240,6 +240,8 @@ func (h *fakeInboundHandler) EndIncoming(reason core.CallEndReason) {
 	h.mu.Unlock()
 }
 
+func (h *fakeInboundHandler) RemoteDialogEnded() {}
+
 func (h *fakeInboundHandler) collected() []core.CallEndReason {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -580,14 +582,16 @@ type ringingInboundHandler struct {
 	dialogs []IncomingDialog
 	reasons []core.CallEndReason
 
-	rang  chan IncomingDialog
-	ended chan core.CallEndReason
+	rang        chan IncomingDialog
+	ended       chan core.CallEndReason
+	remoteEnded chan struct{}
 }
 
 func newRingingInboundHandler() *ringingInboundHandler {
 	return &ringingInboundHandler{
-		rang:  make(chan IncomingDialog, 4),
-		ended: make(chan core.CallEndReason, 4),
+		rang:        make(chan IncomingDialog, 4),
+		ended:       make(chan core.CallEndReason, 4),
+		remoteEnded: make(chan struct{}, 4),
 	}
 }
 
@@ -611,6 +615,10 @@ func (h *ringingInboundHandler) EndIncoming(reason core.CallEndReason) {
 	h.mu.Unlock()
 
 	h.ended <- reason
+}
+
+func (h *ringingInboundHandler) RemoteDialogEnded() {
+	h.remoteEnded <- struct{}{}
 }
 
 func (h *ringingInboundHandler) invited() int {
@@ -1112,6 +1120,70 @@ func TestStreamDialerOnByeEndsARingingInboundCall(t *testing.T) {
 	if inboundSessionCached(t, dialer, session) {
 		t.Fatal("the dialog a BYE ended is still in sipgo's server cache")
 	}
+}
+
+// TestStreamDialerOnByeEndsAnAnsweredInboundCall pins the answered branch of
+// onInboundBye, which is a different call than the ringing one above.
+//
+// A BYE for a call that was answered here ends an *active* dialog, and clearing
+// that is Manager.RemoteDialogEnded's job, not EndIncoming's. Without it the
+// manager goes on believing a call is up, and StartStream deliberately returns
+// nil without dialling while one is: every later preview would then succeed
+// while sending no INVITE, giving a permanently black stream with no error
+// anywhere.
+func TestStreamDialerOnByeEndsAnAnsweredInboundCall(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	dialog := waitRinging(t, handler)
+	session := serverSessionOf(t, dialog)
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(context.Background(), 200, "OK", "v=0\r\n") }()
+
+	waitDialogState(t, session, sip.DialogStateEstablished)
+
+	ack := testAckRequest(session)
+	dialer.onAck(ack, siptest.NewServerTxRecorder(ack))
+
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("Respond(200) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never completed after the ACK")
+	}
+
+	bye := testByeRequest(session)
+	dialer.onBye(bye, siptest.NewServerTxRecorder(bye))
+
+	// onBye reports the end of the dialog synchronously, so there is nothing to
+	// wait for here.
+	select {
+	case <-handler.remoteEnded:
+	default:
+		t.Fatal("the BYE for an answered call never reached RemoteDialogEnded: the manager keeps an active dialog the far end has already torn down, and every later preview returns nil without sending an INVITE")
+	}
+
+	select {
+	case reason := <-handler.ended:
+		t.Fatalf("EndIncoming(%q) was called for a call that had already been answered: it clears a *pending* call, so it would drop an unrelated inbound call instead", reason)
+	default:
+	}
+
+	waitClosed(t, returned, "onInvite() did not return after the BYE")
 }
 
 // racedCancelTx accepts the cancel hook sipgo's ReadInvite registers and refuses

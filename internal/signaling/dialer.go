@@ -242,8 +242,10 @@ func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
 // is still ringing has to reach the manager as the end of a pending call, or
 // that call survives until the manager's own expiry and every stream request is
 // refused meanwhile. A BYE for a call that was answered ends an *active* dialog
-// instead, which is Manager.RemoteDialogEnded's job — wiring it is the next
-// task, and this is the branch it belongs in.
+// instead, which is Manager.RemoteDialogEnded's job: without it the manager
+// keeps believing a call is up, and StartStream deliberately returns nil
+// without dialling while one is, so every later preview would succeed while
+// sending no INVITE — a permanently black stream with no error anywhere.
 //
 // Two deviations from RFC 3261 are deliberate, and both follow from that
 // constraint. A BYE on a dialog that was never established should be answered
@@ -287,8 +289,24 @@ func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) 
 	}
 
 	if answered {
-		// The next task hands this to Manager.RemoteDialogEnded, which clears
-		// the active call without sending a BYE back.
+		// Manager.RemoteDialogEnded clears the active call without sending a BYE
+		// back, because the far end has already sent one.
+		//
+		// It is reached through the inbound handler this dialer already holds,
+		// and deliberately not through the remoteDialogEnded callback: that one
+		// is the outbound stream hook, owned by the media source, and means the
+		// preview's own dialog went away. Calling it here would tear down media
+		// for a call the user is still on.
+		//
+		// The call is synchronous, which is safe because this goroutine is
+		// already tracked by inboundWG and RemoteDialogEnded neither blocks nor
+		// re-enters the dialer: it takes the manager's state lock, clears the
+		// active dialog and queues the event for the manager's own drain
+		// goroutine.
+		if handler := d.inboundHandler(); handler != nil {
+			handler.RemoteDialogEnded()
+		}
+
 		d.logger.Info("inbound sip call ended by remote", "dialog_id", inboundDialogID(dialog))
 
 		return
@@ -607,9 +625,20 @@ func firstNonEmpty(values ...string) string {
 }
 
 // InboundHandler receives inbound dialog lifecycle events from the SIP server.
+//
+// The two termination methods are not interchangeable. EndIncoming clears a
+// call that is still pending, without matching a dialog identity;
+// RemoteDialogEnded clears one that was answered here and has since been torn
+// down by the far end. Sending either down the other's path drops the wrong
+// call — see onInboundBye, which is what discriminates them.
+//
+// Every method is called from a goroutine Close waits for, so an implementation
+// must not block on anything that only shutdown can release, and in particular
+// must never wait on the dialer itself.
 type InboundHandler interface {
 	OnInvite(context.Context, IncomingDialog) error
 	EndIncoming(core.CallEndReason)
+	RemoteDialogEnded()
 }
 
 // SetInboundHandler assigns the component that decides how inbound calls are

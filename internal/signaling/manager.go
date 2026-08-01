@@ -44,6 +44,11 @@ type EventSink interface {
 // call back into the Manager, which would deadlock on that lock.
 type EntrypointResolver func() (core.EntrypointID, string)
 
+// The manager is the dialer's inbound handler. Asserting it here is what keeps
+// a new lifecycle callback on InboundHandler from being added without the
+// manager growing an implementation for it.
+var _ InboundHandler = (*Manager)(nil)
+
 // Manager owns the single inbound and the single outbound SIP dialog. It is the
 // only component that knows whether a real dialog exists.
 type Manager struct {
