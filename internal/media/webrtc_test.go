@@ -41,7 +41,7 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 
 	candidates := make(chan ICECandidate, 8)
 
-	answer, err := service.Offer(context.Background(), "session-1", "main", offer, func(candidate *ICECandidate) {
+	answer, err := service.Offer(context.Background(), "session-1", "main", offer, nil, func(candidate *ICECandidate) {
 		if candidate == nil {
 			return
 		}
@@ -96,7 +96,7 @@ func TestWebRTCServiceShutdownClosesICEAndRejectsOffers(t *testing.T) {
 		t.Fatalf("Shutdown() error = %v", err)
 	}
 
-	if _, err := service.Offer(context.Background(), "session-1", "main", "offer", nil); !errors.Is(err, ErrWebRTCClosed) {
+	if _, err := service.Offer(context.Background(), "session-1", "main", "offer", nil, nil); !errors.Is(err, ErrWebRTCClosed) {
 		t.Fatalf("Offer() error = %v, want %v", err, ErrWebRTCClosed)
 	}
 }
@@ -112,14 +112,14 @@ func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
 	firstOffer, firstClient := testWebRTCOffer(t)
 	defer firstClient.Close()
 
-	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer, nil); err != nil {
+	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer, nil, nil); err != nil {
 		t.Fatalf("offer first session: %v", err)
 	}
 
 	secondOffer, secondClient := testWebRTCOffer(t)
 	defer secondClient.Close()
 
-	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer, nil); err != nil {
+	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer, nil, nil); err != nil {
 		t.Fatalf("offer replacement session: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestWebRTCServiceRejectsUnknownEntrypointWithoutLease(t *testing.T) {
 	coordinator := NewStreamCoordinator(nil, testManagedSourceFactory())
 	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
 
-	_, err := service.Offer(context.Background(), "session-1", "missing", "offer", nil)
+	_, err := service.Offer(context.Background(), "session-1", "missing", "offer", nil, nil)
 	if !errors.Is(err, ErrEntrypointNotFound) {
 		t.Fatalf("Offer() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestWebRTCServiceAddICECandidate(t *testing.T) {
 	offer, client := testWebRTCOffer(t)
 	defer client.Close()
 
-	if _, err := service.Offer(context.Background(), "session-1", "main", offer, nil); err != nil {
+	if _, err := service.Offer(context.Background(), "session-1", "main", offer, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close("session-1")

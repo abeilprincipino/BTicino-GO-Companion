@@ -700,10 +700,12 @@ type webRTCRecorder struct {
 	candidateSessionID                string
 	candidate                         media.ICECandidate
 	localCandidates                   []*media.ICECandidate
+	iceServers                        []media.ICEServer
 }
 
-func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*media.ICECandidate)) (string, error) {
+func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, onLocalCandidate func(*media.ICECandidate)) (string, error) {
 	r.sessionID, r.entrypointID, r.offerSDP = sessionID, entrypointID, offerSDP
+	r.iceServers = iceServers
 	if onLocalCandidate != nil {
 		for _, candidate := range r.localCandidates {
 			onLocalCandidate(candidate)

@@ -242,10 +242,11 @@ func mustJSON(value any) json.RawMessage {
 }
 
 type webrtcOfferPayload struct {
-	SessionID    string `json:"session_id"`
-	EntrypointID string `json:"entrypoint_id"`
-	Origin       string `json:"origin"`
-	OfferSDP     string `json:"offer_sdp"`
+	SessionID    string            `json:"session_id"`
+	EntrypointID string            `json:"entrypoint_id"`
+	Origin       string            `json:"origin"`
+	OfferSDP     string            `json:"offer_sdp"`
+	ICEServers   []media.ICEServer `json:"ice_servers"`
 }
 
 type webrtcCandidatePayload struct {
@@ -378,7 +379,7 @@ func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID 
 		offerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		// Home Assistant's signaling client expects one response for every
 		// request, so server candidates must be part of the SDP answer.
-		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, nil)
+		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, payload.ICEServers, nil)
 
 		cancel()
 

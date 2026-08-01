@@ -45,6 +45,45 @@ type ICECandidate struct {
 	UsernameFragment *string `json:"usernameFragment,omitempty"`
 }
 
+// ICEServer is a STUN/TURN server supplied by the signaling caller (typically
+// forwarded from Home Assistant's own resolved WebRTC configuration, which
+// already accounts for Home Assistant Cloud's TURN relay).
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// defaultICEServers is used whenever a caller offers no ICE servers of its
+// own, so the companion still gathers a server-reflexive candidate instead of
+// only host candidates that are unreachable off the intercom's LAN.
+var defaultICEServers = []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}}
+
+func rtcConfiguration(iceServers []ICEServer) webrtc.Configuration {
+	if len(iceServers) == 0 {
+		return webrtc.Configuration{ICEServers: defaultICEServers}
+	}
+
+	servers := make([]webrtc.ICEServer, 0, len(iceServers))
+	for _, server := range iceServers {
+		if len(server.URLs) == 0 {
+			continue
+		}
+
+		servers = append(servers, webrtc.ICEServer{
+			URLs:       server.URLs,
+			Username:   server.Username,
+			Credential: server.Credential,
+		})
+	}
+
+	if len(servers) == 0 {
+		return webrtc.Configuration{ICEServers: defaultICEServers}
+	}
+
+	return webrtc.Configuration{ICEServers: servers}
+}
+
 // WebRTCService serves one WebRTC peer from the same exclusive source lease
 // used by RTSP. The intercom permits only one active source at a time.
 type WebRTCService struct {
@@ -53,7 +92,6 @@ type WebRTCService struct {
 	coordinator       *StreamCoordinator
 	entrypoints       map[string]config.Entrypoint
 	api               *webrtc.API
-	configuration     webrtc.Configuration
 	iceConn           net.PacketConn
 	logger            *slog.Logger
 	sessions          map[string]*webRTCSession
@@ -149,7 +187,7 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 }
 
 // Offer creates an answer that includes every gathered local ICE candidate.
-func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*ICECandidate)) (string, error) {
+func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
@@ -170,7 +208,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		s.closeSession(previousSessionID, "superseded by successor session")
 	}
 
-	session, err := s.newOfferSession(sessionID, entrypointID, onLocalCandidate)
+	session, err := s.newOfferSession(sessionID, entrypointID, iceServers, onLocalCandidate)
 	if err != nil {
 		return "", err
 	}
@@ -232,8 +270,8 @@ func (s *WebRTCService) prepareOffer(sessionID, entrypointID string) (config.Ent
 	return entrypoint, previousSessionIDs, nil
 }
 
-func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, onLocalCandidate func(*ICECandidate)) (*webRTCSession, error) {
-	pc, err := s.api.NewPeerConnection(s.configuration)
+func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (*webRTCSession, error) {
+	pc, err := s.api.NewPeerConnection(rtcConfiguration(iceServers))
 	if err != nil {
 		return nil, err
 	}
