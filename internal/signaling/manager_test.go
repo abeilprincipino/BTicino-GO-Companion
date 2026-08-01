@@ -21,7 +21,7 @@ func TestManager_OnInviteStoresDialogRingsAndPublishes(t *testing.T) {
 	t.Parallel()
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
@@ -32,12 +32,10 @@ func TestManager_OnInviteStoresDialogRingsAndPublishes(t *testing.T) {
 		t.Fatalf("responses = %#v, want 180 Ringing", dialog.responses)
 	}
 
-	if len(events.events) != 1 {
-		t.Fatalf("event count = %d, want 1", len(events.events))
-	}
+	got := events.waitForEvents(t, 1)
 
-	if event, ok := events.events[0].(core.IncomingCallStarted); !ok || event.DialogID != testDialogID || event.EntrypointID != "main" {
-		t.Fatalf("event = %#v, want IncomingCallStarted for dialog-1/main", events.events[0])
+	if event, ok := got[0].(core.IncomingCallStarted); !ok || event.DialogID != testDialogID || event.EntrypointID != "main" {
+		t.Fatalf("event = %#v, want IncomingCallStarted for dialog-1/main", got[0])
 	}
 }
 
@@ -45,7 +43,7 @@ func TestManager_OnInviteRejectsUnattributableCall(t *testing.T) {
 	t.Parallel()
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("", ""))
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
@@ -56,16 +54,14 @@ func TestManager_OnInviteRejectsUnattributableCall(t *testing.T) {
 		t.Fatalf("responses = %#v, want 486 Busy Here", dialog.responses)
 	}
 
-	if len(events.events) != 0 {
-		t.Fatalf("events = %#v, want none", events.events)
-	}
+	events.waitForEvents(t, 0)
 }
 
 func TestManager_AnswerMovesIncomingToActiveWithSDP(t *testing.T) {
 	t.Parallel()
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
@@ -102,7 +98,7 @@ func TestManager_DeclineSends603AndClearsIncoming(t *testing.T) {
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
 
-	manager := NewManager("192.0.2.10", &fakeDialer{}, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +121,7 @@ func TestManager_HangupDeclinesIncomingDialog(t *testing.T) {
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
 
-	manager := NewManager("192.0.2.10", &fakeDialer{}, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +138,7 @@ func TestManager_HangupDeclinesIncomingDialog(t *testing.T) {
 func TestManager_HangupIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	manager := NewManager("192.0.2.10", &fakeDialer{}, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
 	if err := manager.Hangup(context.Background()); err != nil {
 		t.Fatalf("Hangup() on idle manager error = %v, want nil", err)
@@ -174,7 +170,7 @@ func TestManager_EndIncomingPublishesReason(t *testing.T) {
 	t.Parallel()
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
@@ -183,20 +179,17 @@ func TestManager_EndIncomingPublishesReason(t *testing.T) {
 
 	manager.EndIncoming(core.CallEndReasonElsewhere)
 
-	if len(events.events) != 2 {
-		t.Fatalf("event count = %d, want 2", len(events.events))
-	}
+	got := events.waitForEvents(t, 2)
 
-	event, ok := events.events[1].(core.IncomingCallEnded)
+	event, ok := got[1].(core.IncomingCallEnded)
 	if !ok || event.DialogID != testDialogID || event.Reason != core.CallEndReasonElsewhere {
-		t.Fatalf("event = %#v, want IncomingCallEnded/elsewhere", events.events[1])
+		t.Fatalf("event = %#v, want IncomingCallEnded/elsewhere", got[1])
 	}
 
 	manager.EndIncoming(core.CallEndReasonCancelled)
 
-	if len(events.events) != 2 {
-		t.Fatalf("EndIncoming must be a no-op when nothing is pending, got %d events", len(events.events))
-	}
+	// EndIncoming must be a no-op when nothing is pending.
+	events.waitForEvents(t, 2)
 
 	if err := manager.Answer(context.Background()); !errors.Is(err, ErrNoIncomingDialog) {
 		t.Fatalf("Answer() error = %v, want ErrNoIncomingDialog", err)
@@ -251,7 +244,7 @@ func TestManager_StartStreamIsOutgoingOnly(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
 	if err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() error = %v", err)
@@ -272,7 +265,7 @@ func TestManager_StartStreamRejectsIncomingWithoutAnswering(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	dialer := &fakeDialer{}
 
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +286,7 @@ func TestManager_StartStreamSkipsInviteWhileCallAnswered(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	dialer := &fakeDialer{}
 
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +309,7 @@ func TestManager_StartStreamRejectsActiveOutgoingDialog(t *testing.T) {
 
 	dialer := &fakeDialer{}
 
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 	if err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("first StartStream() error = %v", err)
 	}
@@ -335,7 +328,7 @@ func TestManager_OnInviteRejectsSecondCallWhileRinging(t *testing.T) {
 
 	first := &fakeIncomingDialog{id: testDialogID}
 	second := &fakeIncomingDialog{id: "dialog-2"}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), first); err != nil {
@@ -350,9 +343,8 @@ func TestManager_OnInviteRejectsSecondCallWhileRinging(t *testing.T) {
 		t.Fatalf("second dialog responses = %#v, want 486 Busy Here", second.responses)
 	}
 
-	if len(events.events) != 1 {
-		t.Fatalf("event count = %d, want 1 — the rejected call never started", len(events.events))
-	}
+	// The rejected call never started, so it published nothing.
+	events.waitForEvents(t, 1)
 
 	if err := manager.Answer(context.Background()); err != nil {
 		t.Fatalf("Answer() error = %v, the ringing call must be untouched", err)
@@ -367,7 +359,7 @@ func TestManager_OnInviteRejectsCallWhileOutgoingStreamActive(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", dialer, events, testResolver("main", "21"))
 	if err := manager.StartStream(context.Background(), "21"); err != nil {
@@ -383,9 +375,7 @@ func TestManager_OnInviteRejectsCallWhileOutgoingStreamActive(t *testing.T) {
 		t.Fatalf("responses = %#v, want 486 Busy Here — an outbound dialog is up", dialog.responses)
 	}
 
-	if len(events.events) != 0 {
-		t.Fatalf("events = %#v, want none", events.events)
-	}
+	events.waitForEvents(t, 0)
 
 	if err := manager.Answer(context.Background()); !errors.Is(err, ErrNoIncomingDialog) {
 		t.Fatalf("Answer() error = %v, want ErrNoIncomingDialog", err)
@@ -400,7 +390,7 @@ func TestManager_OnInviteReservesIncomingBeforeItRings(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
 	var streamErr error
 
@@ -449,10 +439,7 @@ func TestManager_OnInviteRollsBackReservationWhenRingingFails(t *testing.T) {
 	// IncomingCallStarted is published at the commit point, before the 180 goes
 	// out, so the rollback has to end the call it already announced — otherwise
 	// the projector keeps a call that never rang and rejects every later INVITE.
-	got := events.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("events = %#v, want IncomingCallStarted then IncomingCallEnded", got)
-	}
+	got := events.waitForEvents(t, 2)
 
 	if _, ok := got[0].(core.IncomingCallStarted); !ok {
 		t.Fatalf("events[0] = %#v, want IncomingCallStarted", got[0])
@@ -520,10 +507,7 @@ func TestManager_OnInvitePublishesStartBeforeRinging(t *testing.T) {
 		t.Fatalf("OnInvite() error = %v", err)
 	}
 
-	got := events.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("events = %#v, want 2", got)
-	}
+	got := events.waitForEvents(t, 2)
 
 	if _, ok := got[0].(core.IncomingCallStarted); !ok {
 		t.Fatalf("events[0] = %#v, want IncomingCallStarted — the projector must see a call start before it ends", got[0])
@@ -539,7 +523,7 @@ func TestManager_AnswerByesDialogWhenItLosesTheIncomingSlot(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
-	manager := NewManager("192.0.2.10", dialer, &fakeEventSink{}, testResolver("main", "21"))
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
 	dialog := &hookIncomingDialog{id: testDialogID}
 	dialog.onRespond = func(status int) error {
@@ -578,7 +562,7 @@ func TestManager_RemoteDialogEndedClearsAnsweredCallWithoutBye(t *testing.T) {
 
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	dialer := &fakeDialer{}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", dialer, events, testResolver("main", "21"))
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
@@ -595,12 +579,10 @@ func TestManager_RemoteDialogEndedClearsAnsweredCallWithoutBye(t *testing.T) {
 		t.Fatalf("bye count = %d, want 0 — the far end already ended the dialog", dialog.byes)
 	}
 
-	if len(events.events) != 3 {
-		t.Fatalf("event count = %d, want 3", len(events.events))
-	}
+	got := events.waitForEvents(t, 3)
 
-	if event, ok := events.events[2].(core.CallHungUp); !ok || event.DialogID != testDialogID {
-		t.Fatalf("event = %#v, want CallHungUp for dialog-1", events.events[2])
+	if event, ok := got[2].(core.CallHungUp); !ok || event.DialogID != testDialogID {
+		t.Fatalf("event = %#v, want CallHungUp for dialog-1", got[2])
 	}
 
 	// Without this the manager keeps believing a call is answered and every
@@ -616,23 +598,20 @@ func TestManager_RemoteDialogEndedClearsAnsweredCallWithoutBye(t *testing.T) {
 	// The outbound preview publishes nothing, so neither does its remote end.
 	manager.RemoteDialogEnded()
 
-	if len(events.events) != 3 {
-		t.Fatalf("event count = %d, want 3 — a preview has no dialog the projector knows about", len(events.events))
-	}
+	// A preview has no dialog the projector knows about.
+	events.waitForEvents(t, 3)
 }
 
 func TestManager_RemoteDialogEndedWithNothingActiveIsANoop(t *testing.T) {
 	t.Parallel()
 
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 
 	manager.RemoteDialogEnded()
 	manager.RemoteDialogEnded()
 
-	if len(events.events) != 0 {
-		t.Fatalf("events = %#v, want none", events.events)
-	}
+	events.waitForEvents(t, 0)
 
 	if err := manager.Hangup(context.Background()); err != nil {
 		t.Fatalf("Hangup() error = %v, want nil", err)
@@ -661,49 +640,42 @@ func TestManager_PublishesAreSerializedInCommitOrder(t *testing.T) {
 
 	<-events.entered
 
-	// The sink is still inside IncomingCallStarted. This transition commits
-	// next, so its delivery must queue behind it instead of overtaking it.
-	ended := make(chan struct{})
+	// The sink is still inside IncomingCallStarted, so both transitions below
+	// commit into a queue nobody is popping. They have to come back out of it in
+	// the order they committed, not in whatever order the drain happens to find
+	// convenient.
+	manager.EndIncoming(core.CallEndReasonCancelled)
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		defer close(ended)
-
-		manager.EndIncoming(core.CallEndReasonCancelled)
-	}()
-
-	select {
-	case <-ended:
-	case <-time.After(200 * time.Millisecond):
+	if err := manager.OnInvite(context.Background(), &hookIncomingDialog{id: "dialog-2"}); err != nil {
+		t.Fatalf("second OnInvite() error = %v", err)
 	}
 
 	close(events.release)
 	wg.Wait()
+	waitForCount(t, 3, events.count)
 
 	delivered, overlap := events.delivered()
 	if overlap {
 		t.Fatal("two events were delivered to the sink at once")
 	}
 
-	if len(delivered) != 2 {
-		t.Fatalf("delivered = %#v, want 2 events", delivered)
+	if started, ok := delivered[0].(core.IncomingCallStarted); !ok || started.DialogID != testDialogID {
+		t.Fatalf("delivered[0] = %#v, want IncomingCallStarted for dialog-1", delivered[0])
 	}
 
-	if _, ok := delivered[0].(core.IncomingCallStarted); !ok {
-		t.Fatalf("delivered[0] = %#v, want IncomingCallStarted", delivered[0])
+	if ended, ok := delivered[1].(core.IncomingCallEnded); !ok || ended.DialogID != testDialogID {
+		t.Fatalf("delivered[1] = %#v, want IncomingCallEnded for dialog-1", delivered[1])
 	}
 
-	if _, ok := delivered[1].(core.IncomingCallEnded); !ok {
-		t.Fatalf("delivered[1] = %#v, want IncomingCallEnded", delivered[1])
+	if started, ok := delivered[2].(core.IncomingCallStarted); !ok || started.DialogID != "dialog-2" {
+		t.Fatalf("delivered[2] = %#v, want IncomingCallStarted for dialog-2", delivered[2])
 	}
 }
 
 func TestManager_EndIncomingNormalizesEmptyReason(t *testing.T) {
 	t.Parallel()
 
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
 
 	if err := manager.OnInvite(context.Background(), &fakeIncomingDialog{id: testDialogID}); err != nil {
@@ -712,9 +684,11 @@ func TestManager_EndIncomingNormalizesEmptyReason(t *testing.T) {
 
 	manager.EndIncoming("")
 
-	event, ok := events.events[len(events.events)-1].(core.IncomingCallEnded)
+	got := events.waitForEvents(t, 2)
+
+	event, ok := got[1].(core.IncomingCallEnded)
 	if !ok || event.Reason != core.CallEndReasonCancelled {
-		t.Fatalf("event = %#v, want IncomingCallEnded/cancelled", events.events[len(events.events)-1])
+		t.Fatalf("event = %#v, want IncomingCallEnded/cancelled", got[1])
 	}
 }
 
@@ -722,7 +696,7 @@ func TestManager_PreviewTeardownPublishesNothing(t *testing.T) {
 	t.Parallel()
 
 	dialer := &fakeDialer{}
-	events := &fakeEventSink{}
+	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", dialer, events, testResolver("main", "21"))
 	if err := manager.StartStream(context.Background(), "21"); err != nil {
@@ -733,9 +707,8 @@ func TestManager_PreviewTeardownPublishesNothing(t *testing.T) {
 		t.Fatalf("Hangup() error = %v", err)
 	}
 
-	if len(events.events) != 0 {
-		t.Fatalf("events = %#v, want none — an outbound preview has no dialog the projector knows about", events.events)
-	}
+	// An outbound preview has no dialog the projector knows about.
+	events.waitForEvents(t, 0)
 
 	if len(dialer.dialogs) != 1 || dialer.dialogs[0].byeCount() != 1 {
 		t.Fatalf("preview dialog was not hung up: %#v", dialer.dialogs)
@@ -860,7 +833,7 @@ func TestManager_ConcurrentAnswerDoesNotByeTheAnsweredCall(t *testing.T) {
 	// user managed.
 	answered := 0
 
-	for _, event := range events.snapshot() {
+	for _, event := range events.waitForEvents(t, 2) {
 		if _, ok := event.(core.CallAnswered); ok {
 			answered++
 		}
@@ -936,13 +909,10 @@ func TestManager_StalledSinkDoesNotBlockTheStateLock(t *testing.T) {
 		t.Fatalf("OnInvite() error = %v", err)
 	}
 
-	delivered, overlap := events.delivered()
-	if overlap {
-		t.Fatal("two events were delivered to the sink at once")
-	}
+	waitForCount(t, 2, events.count)
 
-	if len(delivered) != 2 {
-		t.Fatalf("delivered = %#v, want 2 events", delivered)
+	if _, overlap := events.delivered(); overlap {
+		t.Fatal("two events were delivered to the sink at once")
 	}
 }
 
@@ -971,11 +941,9 @@ func TestManager_ReentrantSinkDoesNotDeadlock(t *testing.T) {
 		t.Fatal("a sink that calls back into the manager deadlocked the publish path")
 	}
 
-	got := sink.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("events = %#v, want 2", got)
-	}
+	waitForCount(t, 2, sink.count)
 
+	got := sink.snapshot()
 	if _, ok := got[0].(core.IncomingCallStarted); !ok {
 		t.Fatalf("events[0] = %#v, want IncomingCallStarted", got[0])
 	}
@@ -1013,10 +981,7 @@ func TestManager_HangupEndsAnsweredInboundCall(t *testing.T) {
 		t.Fatalf("bye count = %d, want 1 — the media lease teardown ends the answered call", dialog.byes)
 	}
 
-	got := events.snapshot()
-	if len(got) != 3 {
-		t.Fatalf("events = %#v, want 3", got)
-	}
+	got := events.waitForEvents(t, 3)
 
 	hungUp, ok := got[2].(core.CallHungUp)
 	if !ok || hungUp.DialogID != testDialogID {
@@ -1056,11 +1021,123 @@ func TestManager_EndIncomingNormalizesUnknownReason(t *testing.T) {
 	// must not reach it either.
 	manager.EndIncoming(core.CallEndReason("bogus"))
 
-	got := events.snapshot()
+	got := events.waitForEvents(t, 2)
 
-	event, ok := got[len(got)-1].(core.IncomingCallEnded)
+	event, ok := got[1].(core.IncomingCallEnded)
 	if !ok || event.Reason != core.CallEndReasonCancelled {
-		t.Fatalf("event = %#v, want IncomingCallEnded/cancelled", got[len(got)-1])
+		t.Fatalf("event = %#v, want IncomingCallEnded/cancelled", got[1])
+	}
+}
+
+// TestManager_RingingIsNotDelayedByTheSink pins the reason the drain runs on its
+// own goroutine. IncomingCallStarted is published at the commit point, before the
+// 180, and the production sink broadcasts to every WebSocket client in turn with
+// a write deadline on each. Carrying the drain on OnInvite's goroutine would put
+// that whole broadcast in front of the provisional response, and the intercom
+// gives up on an INVITE it never sees ringing.
+func TestManager_RingingIsNotDelayedByTheSink(t *testing.T) {
+	t.Parallel()
+
+	events := newGateSink()
+	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
+
+	dialog := &hookIncomingDialog{id: testDialogID}
+	invited := make(chan error, 1)
+
+	go func() { invited <- manager.OnInvite(context.Background(), dialog) }()
+
+	// The sink is now inside IncomingCallStarted and stays there until released.
+	<-events.entered
+
+	select {
+	case err := <-invited:
+		if err != nil {
+			t.Fatalf("OnInvite() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnInvite waited for the sink before it answered the INVITE")
+	}
+
+	if statuses := dialog.statuses(); len(statuses) != 1 || statuses[0] != 180 {
+		t.Fatalf("statuses = %v, want 180 Ringing already sent while the sink is still blocked", statuses)
+	}
+
+	close(events.release)
+
+	waitForCount(t, 1, events.count)
+}
+
+// TestManager_RollbackSendsNoFinalResponseWhenItLosesTheDialog covers the other
+// side of the failed-180 rollback. If the call was answered, declined or expired
+// while the 180 was failing, the dialog already carries a final response — a 500
+// on top of it is a second final response on a transaction somebody else owns.
+func TestManager_RollbackSendsNoFinalResponseWhenItLosesTheDialog(t *testing.T) {
+	t.Parallel()
+
+	ringErr := errors.New("transport down")
+	events := &syncEventSink{}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
+
+	dialog := &hookIncomingDialog{id: testDialogID}
+	dialog.onRespond = func(status int) error {
+		if status == 180 {
+			// The intercom's CANCEL lands while the 180 is failing, so the
+			// rollback that follows no longer owns the dialog.
+			manager.EndIncoming(core.CallEndReasonElsewhere)
+
+			return ringErr
+		}
+
+		return nil
+	}
+
+	if err := manager.OnInvite(context.Background(), dialog); !errors.Is(err, ringErr) {
+		t.Fatalf("OnInvite() error = %v, want %v", err, ringErr)
+	}
+
+	if statuses := dialog.statuses(); len(statuses) != 1 || statuses[0] != 180 {
+		t.Fatalf("statuses = %v, want the 180 alone — the rollback lost the dialog and must not answer it", statuses)
+	}
+
+	got := events.waitForEvents(t, 2)
+
+	ended, ok := got[1].(core.IncomingCallEnded)
+	if !ok || ended.Reason != core.CallEndReasonElsewhere {
+		t.Fatalf("events[1] = %#v, want IncomingCallEnded/elsewhere — the rollback must not publish a second end", got[1])
+	}
+}
+
+// TestManager_PanickingSinkDoesNotStrandTheDrain: the sink is external code, and
+// a panic in it used to leave the drain flag set for good — every later event was
+// enqueued behind a drain that no longer existed and nothing ever reached the
+// projector again. Only a restart recovered it.
+func TestManager_PanickingSinkDoesNotStrandTheDrain(t *testing.T) {
+	t.Parallel()
+
+	events := newPanickingSink()
+	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("main", "21"))
+
+	// The recover models net/http, which recovers a panicking handler goroutine
+	// and leaves the process running: that is how this stayed silent. Once the
+	// drain owns its own goroutine there is nothing here to recover, and an
+	// unrecovered sink panic would take the whole process down instead.
+	func() {
+		defer func() { _ = recover() }()
+
+		if err := manager.OnInvite(context.Background(), &hookIncomingDialog{id: testDialogID}); err != nil {
+			t.Errorf("OnInvite() error = %v", err)
+		}
+	}()
+
+	manager.EndIncoming(core.CallEndReasonCancelled)
+
+	select {
+	case event := <-events.delivered:
+		if _, ok := event.(core.IncomingCallEnded); !ok {
+			t.Fatalf("event = %#v, want IncomingCallEnded", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event reached the sink after it panicked — the drain flag was stranded")
 	}
 }
 
@@ -1225,15 +1302,38 @@ func (d *fakeOutgoingDialog) byeCount() int {
 	return d.byes
 }
 
-type fakeEventSink struct {
-	events []core.Event
+// sinkSettle is how long an exact-count assertion keeps watching after the count
+// arrives. The drain runs on its own goroutine, so "the sink has n events" is
+// only half the assertion: without the settle a test would not notice an n+1st
+// delivery that is still in flight.
+const sinkSettle = 50 * time.Millisecond
+
+// waitForCount blocks until count reports exactly the expected number and then
+// holds it there for sinkSettle. Every assertion on delivered events goes
+// through it, because a publisher returns before its event reaches the sink.
+func waitForCount(t *testing.T, want int, count func() int) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for count() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("sink received %d events, want %d", count(), want)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	time.Sleep(sinkSettle)
+
+	if got := count(); got != want {
+		t.Fatalf("sink received %d events, want %d", got, want)
+	}
 }
 
-func (s *fakeEventSink) Publish(event core.Event) {
-	s.events = append(s.events, event)
-}
-
-// syncEventSink is fakeEventSink for tests that publish from several goroutines.
+// syncEventSink records what the drain delivers. It is guarded because the drain
+// runs on a goroutine of its own, and read through waitForEvents for the same
+// reason.
 type syncEventSink struct {
 	mu     sync.Mutex
 	events []core.Event
@@ -1251,6 +1351,49 @@ func (s *syncEventSink) snapshot() []core.Event {
 	defer s.mu.Unlock()
 
 	return append([]core.Event(nil), s.events...)
+}
+
+func (s *syncEventSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.events)
+}
+
+// waitForEvents returns the delivered events once there are exactly want of
+// them, failing the test if they never arrive or if an extra one follows.
+func (s *syncEventSink) waitForEvents(t *testing.T, want int) []core.Event {
+	t.Helper()
+
+	waitForCount(t, want, s.count)
+
+	return s.snapshot()
+}
+
+// panickingSink blows up on its first event, the way a broadcaster does on a
+// malformed payload, and reports every later one on delivered.
+type panickingSink struct {
+	delivered chan core.Event
+
+	mu       sync.Mutex
+	panicked bool
+}
+
+func newPanickingSink() *panickingSink {
+	return &panickingSink{delivered: make(chan core.Event, 8)}
+}
+
+func (s *panickingSink) Publish(event core.Event) {
+	s.mu.Lock()
+	first := !s.panicked
+	s.panicked = true
+	s.mu.Unlock()
+
+	if first {
+		panic("sink exploded on " + fmt.Sprintf("%T", event))
+	}
+
+	s.delivered <- event
 }
 
 // reentrantSink calls back into the Manager from inside Publish, the way a
@@ -1285,6 +1428,13 @@ func (s *reentrantSink) snapshot() []core.Event {
 	defer s.mu.Unlock()
 
 	return append([]core.Event(nil), s.events...)
+}
+
+func (s *reentrantSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.events)
 }
 
 // gateSink holds its first delivery until the test releases it and records
@@ -1323,6 +1473,13 @@ func (s *gateSink) Publish(event core.Event) {
 	s.mu.Lock()
 	s.inFlight--
 	s.mu.Unlock()
+}
+
+func (s *gateSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.events)
 }
 
 func (s *gateSink) delivered() ([]core.Event, bool) {

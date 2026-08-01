@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -54,10 +55,12 @@ type Manager struct {
 	// mu at the exact point its transition commits, so the queue order is commit
 	// order; exactly one goroutine drains at a time, and it calls the sink with
 	// mu released. A publisher that finds a drain already running hands its
-	// event over and returns immediately. That gives commit-ordered, never
-	// overlapping deliveries without ever holding a lock across the sink — the
-	// sink is external code (it broadcasts to WebSocket clients synchronously)
-	// and may even call back into the Manager, which simply enqueues.
+	// event over and returns immediately; the one that finds none starts a drain
+	// goroutine and returns too, so no caller ever waits for the sink. That gives
+	// commit-ordered, never overlapping deliveries without ever holding a lock —
+	// or a SIP entry point — across the sink. The sink is external code (it
+	// broadcasts to WebSocket clients synchronously, each write with its own
+	// deadline) and may even call back into the Manager, which simply enqueues.
 	pending  []core.Event
 	draining bool
 
@@ -86,6 +89,12 @@ func NewManager(host string, dialer StreamDialer, events EventSink, resolve Entr
 
 // SetEvents assigns the sink after construction, because the projector-backed
 // applier is not available when the manager is created.
+//
+// Events published while the sink is still nil are dropped, not buffered: the
+// queue exists to order deliveries, not to hold them for a sink that does not
+// exist yet. The sink must therefore be installed before the SIP listener can
+// deliver an INVITE, or the call that arrives in between never reaches the
+// projector while the manager believes it is ringing.
 func (m *Manager) SetEvents(events EventSink) {
 	m.mu.Lock()
 	m.events = events
@@ -137,11 +146,24 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog) error {
 		// the projector keeps a call that never rang. clearIncoming publishes
 		// only if this dialog is still the reserved one, so a publisher that got
 		// there first is not doubled up.
-		m.clearIncoming(dialog, core.CallEndReasonCancelled)
+		//
+		// Its answer is also what says whether this rollback may still speak for
+		// the dialog. A failing 180 is slow, and an Answer, a Decline or the
+		// expiry can take the dialog over while it is failing — each of them
+		// puts its own final response on the transaction. Sending the 500
+		// anyway would be a second final response on a transaction this call no
+		// longer owns: a 500 stamped on top of a 200 OK, or after the expiry's
+		// 480.
+		if m.clearIncoming(dialog, core.CallEndReasonCancelled) {
+			// Best effort: without a final response the INVITE has had no answer
+			// at all and the far end sits out its whole transaction timeout. It
+			// gets a fresh context, because the one whose 180 just failed may
+			// well have failed it by being cancelled or expired.
+			respondCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		// Best effort: without a final response the INVITE has had no answer at
-		// all and the far end sits out its whole transaction timeout.
-		_ = dialog.Respond(ctx, 500, "Server Error", "")
+			_ = dialog.Respond(respondCtx, 500, "Server Error", "")
+		}
 
 		return fmt.Errorf("sip ringing response: %w", err)
 	}
@@ -188,10 +210,18 @@ func (m *Manager) Answer(ctx context.Context) error {
 
 		m.mu.Unlock()
 
-		// The expiry timer — or a Decline — cleared the slot while the 200 OK
-		// was on the wire. The far end is in a live call and no field of the
-		// Manager refers to this dialog any more, so it has to be ended here or
-		// it survives with nothing able to BYE it.
+		// The dialog is neither the reserved incoming one nor the active one, so
+		// as of this critical section no field of the Manager refers to it — and
+		// the far end has just been told 200 OK. Nothing else will ever BYE it,
+		// so this call does.
+		//
+		// That is the whole invariant: the loser BYEs only a dialog it can prove
+		// is unreferenced. It is not a guarantee that the dialog is BYEd exactly
+		// once. The winner may have promoted it and a Hangup may already have
+		// torn it down and dropped it from m.active before this goroutine got
+		// back onto the lock, in which case the BYE below is a second one. A
+		// redundant BYE on a dialog that is already closed is tolerated —
+		// leaving a live call with nobody able to end it is not.
 		byeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -417,11 +447,17 @@ func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
 // m.mu.Unlock() and must not touch guarded state afterwards.
 //
 // The event is queued under m.mu, at the commit point, and delivered by a drain
-// loop that runs with the lock released — see the pending/draining fields. The
-// caller that starts the drain carries it, and any publisher that arrives while
-// a drain is running simply enqueues and returns. A nil event releases the lock
-// without publishing, which keeps the branches that commit without telling the
-// projector on the same single unlock path as the ones that do.
+// goroutine — see the pending/draining fields. No publisher ever waits for the
+// sink: one that finds a drain already running enqueues and returns, and one
+// that finds none starts the drain and returns. That matters most in OnInvite,
+// which publishes IncomingCallStarted before the 180 Ringing: running the sink
+// here would put a broadcast to every WebSocket client, each write with its own
+// deadline, in front of the provisional response, and the intercom gives up on
+// an INVITE it never sees ringing.
+//
+// A nil event releases the lock without publishing, which keeps the branches
+// that commit without telling the projector on the same single unlock path as
+// the ones that do.
 func (m *Manager) publishLocked(event core.Event) {
 	if event != nil {
 		m.pending = append(m.pending, event)
@@ -433,20 +469,42 @@ func (m *Manager) publishLocked(event core.Event) {
 		return
 	}
 
+	// draining is claimed under m.mu, before the goroutine exists. That is what
+	// keeps a single drainer — and therefore commit order — no matter how many
+	// publishers race here.
 	m.draining = true
 	m.mu.Unlock()
 
-	m.drainEvents()
+	go m.drainEvents()
 }
 
 // drainEvents delivers queued events in commit order, one at a time, with m.mu
 // released across every call into the sink.
 func (m *Manager) drainEvents() {
+	// The loop hands the drain back under the same lock that finds the queue
+	// empty, so a publisher cannot enqueue into a drain that is about to stop.
+	// The defer covers the abnormal exit instead: without it, a panic on this
+	// goroutine would leave draining set for good, every later publish would
+	// queue behind a drain that no longer exists, and nothing would ever reach
+	// the projector again — silently, until a restart.
+	handedBack := false
+
+	defer func() {
+		if handedBack {
+			return
+		}
+
+		m.mu.Lock()
+		m.draining = false
+		m.mu.Unlock()
+	}()
+
 	for {
 		m.mu.Lock()
 
 		if len(m.pending) == 0 {
 			m.draining = false
+			handedBack = true
 			m.mu.Unlock()
 
 			return
@@ -463,7 +521,25 @@ func (m *Manager) drainEvents() {
 		m.mu.Unlock()
 
 		if events != nil {
-			events.Publish(event)
+			deliver(events, event)
 		}
 	}
+}
+
+// deliver calls the sink and contains its panics. The sink is external code, so
+// one bad event must neither stop the drain — which would strand every later
+// event behind it — nor take the process down with it, which is what an
+// unrecovered panic on the drain's own goroutine would do.
+func deliver(events EventSink, event core.Event) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Default().Error("signaling: event sink panicked",
+				"component", "signaling.manager",
+				"event", fmt.Sprintf("%T", event),
+				"panic", recovered,
+			)
+		}
+	}()
+
+	events.Publish(event)
 }
