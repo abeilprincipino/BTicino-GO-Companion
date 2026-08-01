@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"bticino-go-companion/internal/core"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -28,12 +29,18 @@ const (
 )
 
 var (
-	ErrStreamTargetUnset              = errors.New("sip: stream target not configured")
-	_                    StreamDialer = (*streamDialer)(nil)
+	ErrStreamTargetUnset = errors.New("sip: stream target not configured")
+
+	// ErrDialogConcluded reports a response that was not sent because the
+	// inbound dialog it belongs to had already been concluded by someone else.
+	ErrDialogConcluded = errors.New("sip: inbound dialog already concluded")
+
+	_ StreamDialer = (*streamDialer)(nil)
 )
 
 // StreamDialerConfig contains the outbound SIP settings required for a stream.
-// Registration and inbound SIP handling are deliberately outside this dialer.
+// Inbound handling is registered only when Inbound is set, so an installation
+// without the Flexisip provisioning keeps behaving as an outbound-only endpoint.
 type StreamDialerConfig struct {
 	Target            string
 	Domain            string
@@ -42,6 +49,7 @@ type StreamDialerConfig struct {
 	AuthPass          string
 	Transport         string
 	Listen            string
+	Inbound           bool
 	Logger            *slog.Logger
 	RemoteDialogEnded func()
 }
@@ -51,6 +59,10 @@ type streamDialer struct {
 	server            *sipgo.Server
 	client            *sipgo.Client
 	out               *sipgo.DialogClientCache
+	in                *sipgo.DialogServerCache
+	inboundMu         sync.RWMutex
+	inbound           InboundHandler
+	inboundDialogs    sync.Map
 	contact           sip.ContactHeader
 	target            inviteTarget
 	authUser          string
@@ -132,6 +144,16 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 	}
 	server.OnBye(dialer.onBye)
 
+	// Every inbound handler is registered here, before the listener goroutine
+	// exists, so nothing reads d.in while it is still being assigned.
+	if cfg.Inbound {
+		dialer.in = sipgo.NewDialogServerCache(client, contact)
+		server.OnInvite(dialer.onInvite)
+		server.OnCancel(dialer.onCancel)
+		server.OnAck(dialer.onAck)
+		dialer.logger.Info("inbound sip enabled")
+	}
+
 	listenAddr := strings.TrimSpace(cfg.Listen)
 
 	if listenAddr == "" {
@@ -164,13 +186,65 @@ func (d *streamDialer) listen(ctx context.Context, addr string) {
 	}
 }
 
+// onBye terminates the dialog the BYE belongs to. The outbound stream is tried
+// first because it is the only dialog an outbound-only installation can have;
+// the inbound branch is reached only when this BYE matches no outbound dialog.
 func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
-	if err := d.out.ReadBye(req, tx); err != nil {
-		d.logger.Warn("remote sip bye rejected", "error", err)
+	if err := d.out.ReadBye(req, tx); err == nil {
+		d.logger.Info("remote sip stream ended")
+		d.notifyRemoteDialogEnded()
+
 		return
 	}
 
-	d.logger.Info("remote sip stream ended")
+	if d.in == nil {
+		d.logger.Warn("remote sip bye rejected")
+
+		return
+	}
+
+	d.onInboundBye(req, tx)
+}
+
+// onInboundBye ends an inbound dialog the far end hung up.
+//
+// The two cases are kept apart deliberately. A BYE that arrives while the call
+// is still ringing has to reach the manager as the end of a pending call, or
+// that call survives until the manager's own expiry and every stream request is
+// refused meanwhile. A BYE for a call that was answered ends an *active* dialog
+// instead, which is Manager.RemoteDialogEnded's job — wiring it is the next
+// task, and this is the branch it belongs in.
+func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) {
+	session, err := d.in.MatchDialogRequest(req)
+	if err != nil {
+		d.logger.Warn("remote sip bye rejected", "error", err)
+
+		return
+	}
+
+	// The state has to be read before ReadBye moves the dialog to Ended.
+	state := session.LoadState()
+	answered := state == sip.DialogStateEstablished || state == sip.DialogStateConfirmed
+	dialog := d.loadInboundDialog(session.ID)
+
+	if err := session.ReadBye(req, tx); err != nil {
+		d.logger.Warn("inbound sip bye rejected", "error", err)
+
+		return
+	}
+
+	switch {
+	case dialog != nil && d.endPendingIncoming(dialog, cancelReason(req), "bye"):
+	case answered:
+		// The next task hands this to Manager.RemoteDialogEnded, which clears
+		// the active call without sending a BYE back.
+		d.logger.Info("inbound sip call ended by remote", "dialog_id", inboundDialogID(dialog))
+	default:
+		d.logger.Debug("inbound sip bye ignored", "dialog_id", inboundDialogID(dialog))
+	}
+}
+
+func (d *streamDialer) notifyRemoteDialogEnded() {
 	d.callbackMu.RLock()
 	callback := d.remoteDialogEnded
 	d.callbackMu.RUnlock()
@@ -477,4 +551,297 @@ func firstNonEmpty(values ...string) string {
 	}
 
 	return ""
+}
+
+// InboundHandler receives inbound dialog lifecycle events from the SIP server.
+type InboundHandler interface {
+	OnInvite(context.Context, IncomingDialog) error
+	EndIncoming(core.CallEndReason)
+}
+
+// SetInboundHandler assigns the component that decides how inbound calls are
+// answered. Inbound requests are rejected until it is set.
+func (d *streamDialer) SetInboundHandler(handler InboundHandler) {
+	d.inboundMu.Lock()
+	d.inbound = handler
+	d.inboundMu.Unlock()
+}
+
+func (d *streamDialer) inboundHandler() InboundHandler {
+	d.inboundMu.RLock()
+	defer d.inboundMu.RUnlock()
+
+	return d.inbound
+}
+
+// onInvite serves an inbound INVITE for the whole life of its dialog.
+//
+// It deliberately does not return while the call is up. sipgo terminates the
+// INVITE server transaction as soon as this handler returns — Server.handleRequest
+// calls tx.TerminateGracefully, which on a reliable transport terminates outright
+// — and a terminated transaction can no longer carry the 200 OK of an answer
+// that arrives seconds later, when the user finally picks up.
+func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
+	handler := d.inboundHandler()
+	if handler == nil || d.in == nil {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
+
+		return
+	}
+
+	session, err := d.in.ReadInvite(req, tx)
+	if err != nil {
+		d.logger.Warn("inbound invite rejected", "error", err)
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Error", nil))
+
+		return
+	}
+
+	dialogID := core.DialogID("")
+	if callID := req.CallID(); callID != nil {
+		dialogID = core.DialogID(callID.Value())
+	}
+
+	dialog := &incomingDialog{session: session, id: dialogID}
+
+	d.inboundDialogs.Store(session.ID, dialog)
+	defer d.inboundDialogs.Delete(session.ID)
+
+	// A CANCEL that matches this INVITE is answered, turned into a 487 and
+	// reported through this hook by the transaction layer itself: it never
+	// reaches the server's CANCEL handler. Registering the hook before the
+	// manager is told about the call keeps a CANCEL that races the 180 Ringing
+	// from being lost.
+	if !tx.OnCancel(func(cancel *sip.Request) {
+		// The transaction must not be blocked in here, hence the goroutine.
+		go d.endPendingIncoming(dialog, cancelReason(cancel), "cancel")
+	}) {
+		d.logger.Warn("inbound sip cancel hook unavailable", "dialog_id", string(dialogID))
+	}
+
+	d.logger.Info("inbound sip invite received", "dialog_id", string(dialogID))
+
+	if err := handler.OnInvite(context.Background(), dialog); err != nil {
+		d.logger.Warn("inbound invite handling failed", "dialog_id", string(dialogID), "error", err)
+		_ = session.Close()
+
+		return
+	}
+
+	// Both are needed: the dialog context ends on a BYE, a rejection, an answer
+	// that is later hung up or a CANCEL, and the transaction ends on its own
+	// timeout when the far end stops talking without any of that happening.
+	select {
+	case <-session.Context().Done():
+	case <-tx.Done():
+	}
+
+	d.logger.Debug("inbound sip dialog closed", "dialog_id", string(dialogID))
+}
+
+// onCancel answers a CANCEL the transaction layer could not match to an INVITE
+// transaction of ours. A matching one never gets here: it is answered and
+// turned into a 487 by the transaction layer, which reports it through the
+// transaction's own cancel hook instead. So this CANCEL refers by construction
+// to a transaction that no longer exists, and it must not end the pending call
+// — Manager.EndIncoming clears whatever call is pending, without matching a
+// dialog identity, so a speculative call here would drop an unrelated call.
+func (d *streamDialer) onCancel(req *sip.Request, tx sip.ServerTransaction) {
+	d.logger.Info("unmatched inbound sip cancel", "reason", string(cancelReason(req)))
+
+	_ = tx.Respond(sip.NewResponseFromRequest(req, 481, "Call/Transaction Does Not Exist", nil))
+}
+
+func (d *streamDialer) onAck(req *sip.Request, tx sip.ServerTransaction) {
+	if d.in == nil {
+		return
+	}
+
+	if err := d.in.ReadAck(req, tx); err != nil {
+		d.logger.Debug("inbound sip ack ignored", "error", err)
+	}
+}
+
+// endPendingIncoming tells the inbound handler that a call ended before it was
+// answered, and reports whether it did.
+//
+// The dialog is claimed first because Manager.EndIncoming clears whatever call
+// is pending without matching a dialog: claiming is what keeps a CANCEL or a
+// BYE for a rejected, already answered or already terminated INVITE from
+// clearing the call that is genuinely ringing.
+func (d *streamDialer) endPendingIncoming(dialog *incomingDialog, reason core.CallEndReason, cause string) bool {
+	handler := d.inboundHandler()
+	if handler == nil {
+		return false
+	}
+
+	if !dialog.endPending() {
+		return false
+	}
+
+	d.logger.Info("inbound sip call ended before answer",
+		"dialog_id", string(dialog.ID()),
+		"cause", cause,
+		"reason", string(reason),
+	)
+	handler.EndIncoming(reason)
+
+	return true
+}
+
+func (d *streamDialer) loadInboundDialog(id string) *incomingDialog {
+	value, ok := d.inboundDialogs.Load(id)
+	if !ok {
+		return nil
+	}
+
+	dialog, _ := value.(*incomingDialog)
+
+	return dialog
+}
+
+func inboundDialogID(dialog *incomingDialog) string {
+	if dialog == nil {
+		return ""
+	}
+
+	return string(dialog.ID())
+}
+
+// serverSession is the part of sipgo.DialogServerSession the adapter uses.
+type serverSession interface {
+	Respond(int, string, []byte, ...sip.Header) error
+	RespondSDP([]byte) error
+	Bye(context.Context) error
+	Close() error
+	LoadState() sip.DialogState
+}
+
+// incomingDialog adapts a sipgo server session to the signaling interface.
+//
+// sipgo does not serialize responses on a session: DialogServerSession.Respond
+// stores the response on the dialog and drives the invite transaction with no
+// lock of its own, and for a 200 OK it stays in there retransmitting until the
+// ACK arrives. The manager does respond concurrently on one dialog — the expiry
+// timer and an in-flight Answer overlap in a narrow window — so the adapter is
+// what keeps those responses apart.
+type incomingDialog struct {
+	session serverSession
+	id      core.DialogID
+
+	// mu guards the two fields below and is held across a provisional response,
+	// so a final one can never start writing while a 180 is still on the wire.
+	mu        sync.Mutex
+	ringing   bool
+	concluded bool
+}
+
+var _ IncomingDialog = (*incomingDialog)(nil)
+
+func (d *incomingDialog) ID() core.DialogID { return d.id }
+
+// Respond sends a provisional or final response. A non-empty body always means
+// the 200 OK answer, for which RespondSDP builds the correct headers.
+//
+// Only the first final response is sent. A later one is refused with
+// ErrDialogConcluded rather than dropped silently, so a caller that believes it
+// answered the call — and would go on to set up media for it — is told that
+// somebody else concluded the dialog first.
+func (d *incomingDialog) Respond(_ context.Context, status int, reason, body string) error {
+	answer := body != ""
+
+	d.mu.Lock()
+
+	if d.concluded {
+		d.mu.Unlock()
+
+		return ErrDialogConcluded
+	}
+
+	if !answer && status < 200 {
+		defer d.mu.Unlock()
+
+		if err := d.session.Respond(status, reason, nil); err != nil {
+			return fmt.Errorf("sip provisional response: %w", err)
+		}
+
+		d.ringing = true
+
+		return nil
+	}
+
+	// The final response is claimed under the lock and written with it
+	// released: answering blocks until the far end acknowledges, and nothing
+	// else may be written on this dialog afterwards anyway.
+	d.concluded = true
+	d.mu.Unlock()
+
+	if answer {
+		if err := d.session.RespondSDP([]byte(body)); err != nil {
+			return fmt.Errorf("sip answer response: %w", err)
+		}
+
+		return nil
+	}
+
+	// A rejection is the end of the dialog, and closing it drops the session
+	// from the server cache, which would otherwise hold it for the lifetime of
+	// the process.
+	defer func() { _ = d.session.Close() }()
+
+	if err := d.session.Respond(status, reason, nil); err != nil {
+		return fmt.Errorf("sip final response: %w", err)
+	}
+
+	return nil
+}
+
+func (d *incomingDialog) Bye(ctx context.Context) error {
+	d.mu.Lock()
+	d.concluded = true
+	d.mu.Unlock()
+
+	defer func() { _ = d.session.Close() }()
+
+	// sipgo can only BYE a dialog it has answered: it dereferences the stored
+	// invite response, which is nil until one was sent. Closing is all there is
+	// to do for a dialog that never reached 200 OK.
+	if d.session.LoadState() < sip.DialogStateEstablished {
+		return nil
+	}
+
+	if err := d.session.Bye(ctx); err != nil {
+		return fmt.Errorf("sip inbound bye: %w", err)
+	}
+
+	return nil
+}
+
+// endPending claims the dialog on behalf of a CANCEL or a BYE that arrived
+// while the call was still ringing. It answers true exactly once, and only for
+// the dialog that is actually pending: one that has rung and that no answer, no
+// rejection and no earlier termination has concluded.
+func (d *incomingDialog) endPending() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !d.ringing || d.concluded {
+		return false
+	}
+
+	d.concluded = true
+
+	return true
+}
+
+// cancelReason reads why the far end withdrew the call. Flexisip forks a
+// doorbell call to every registered companion and cancels the losers with
+// cause=200 once one of them answers, which is not the visitor giving up.
+func cancelReason(req *sip.Request) core.CallEndReason {
+	header := req.GetHeader("Reason")
+	if header != nil && strings.Contains(header.Value(), "cause=200") {
+		return core.CallEndReasonElsewhere
+	}
+
+	return core.CallEndReasonCancelled
 }
