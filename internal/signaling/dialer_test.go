@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/emiago/sipgo/siptest"
 )
 
 func TestResolveInviteTargetUsesProfileEndpointAndDomain(t *testing.T) {
@@ -143,15 +145,21 @@ func TestCancelReasonDetectsAnsweredElsewhere(t *testing.T) {
 
 // fakeServerSession records what the adapter writes on the SIP session and how
 // many of those writes overlap, because sipgo does not serialize them itself.
+//
+// entered and release make a write observable and suspendable: a test that has
+// to prove one write waits for another cannot do it with a sleep, because the
+// two orderings it must tell apart differ only in timing.
 type fakeServerSession struct {
-	mu         sync.Mutex
-	writes     []string
-	active     int
-	maxActive  int
-	closes     int
-	byes       int
-	state      sip.DialogState
-	writeDelay time.Duration
+	mu        sync.Mutex
+	writes    []string
+	active    int
+	maxActive int
+	closes    int
+	byes      int
+	state     sip.DialogState
+
+	entered chan string
+	release chan struct{}
 }
 
 func (s *fakeServerSession) record(entry string) error {
@@ -163,10 +171,16 @@ func (s *fakeServerSession) record(entry string) error {
 		s.maxActive = s.active
 	}
 
-	delay := s.writeDelay
+	entered, release := s.entered, s.release
 	s.mu.Unlock()
 
-	time.Sleep(delay)
+	if entered != nil {
+		entered <- entry
+	}
+
+	if release != nil {
+		<-release
+	}
 
 	s.mu.Lock()
 	s.active--
@@ -245,29 +259,51 @@ func testDialer(handler InboundHandler) *streamDialer {
 func TestIncomingDialogRespondNeverOverlapsSessionWrites(t *testing.T) {
 	t.Parallel()
 
-	session := &fakeServerSession{writeDelay: 20 * time.Millisecond}
+	// The 180 is started first and held inside the session write, so the answer
+	// is guaranteed to arrive while a write is genuinely in flight. Letting the
+	// two race instead would let the 200 conclude the dialog first, refuse the
+	// 180 and leave a single write behind, which satisfies the overlap
+	// assertion without ever having exercised the serialization.
+	session := &fakeServerSession{entered: make(chan string, 2), release: make(chan struct{})}
 	dialog := &incomingDialog{session: session, id: "call-1"}
 
-	var group sync.WaitGroup
+	ringing := make(chan error, 1)
 
-	group.Add(2)
+	go func() { ringing <- dialog.Respond(context.Background(), 180, "Ringing", "") }()
 
-	go func() {
-		defer group.Done()
+	if entry := <-session.entered; entry != "Ringing" {
+		t.Fatalf("first session write = %q, want the 180 Ringing", entry)
+	}
 
-		_ = dialog.Respond(context.Background(), 180, "Ringing", "")
-	}()
+	answer := make(chan error, 1)
 
-	go func() {
-		defer group.Done()
+	go func() { answer <- dialog.Respond(context.Background(), 200, "OK", "v=0") }()
 
-		_ = dialog.Respond(context.Background(), 200, "OK", "v=0")
-	}()
+	select {
+	case entry := <-session.entered:
+		t.Fatalf("session write %q started while the 180 Ringing was still on the wire", entry)
+	case err := <-answer:
+		t.Fatalf("Respond(200) returned (error = %v) while the 180 Ringing was still on the wire", err)
+	case <-time.After(100 * time.Millisecond):
+	}
 
-	group.Wait()
+	close(session.release)
 
-	if _, maxActive, _, _ := session.snapshot(); maxActive != 1 {
+	if err := <-ringing; err != nil {
+		t.Fatalf("Respond(180) error = %v", err)
+	}
+
+	if err := <-answer; err != nil {
+		t.Fatalf("Respond(200) error = %v", err)
+	}
+
+	writes, maxActive, _, _ := session.snapshot()
+	if maxActive != 1 {
 		t.Fatalf("overlapping session writes = %d, want 1", maxActive)
+	}
+
+	if len(writes) != 2 || writes[0] != "Ringing" || writes[1] != "v=0" {
+		t.Fatalf("session writes = %v, want the 180 Ringing followed by the answer", writes)
 	}
 }
 
@@ -338,6 +374,56 @@ func TestIncomingDialogRespondAnswersWithSDP(t *testing.T) {
 	if closes != 0 {
 		t.Fatalf("session closes = %d, want 0 for an answered dialog", closes)
 	}
+}
+
+// TestIncomingDialogRespondRoutesOnTheStatusNotTheBody pins the rule the rest of
+// the adapter depends on: what a response *is* follows from its status code.
+// Discriminating on the body instead sends a bodyless 200 OK down the rejection
+// path — closing and dropping from sipgo's server cache the very dialog that
+// response just established, after which no BYE for it can be matched — and a
+// provisional carrying early SDP down the answer path.
+func TestIncomingDialogRespondRoutesOnTheStatusNotTheBody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bodyless success answers", func(t *testing.T) {
+		t.Parallel()
+
+		session := &fakeServerSession{}
+		dialog := &incomingDialog{session: session, id: "call-1"}
+
+		if err := dialog.Respond(context.Background(), 200, "OK", ""); err != nil {
+			t.Fatalf("Respond() error = %v", err)
+		}
+
+		writes, _, closes, _ := session.snapshot()
+		if len(writes) != 1 || writes[0] != "OK" {
+			t.Fatalf("session writes = %v, want a single 200 OK", writes)
+		}
+
+		if closes != 0 {
+			t.Fatalf("session closes = %d, want 0: a 200 OK establishes the dialog and must not drop it from the server cache", closes)
+		}
+	})
+
+	t.Run("provisional with a body stays provisional", func(t *testing.T) {
+		t.Parallel()
+
+		session := &fakeServerSession{}
+		dialog := &incomingDialog{session: session, id: "call-1"}
+
+		if err := dialog.Respond(context.Background(), 183, "Session Progress", "v=0"); err != nil {
+			t.Fatalf("Respond() error = %v", err)
+		}
+
+		writes, _, _, _ := session.snapshot()
+		if len(writes) != 1 || writes[0] != "Session Progress" {
+			t.Fatalf("session writes = %v, want the 183 sent as a provisional, not as an answer", writes)
+		}
+
+		if !dialog.endPending() {
+			t.Fatal("endPending() = false: a 183 is provisional and leaves the call pending")
+		}
+	})
 }
 
 func TestIncomingDialogEndPendingClaimsRingingDialogOnce(t *testing.T) {
@@ -477,4 +563,571 @@ func TestStreamDialerEndPendingIncomingWithoutHandler(t *testing.T) {
 	if dialer.endPendingIncoming(dialog, core.CallEndReasonCancelled, "cancel") {
 		t.Fatal("endPendingIncoming() reported a call with no inbound handler")
 	}
+}
+
+// The tests below drive the real sipgo INVITE server transaction over siptest's
+// recording connection, so the two library behaviours the inbound half rests on
+// are defended by something other than a comment: that a matching CANCEL is
+// reported through the transaction's own cancel hook rather than through the
+// server's CANCEL handler, and that onInvite must not return while the call is
+// only ringing. Neither needs a socket.
+
+// ringingInboundHandler answers an INVITE the way the manager does — a 180 and
+// nothing more — and reports back on channels, so a test can drive the SIP state
+// machine in a defined order instead of sleeping on it.
+type ringingInboundHandler struct {
+	mu      sync.Mutex
+	dialogs []IncomingDialog
+	reasons []core.CallEndReason
+
+	rang  chan IncomingDialog
+	ended chan core.CallEndReason
+}
+
+func newRingingInboundHandler() *ringingInboundHandler {
+	return &ringingInboundHandler{
+		rang:  make(chan IncomingDialog, 4),
+		ended: make(chan core.CallEndReason, 4),
+	}
+}
+
+func (h *ringingInboundHandler) OnInvite(ctx context.Context, dialog IncomingDialog) error {
+	h.mu.Lock()
+	h.dialogs = append(h.dialogs, dialog)
+	h.mu.Unlock()
+
+	if err := dialog.Respond(ctx, 180, "Ringing", ""); err != nil {
+		return err
+	}
+
+	h.rang <- dialog
+
+	return nil
+}
+
+func (h *ringingInboundHandler) EndIncoming(reason core.CallEndReason) {
+	h.mu.Lock()
+	h.reasons = append(h.reasons, reason)
+	h.mu.Unlock()
+
+	h.ended <- reason
+}
+
+func (h *ringingInboundHandler) invited() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return len(h.dialogs)
+}
+
+// testInboundDialer builds an inbound-capable dialer over a real user agent.
+// Neither sipgo.NewUA nor NewClient or NewServer opens a socket — only
+// ListenAndServe does, and nothing here calls it.
+func testInboundDialer(t *testing.T, handler InboundHandler) *streamDialer {
+	t.Helper()
+
+	agent, err := sipgo.NewUA(sipgo.WithUserAgent("companion"), sipgo.WithUserAgentHostname("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("sipgo.NewUA() error = %v", err)
+	}
+
+	client, err := sipgo.NewClient(agent)
+	if err != nil {
+		t.Fatalf("sipgo.NewClient() error = %v", err)
+	}
+
+	server, err := sipgo.NewServer(agent)
+	if err != nil {
+		t.Fatalf("sipgo.NewServer() error = %v", err)
+	}
+
+	contact := sip.ContactHeader{Address: sip.Uri{User: "companion", Host: "127.0.0.1", Port: 5070}}
+	dialer := &streamDialer{
+		ua:             agent,
+		server:         server,
+		client:         client,
+		out:            sipgo.NewDialogClientCache(client, contact),
+		in:             sipgo.NewDialogServerCache(client, contact),
+		contact:        contact,
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		listenerCancel: func() {},
+		registerCancel: func() {},
+	}
+
+	if handler != nil {
+		dialer.SetInboundHandler(handler)
+	}
+
+	return dialer
+}
+
+// testInviteRequest builds the INVITE a Flexisip fork of a doorbell call looks
+// like. The transport is TCP because it is reliable, which keeps the transaction
+// from retransmitting its own responses into the recorder.
+func testInviteRequest() *sip.Request {
+	req := sip.NewRequest(sip.INVITE, sip.Uri{Scheme: "sip", User: "companion", Host: "127.0.0.1", Port: 5070})
+	req.SetTransport("TCP")
+
+	via := sip.NewParams()
+	via.Add("branch", sip.GenerateBranch())
+	req.AppendHeader(&sip.ViaHeader{
+		ProtocolName:    "SIP",
+		ProtocolVersion: "2.0",
+		Transport:       "TCP",
+		Host:            "127.0.0.1",
+		Port:            5060,
+		Params:          via,
+	})
+
+	from := sip.NewParams()
+	from.Add("tag", sip.GenerateTagN(12))
+	req.AppendHeader(&sip.FromHeader{
+		DisplayName: "Doorbell",
+		Address:     sip.Uri{Scheme: "sip", User: "doorbell", Host: "127.0.0.1", Port: 5060},
+		Params:      from,
+	})
+	req.AppendHeader(&sip.ToHeader{
+		Address: sip.Uri{Scheme: "sip", User: "companion", Host: "127.0.0.1", Port: 5070},
+		Params:  sip.NewParams(),
+	})
+
+	callID := sip.CallIDHeader("call-" + sip.GenerateTagN(12))
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: 10, MethodName: sip.INVITE})
+	req.AppendHeader(&sip.ContactHeader{
+		Address: sip.Uri{Scheme: "sip", User: "doorbell", Host: "127.0.0.1", Port: 5060},
+		Params:  sip.NewParams(),
+	})
+	req.SetSource("127.0.0.1:5060")
+	req.SetBody(nil)
+
+	return req
+}
+
+// testCancelRequest builds the CANCEL Flexisip sends to the losing handsets,
+// whose Reason header is what tells "the visitor gave up" from "somebody else
+// picked up".
+func testCancelRequest(invite *sip.Request, reason string) *sip.Request {
+	req := sip.NewRequest(sip.CANCEL, invite.Recipient)
+	req.SetTransport(invite.Transport())
+	req.AppendHeader(sip.HeaderClone(invite.Via()))
+	req.AppendHeader(sip.HeaderClone(invite.From()))
+	req.AppendHeader(sip.HeaderClone(invite.To()))
+	req.AppendHeader(sip.HeaderClone(invite.CallID()))
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: invite.CSeq().SeqNo, MethodName: sip.CANCEL})
+
+	if reason != "" {
+		req.AppendHeader(sip.NewHeader("Reason", reason))
+	}
+
+	req.SetSource(invite.Source())
+
+	return req
+}
+
+// testByeRequest builds a BYE inside the dialog the session belongs to. It is
+// built from the session's own invite request, which is the clone carrying the
+// To tag sipgo generated, so the two dialog IDs match.
+func testByeRequest(session *sipgo.DialogServerSession) *sip.Request {
+	invite := session.InviteRequest
+
+	req := sip.NewRequest(sip.BYE, invite.Recipient)
+	req.SetTransport(invite.Transport())
+
+	via := sip.NewParams()
+	via.Add("branch", sip.GenerateBranch())
+	req.AppendHeader(&sip.ViaHeader{
+		ProtocolName:    "SIP",
+		ProtocolVersion: "2.0",
+		Transport:       "TCP",
+		Host:            "127.0.0.1",
+		Port:            5060,
+		Params:          via,
+	})
+	req.AppendHeader(sip.HeaderClone(invite.From()))
+	req.AppendHeader(sip.HeaderClone(invite.To()))
+	req.AppendHeader(sip.HeaderClone(invite.CallID()))
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: invite.CSeq().SeqNo + 1, MethodName: sip.BYE})
+	req.SetSource(invite.Source())
+	req.SetBody(nil)
+
+	return req
+}
+
+// testAckRequest builds the ACK that confirms an answered dialog. Its CSeq must
+// be the INVITE's, which is what sipgo matches it on.
+func testAckRequest(session *sipgo.DialogServerSession) *sip.Request {
+	invite := session.InviteRequest
+
+	req := sip.NewRequest(sip.ACK, invite.Recipient)
+	req.SetTransport(invite.Transport())
+
+	via := sip.NewParams()
+	via.Add("branch", sip.GenerateBranch())
+	req.AppendHeader(&sip.ViaHeader{
+		ProtocolName:    "SIP",
+		ProtocolVersion: "2.0",
+		Transport:       "TCP",
+		Host:            "127.0.0.1",
+		Port:            5060,
+		Params:          via,
+	})
+	req.AppendHeader(sip.HeaderClone(invite.From()))
+	req.AppendHeader(sip.HeaderClone(invite.To()))
+	req.AppendHeader(sip.HeaderClone(invite.CallID()))
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: invite.CSeq().SeqNo, MethodName: sip.ACK})
+	req.SetSource(invite.Source())
+	req.SetBody(nil)
+
+	return req
+}
+
+func serverSessionOf(t *testing.T, dialog IncomingDialog) *sipgo.DialogServerSession {
+	t.Helper()
+
+	incoming, ok := dialog.(*incomingDialog)
+	if !ok {
+		t.Fatalf("inbound dialog type = %T, want *incomingDialog", dialog)
+	}
+
+	session, ok := incoming.session.(*sipgo.DialogServerSession)
+	if !ok {
+		t.Fatalf("inbound session type = %T, want *sipgo.DialogServerSession", incoming.session)
+	}
+
+	return session
+}
+
+// inboundSessionCached reports whether sipgo's server cache still holds the
+// session. Only DialogServerSession.Close removes it from there.
+func inboundSessionCached(t *testing.T, dialer *streamDialer, session *sipgo.DialogServerSession) bool {
+	t.Helper()
+
+	_, err := dialer.in.MatchDialogRequest(session.InviteRequest)
+
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, sipgo.ErrDialogDoesNotExists):
+		return false
+	default:
+		t.Fatalf("MatchDialogRequest() error = %v", err)
+
+		return false
+	}
+}
+
+func waitRinging(t *testing.T, handler *ringingInboundHandler) IncomingDialog {
+	t.Helper()
+
+	select {
+	case dialog := <-handler.rang:
+		return dialog
+	case <-time.After(2 * time.Second):
+		t.Fatal("the inbound handler never rang the call")
+
+		return nil
+	}
+}
+
+func waitDialogState(t *testing.T, session *sipgo.DialogServerSession, want sip.DialogState) {
+	t.Helper()
+
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if session.LoadState() >= want {
+			return
+		}
+	}
+
+	t.Fatalf("dialog state = %v, want at least %v", session.LoadState(), want)
+}
+
+func waitClosed(t *testing.T, done <-chan struct{}, message string) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func responseStatuses(responses []*sip.Response) []int {
+	statuses := make([]int, len(responses))
+	for index, response := range responses {
+		statuses[index] = response.StatusCode
+	}
+
+	return statuses
+}
+
+func TestStreamDialerOnInviteReportsACancelAndLeavesNoSessionBehind(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	session := serverSessionOf(t, waitRinging(t, handler))
+
+	if err := recorder.Receive(testCancelRequest(invite, `SIP;cause=200;text="Call completed elsewhere"`)); err != nil {
+		t.Fatalf("Receive(CANCEL) error = %v", err)
+	}
+
+	select {
+	case reason := <-handler.ended:
+		if reason != core.CallEndReasonElsewhere {
+			t.Fatalf("EndIncoming reason = %q, want %q", reason, core.CallEndReasonElsewhere)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the CANCEL never reached EndIncoming, so the pending call would survive until the manager's expiry")
+	}
+
+	waitClosed(t, returned, "onInvite() did not return after the CANCEL")
+
+	if statuses := responseStatuses(recorder.Result()); len(statuses) != 2 || statuses[0] != 180 || statuses[1] != 487 {
+		t.Fatalf("recorded responses = %v, want [180 487]", statuses)
+	}
+
+	if inboundSessionCached(t, dialer, session) {
+		t.Fatal("the cancelled dialog is still in sipgo's server cache: a CANCEL passes through neither a rejection nor ReadBye, so nothing else ever closes the session")
+	}
+}
+
+// TestStreamDialerOnInviteLeavesAnAnsweredDialogAlive pins the other half of the
+// same rule. onInvite does not live for the whole life of an answered dialog:
+// after the 2xx the INVITE transaction enters RFC 6026's Accepted state and arms
+// Timer_L = 64*T1 = 32s, and when that fires tx.Done() closes on a call that is
+// still up. Terminating the transaction by hand is that moment, 32 seconds early.
+func TestStreamDialerOnInviteLeavesAnAnsweredDialogAlive(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	dialog := waitRinging(t, handler)
+	session := serverSessionOf(t, dialog)
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(context.Background(), 200, "OK", "v=0\r\n") }()
+
+	// The answer blocks until the far end acknowledges it, so the ACK has to be
+	// fed in from here. Waiting on the dialog state rather than on the recorded
+	// responses keeps this off the recorder's unsynchronized message slice.
+	waitDialogState(t, session, sip.DialogStateEstablished)
+
+	ack := testAckRequest(session)
+	dialer.onAck(ack, siptest.NewServerTxRecorder(ack))
+
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("Respond(200) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never completed after the ACK")
+	}
+
+	recorder.Terminate()
+
+	waitClosed(t, returned, "onInvite() did not return once its INVITE transaction had retired")
+
+	if !inboundSessionCached(t, dialer, session) {
+		t.Fatal("the answered dialog was dropped from sipgo's server cache when its INVITE transaction retired, so no BYE for it could ever be matched again")
+	}
+
+	if dialer.loadInboundDialog(session.ID) == nil {
+		t.Fatal("the answered dialog was dropped from the inbound map when its INVITE transaction retired, 32 seconds into a live call")
+	}
+}
+
+func TestStreamDialerOnInviteStaysWithARingingCall(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	waitRinging(t, handler)
+
+	select {
+	case <-returned:
+		t.Fatal("onInvite() returned while the call was only ringing: sipgo terminates the INVITE transaction as soon as the handler returns, and a terminated transaction can no longer carry the 200 OK of an answer that arrives when the user finally picks up")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := recorder.Receive(testCancelRequest(invite, "")); err != nil {
+		t.Fatalf("Receive(CANCEL) error = %v", err)
+	}
+
+	waitClosed(t, returned, "onInvite() did not return after the CANCEL")
+}
+
+func TestStreamDialerOnByeEndsARingingInboundCall(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	session := serverSessionOf(t, waitRinging(t, handler))
+
+	bye := testByeRequest(session)
+	dialer.onBye(bye, siptest.NewServerTxRecorder(bye))
+
+	// onBye reports the end of a ringing call synchronously, so there is
+	// nothing to wait for here.
+	select {
+	case reason := <-handler.ended:
+		if reason != core.CallEndReasonCancelled {
+			t.Fatalf("EndIncoming reason = %q, want %q", reason, core.CallEndReasonCancelled)
+		}
+	default:
+		t.Fatal("the BYE never reached EndIncoming, so the pending call would survive until the manager's expiry while every stream request is refused")
+	}
+
+	waitClosed(t, returned, "onInvite() did not return after the BYE")
+
+	if inboundSessionCached(t, dialer, session) {
+		t.Fatal("the dialog a BYE ended is still in sipgo's server cache")
+	}
+}
+
+// racedCancelTx accepts the cancel hook sipgo's ReadInvite registers and refuses
+// the one the adapter registers right after it, which is exactly what a CANCEL
+// landing in that window does: the transaction is already Completed, and
+// ServerTx.OnCancel answers false because tx.Err() is ErrTransactionCanceled.
+type racedCancelTx struct {
+	mu        sync.Mutex
+	hooks     int
+	responses []*sip.Response
+
+	done chan struct{}
+	acks chan *sip.Request
+}
+
+func newRacedCancelTx() *racedCancelTx {
+	return &racedCancelTx{done: make(chan struct{}), acks: make(chan *sip.Request)}
+}
+
+func (tx *racedCancelTx) Terminate() {}
+
+func (tx *racedCancelTx) OnTerminate(sip.FnTxTerminate) bool { return true }
+
+func (tx *racedCancelTx) Done() <-chan struct{} { return tx.done }
+
+func (tx *racedCancelTx) Err() error { return sip.ErrTransactionCanceled }
+
+func (tx *racedCancelTx) Acks() <-chan *sip.Request { return tx.acks }
+
+func (tx *racedCancelTx) Respond(res *sip.Response) error {
+	tx.mu.Lock()
+	tx.responses = append(tx.responses, res)
+	tx.mu.Unlock()
+
+	return nil
+}
+
+func (tx *racedCancelTx) OnCancel(sip.FnTxCancel) bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	tx.hooks++
+
+	return tx.hooks == 1
+}
+
+func TestStreamDialerOnInviteDropsAnAlreadyCancelledInvite(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, newRacedCancelTx())
+	}()
+
+	waitClosed(t, returned, "onInvite() did not return for an INVITE whose transaction was already cancelled")
+
+	if handler.invited() != 0 {
+		t.Fatal("the manager was told about an INVITE that was already dead: it reserves the slot, publishes IncomingCallStarted and then rolls back, which reports the call as cancelled even when the CANCEL said it was answered elsewhere")
+	}
+
+	select {
+	case reason := <-handler.ended:
+		t.Fatalf("EndIncoming(%q) was called for a dialog the manager was never told about", reason)
+	default:
+	}
+}
+
+func TestStreamDialerCloseWaitsForInboundHandlers(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	waitRinging(t, handler)
+
+	closed := make(chan struct{})
+
+	go func() {
+		defer close(closed)
+
+		_ = dialer.Close()
+	}()
+
+	select {
+	case <-closed:
+		t.Fatal("Close() returned while a goroutine was still inside the inbound handler, free to publish events into the manager")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Whatever wakes the handler — here the transaction being terminated by
+	// hand, in production ua.Close tearing the transaction layer down — Close
+	// must not return before it has.
+	recorder.Terminate()
+
+	waitClosed(t, returned, "onInvite() did not return once its transaction was terminated")
+	waitClosed(t, closed, "Close() did not return once the inbound handler had finished")
 }

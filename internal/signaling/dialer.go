@@ -62,6 +62,8 @@ type streamDialer struct {
 	in                *sipgo.DialogServerCache
 	inboundMu         sync.RWMutex
 	inbound           InboundHandler
+	inboundClosing    bool
+	inboundWG         sync.WaitGroup
 	inboundDialogs    sync.Map
 	contact           sip.ContactHeader
 	target            inviteTarget
@@ -172,10 +174,38 @@ func (d *streamDialer) Close() error {
 		d.listenerCancel()
 		d.registerCancel()
 		d.registerWG.Wait()
+
+		d.inboundMu.Lock()
+		d.inboundClosing = true
+		d.inboundMu.Unlock()
+
+		// The user agent goes down before the inbound handlers are waited for,
+		// not after. An inbound handler parked on its INVITE transaction is
+		// woken only by that transaction being terminated, which is what
+		// ua.Close does, so waiting first would deadlock.
 		d.closeErr = errors.Join(d.server.Close(), d.ua.Close())
+
+		d.inboundWG.Wait()
 	})
 
 	return d.closeErr
+}
+
+// trackInbound registers a goroutine that may call into the inbound handler, so
+// Close can wait for it, and reports whether it may run at all. It refuses once
+// Close has begun: a request that races the shutdown must not add to a wait
+// group that is already being waited on.
+func (d *streamDialer) trackInbound() bool {
+	d.inboundMu.Lock()
+	defer d.inboundMu.Unlock()
+
+	if d.inboundClosing {
+		return false
+	}
+
+	d.inboundWG.Add(1)
+
+	return true
 }
 
 func (d *streamDialer) listen(ctx context.Context, addr string) {
@@ -214,7 +244,23 @@ func (d *streamDialer) onBye(req *sip.Request, tx sip.ServerTransaction) {
 // refused meanwhile. A BYE for a call that was answered ends an *active* dialog
 // instead, which is Manager.RemoteDialogEnded's job — wiring it is the next
 // task, and this is the branch it belongs in.
+//
+// Two deviations from RFC 3261 are deliberate, and both follow from that
+// constraint. A BYE on a dialog that was never established should be answered
+// 481 Call/Transaction Does Not Exist; it is accepted instead, because refusing
+// it would leave the ringing call pending. And sipgo's ReadBye terminates the
+// INVITE transaction without putting a final response on it, so the caller sees
+// its INVITE die unanswered; that is tolerated for the same reason. A far end
+// that wants a clean 487 sends a CANCEL, which is the normal case.
 func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) {
+	if !d.trackInbound() {
+		d.logger.Warn("inbound sip bye dropped during shutdown")
+
+		return
+	}
+
+	defer d.inboundWG.Done()
+
 	session, err := d.in.MatchDialogRequest(req)
 	if err != nil {
 		d.logger.Warn("remote sip bye rejected", "error", err)
@@ -233,15 +279,22 @@ func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) 
 		return
 	}
 
-	switch {
-	case dialog != nil && d.endPendingIncoming(dialog, cancelReason(req), "bye"):
-	case answered:
+	// endPendingIncoming is called for its effect, so it stays out of the
+	// branch conditions of a switch, where the reader would have to know the
+	// evaluation order to know whether it runs at all.
+	if dialog != nil && d.endPendingIncoming(dialog, cancelReason(req), "bye") {
+		return
+	}
+
+	if answered {
 		// The next task hands this to Manager.RemoteDialogEnded, which clears
 		// the active call without sending a BYE back.
 		d.logger.Info("inbound sip call ended by remote", "dialog_id", inboundDialogID(dialog))
-	default:
-		d.logger.Debug("inbound sip bye ignored", "dialog_id", inboundDialogID(dialog))
+
+		return
 	}
+
+	d.logger.Debug("inbound sip bye ignored", "dialog_id", inboundDialogID(dialog))
 }
 
 func (d *streamDialer) notifyRemoteDialogEnded() {
@@ -574,13 +627,22 @@ func (d *streamDialer) inboundHandler() InboundHandler {
 	return d.inbound
 }
 
-// onInvite serves an inbound INVITE for the whole life of its dialog.
+// onInvite serves an inbound INVITE until the call is either answered or over.
 //
-// It deliberately does not return while the call is up. sipgo terminates the
-// INVITE server transaction as soon as this handler returns — Server.handleRequest
-// calls tx.TerminateGracefully, which on a reliable transport terminates outright
-// — and a terminated transaction can no longer carry the 200 OK of an answer
-// that arrives seconds later, when the user finally picks up.
+// It deliberately does not return while the call is only ringing. sipgo
+// terminates the INVITE server transaction as soon as this handler returns —
+// Server.handleRequest calls tx.TerminateGracefully, which on a reliable
+// transport terminates outright — and a terminated transaction can no longer
+// carry the 200 OK of an answer that arrives seconds later, when the user
+// finally picks up.
+//
+// It does not, however, live for the whole life of an answered dialog, and must
+// not be read as doing so. After a 2xx the INVITE transaction enters RFC 6026's
+// Accepted state and arms Timer_L = 64*T1 = 32s; when that fires the transaction
+// is deleted and tx.Done() closes. So this handler returns 32 seconds into every
+// answered call, and an answered dialog outlives it: the teardown below runs
+// only for a dialog that is actually over, and a live one stays in the inbound
+// map and in sipgo's server cache until a BYE, a Hangup or the manager ends it.
 func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	handler := d.inboundHandler()
 	if handler == nil || d.in == nil {
@@ -588,6 +650,17 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		return
 	}
+
+	// Close waits for this goroutine, because it can still be inside
+	// handler.OnInvite — publishing events into the manager — long after the
+	// listener has been told to stop.
+	if !d.trackInbound() {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
+
+		return
+	}
+
+	defer d.inboundWG.Done()
 
 	session, err := d.in.ReadInvite(req, tx)
 	if err != nil {
@@ -605,7 +678,43 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	dialog := &incomingDialog{session: session, id: dialogID}
 
 	d.inboundDialogs.Store(session.ID, dialog)
-	defer d.inboundDialogs.Delete(session.ID)
+
+	// The map entry lives exactly as long as the dialog, which is why this
+	// handler cannot own it: the handler returns 32 seconds into an answered
+	// call while the dialog goes on. Every way a dialog ends — a CANCEL, a
+	// rejection, a BYE from either side, a local hangup — drives it to Ended,
+	// so this fires exactly once and never for a call that is still up.
+	session.OnState(func(state sip.DialogState) {
+		if state == sip.DialogStateEnded {
+			d.inboundDialogs.Delete(session.ID)
+		}
+	})
+
+	// Closing is the only thing that drops the session from sipgo's server
+	// cache — DialogServerCache.ReadInvite is what installs the onClose that
+	// deletes it — and nothing in the library does it for a CANCEL: the
+	// transaction layer emits the 487 itself and sipgo's own hook only ends the
+	// dialog. Without this, every cancelled call leaks its session, cloned
+	// INVITE and context for the life of the process, and a doorbell call
+	// forked to several handsets and answered on one of them takes exactly that
+	// path.
+	//
+	// The one dialog that must survive is a live answered one, which is why
+	// this is not unconditional. Everything else that gets here is over: an
+	// unanswered dialog whose transaction died is dead whether or not sipgo has
+	// marked it Ended yet — ServerTx closes its done channel before it calls
+	// the hook that ends the dialog, so tx.Done() can win that race.
+	defer func() {
+		switch session.LoadState() {
+		case sip.DialogStateEstablished, sip.DialogStateConfirmed:
+			d.logger.Debug("inbound sip invite transaction retired", "dialog_id", string(dialogID))
+
+			return
+		}
+
+		_ = session.Close()
+		d.logger.Debug("inbound sip dialog closed", "dialog_id", string(dialogID))
+	}()
 
 	// A CANCEL that matches this INVITE is answered, turned into a 487 and
 	// reported through this hook by the transaction layer itself: it never
@@ -613,30 +722,46 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	// manager is told about the call keeps a CANCEL that races the 180 Ringing
 	// from being lost.
 	if !tx.OnCancel(func(cancel *sip.Request) {
-		// The transaction must not be blocked in here, hence the goroutine.
-		go d.endPendingIncoming(dialog, cancelReason(cancel), "cancel")
+		// The transaction must not be blocked in here, hence the goroutine —
+		// which Close waits for too, because it ends up in the manager.
+		if !d.trackInbound() {
+			return
+		}
+
+		go func() {
+			defer d.inboundWG.Done()
+
+			d.endPendingIncoming(dialog, cancelReason(cancel), "cancel")
+		}()
 	}) {
-		d.logger.Warn("inbound sip cancel hook unavailable", "dialog_id", string(dialogID))
+		// A false answer means this INVITE is already dead: it was cancelled or
+		// terminated in the few instructions between ReadInvite, which
+		// registers a hook of its own, and this one. The manager must not hear
+		// about it at all. Telling it would reserve the incoming slot and
+		// publish IncomingCallStarted for a call that can no longer be rung,
+		// and the rollback that follows reports it as cancelled — misreporting
+		// a call answered on another handset, whose CANCEL carried cause=200.
+		d.logger.Warn("inbound sip invite already terminated", "dialog_id", string(dialogID))
+
+		return
 	}
 
 	d.logger.Info("inbound sip invite received", "dialog_id", string(dialogID))
 
 	if err := handler.OnInvite(context.Background(), dialog); err != nil {
 		d.logger.Warn("inbound invite handling failed", "dialog_id", string(dialogID), "error", err)
-		_ = session.Close()
 
 		return
 	}
 
-	// Both are needed: the dialog context ends on a BYE, a rejection, an answer
-	// that is later hung up or a CANCEL, and the transaction ends on its own
-	// timeout when the far end stops talking without any of that happening.
+	// Both are needed: the dialog context ends on a BYE, a rejection, a CANCEL
+	// or an answered call being hung up, and the transaction ends on its own —
+	// when it times out with the far end silent, and 32 seconds after every
+	// answer, when Timer_L retires it.
 	select {
 	case <-session.Context().Done():
 	case <-tx.Done():
 	}
-
-	d.logger.Debug("inbound sip dialog closed", "dialog_id", string(dialogID))
 }
 
 // onCancel answers a CANCEL the transaction layer could not match to an INVITE
@@ -740,15 +865,24 @@ var _ IncomingDialog = (*incomingDialog)(nil)
 
 func (d *incomingDialog) ID() core.DialogID { return d.id }
 
-// Respond sends a provisional or final response. A non-empty body always means
-// the 200 OK answer, for which RespondSDP builds the correct headers.
+// Respond sends a provisional or final response.
+//
+// What a response is follows from its status alone: below 200 provisional,
+// 2xx the answer, anything above a rejection. Discriminating on the body
+// instead would send a bodyless 200 OK down the rejection path — closing and
+// dropping from sipgo's server cache the very dialog that response has just
+// established, after which no BYE for it can be matched — and would send a
+// provisional carrying early SDP as an answer.
 //
 // Only the first final response is sent. A later one is refused with
 // ErrDialogConcluded rather than dropped silently, so a caller that believes it
 // answered the call — and would go on to set up media for it — is told that
 // somebody else concluded the dialog first.
 func (d *incomingDialog) Respond(_ context.Context, status int, reason, body string) error {
-	answer := body != ""
+	var payload []byte
+	if body != "" {
+		payload = []byte(body)
+	}
 
 	d.mu.Lock()
 
@@ -758,10 +892,10 @@ func (d *incomingDialog) Respond(_ context.Context, status int, reason, body str
 		return ErrDialogConcluded
 	}
 
-	if !answer && status < 200 {
+	if status < 200 {
 		defer d.mu.Unlock()
 
-		if err := d.session.Respond(status, reason, nil); err != nil {
+		if err := d.session.Respond(status, reason, payload); err != nil {
 			return fmt.Errorf("sip provisional response: %w", err)
 		}
 
@@ -776,8 +910,18 @@ func (d *incomingDialog) Respond(_ context.Context, status int, reason, body str
 	d.concluded = true
 	d.mu.Unlock()
 
-	if answer {
-		if err := d.session.RespondSDP([]byte(body)); err != nil {
+	if status < 300 {
+		// RespondSDP builds the Content-Type and Content-Length an SDP answer
+		// needs, and refuses a nil body, so a bodyless 2xx goes out plain.
+		if payload == nil {
+			if err := d.session.Respond(status, reason, nil); err != nil {
+				return fmt.Errorf("sip answer response: %w", err)
+			}
+
+			return nil
+		}
+
+		if err := d.session.RespondSDP(payload); err != nil {
 			return fmt.Errorf("sip answer response: %w", err)
 		}
 
