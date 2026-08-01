@@ -25,8 +25,14 @@ func BuildOffer(host, devAddr string) string {
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
-func BuildAnswer(host string) string {
+func BuildAnswer(host, devAddr string) string {
 	lines := sessionLines(host, "3747", "461")
+
+	devAddr = strings.TrimSpace(devAddr)
+	if devAddr != "" {
+		lines = append(lines, "a=DEVADDR:"+devAddr)
+	}
+
 	lines = append(lines, mediaLines()...)
 
 	return strings.Join(lines, "\r\n") + "\r\n"

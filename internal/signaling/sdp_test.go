@@ -24,7 +24,7 @@ func TestBuildOfferUsesIngestPortsAndDevAddr(t *testing.T) {
 func TestBuildAnswerUsesDummySIPPorts(t *testing.T) {
 	t.Parallel()
 
-	answer := BuildAnswer("0.0.0.0")
+	answer := BuildAnswer("0.0.0.0", "")
 
 	for _, line := range []string{
 		"o=companion 3747 461 IN IP4 127.0.0.1",
@@ -34,5 +34,32 @@ func TestBuildAnswerUsesDummySIPPorts(t *testing.T) {
 		if !strings.Contains(answer, line) {
 			t.Fatalf("answer does not contain %q: %s", line, answer)
 		}
+	}
+}
+
+func TestBuildAnswerIncludesDevAddr(t *testing.T) {
+	t.Parallel()
+
+	answer := BuildAnswer("192.0.2.10", "21")
+
+	if !strings.Contains(answer, "a=DEVADDR:21") {
+		t.Fatalf("answer missing DEVADDR: %s", answer)
+	}
+
+	devAddrIndex := strings.Index(answer, "a=DEVADDR:21")
+	audioIndex := strings.Index(answer, "m=audio")
+
+	if devAddrIndex < 0 || audioIndex < 0 || devAddrIndex > audioIndex {
+		t.Fatalf("DEVADDR must precede the media sections: %s", answer)
+	}
+}
+
+func TestBuildAnswerOmitsEmptyDevAddr(t *testing.T) {
+	t.Parallel()
+
+	answer := BuildAnswer("192.0.2.10", "")
+
+	if strings.Contains(answer, "DEVADDR") {
+		t.Fatalf("answer must not contain DEVADDR when devaddr is empty: %s", answer)
 	}
 }

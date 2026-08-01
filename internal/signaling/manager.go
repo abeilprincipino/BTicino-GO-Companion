@@ -77,7 +77,7 @@ func (m *Manager) Answer(ctx context.Context) error {
 		return ErrNoIncomingDialog
 	}
 
-	if err := m.incoming.Respond(ctx, 200, "OK", BuildAnswer(m.host)); err != nil {
+	if err := m.incoming.Respond(ctx, 200, "OK", BuildAnswer(m.host, "")); err != nil {
 		return err
 	}
 
