@@ -61,6 +61,8 @@ func run(
 		appLogger.Info("configuration created", "path", configPath)
 	}
 
+	migrateSIPSection(configStore, appLogger, configPath)
+
 	appLogger.Info("application starting", "config_path", configPath)
 
 	if setLogLevel != nil {
@@ -735,6 +737,24 @@ func checkUpdates(ctx context.Context, updater *system.Updater, broadcast func()
 		}
 
 		broadcast()
+	}
+}
+
+// migrateSIPSection persists the companion.sip section on installations whose
+// config.yaml was written before that section existed, so the installer finds an
+// inbound: key to enable. It is a no-op once the section is on disk. A failure
+// costs only the migration: the in-memory configuration already carries the SIP
+// defaults, so the companion must keep starting.
+func migrateSIPSection(store *config.Store, logger *slog.Logger, path string) {
+	migrated, err := store.EnsureSIPSection()
+	if err != nil {
+		logger.Warn("persisting the sip configuration section failed", "path", path, "error", err)
+
+		return
+	}
+
+	if migrated {
+		logger.Info("persisted the missing sip configuration section", "path", path)
 	}
 }
 

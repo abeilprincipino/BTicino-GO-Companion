@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -301,6 +303,293 @@ func TestSIPSettingsRoundTrip(t *testing.T) {
 
 	if loaded.Companion.SIP.From != "companion@127.0.0.1:5075" {
 		t.Fatalf("From = %q, want companion@127.0.0.1:5075", loaded.Companion.SIP.From)
+	}
+}
+
+// legacyConfigWithoutSIP reproduces a config.yaml written before the
+// companion.sip section existed. Every other value is deliberately non-default
+// so a rewrite that dropped, reordered or defaulted a field would be visible.
+const legacyConfigWithoutSIP = `companion:
+    entrypoints:
+        - id: main
+          label: Main Gate
+          devaddr: "20"
+          capabilities:
+            stream: true
+            unlock: false
+            ring: true
+        - id: side
+          label: Side Door
+          devaddr: "21"
+          capabilities:
+            stream: true
+            unlock: true
+            ring: false
+logging:
+    level: debug
+auth:
+    home_assistant:
+        pairing_state: claimed
+        instance_id: 0123456789abcdef0123456789abcdef
+        bearer_token_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+    webui:
+        admin_username: admin
+        admin_password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+        session_secret: "00112233445566778899aabbccddeeff"
+system:
+    reboot:
+        enabled: true
+    updates:
+        enabled: false
+        exposed: true
+    services:
+        companion:
+            enabled: true
+            exposed: false
+        dropbear:
+            enabled: false
+            exposed: true
+homekit:
+    enabled: true
+    pin: "123-45-679"
+    setup_id: 7QWE
+    name: Casa Rossi
+`
+
+// configWithSIPSection returns the same document with a companion.sip section,
+// so both fixtures stay in sync.
+func configWithSIPSection(t *testing.T) string {
+	t.Helper()
+
+	const section = `    sip:
+        from: companion@127.0.0.1:5070
+        auth_user: ""
+        auth_pass: ""
+        listen: 127.0.0.1:5070
+        transport: tcp
+        domain: ""
+        inbound: false
+`
+
+	if !strings.Contains(legacyConfigWithoutSIP, "logging:\n") {
+		t.Fatal("fixture no longer contains a logging section")
+	}
+
+	return strings.Replace(legacyConfigWithoutSIP, "logging:\n", section+"logging:\n", 1)
+}
+
+func TestSIPSectionPersistedReadsTheDocumentNotTheDefaults(t *testing.T) {
+	t.Parallel()
+
+	for name, testCase := range map[string]struct {
+		document string
+		want     bool
+	}{
+		"absent":  {document: legacyConfigWithoutSIP, want: false},
+		"present": {document: configWithSIPSection(t), want: true},
+		"partial": {
+			document: strings.Replace(legacyConfigWithoutSIP, "logging:\n", "    sip:\n        inbound: true\nlogging:\n", 1),
+			want:     true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(testCase.document), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			got, err := sipSectionPersisted(path)
+			if err != nil {
+				t.Fatalf("sipSectionPersisted() error = %v", err)
+			}
+
+			if got != testCase.want {
+				t.Fatalf("sipSectionPersisted() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestEnsureSIPSectionLeavesAnExistingSectionUntouched(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	before := []byte(configWithSIPSection(t))
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	migrated, err := store.EnsureSIPSection()
+	if err != nil {
+		t.Fatalf("EnsureSIPSection() error = %v", err)
+	}
+
+	if migrated {
+		t.Fatal("EnsureSIPSection() = true, want false when the section is already persisted")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	if !bytes.Equal(before, after) {
+		t.Fatalf("config was rewritten:\n%s", after)
+	}
+}
+
+func TestEnsureSIPSectionPersistsAnAbsentSectionOnceWithInboundOff(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	migrated, err := store.EnsureSIPSection()
+	if err != nil {
+		t.Fatalf("EnsureSIPSection() error = %v", err)
+	}
+
+	if !migrated {
+		t.Fatal("EnsureSIPSection() = false, want true when the section is absent")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var document map[string]any
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	if value, ok := yamlPath(document, "companion.sip.inbound"); !ok || value != false {
+		t.Fatalf("companion.sip.inbound = %#v (present=%v), want false", value, ok)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config mode = %o, want 600", info.Mode().Perm())
+	}
+
+	// A second run must not rewrite the file: the section is now persisted.
+	migrated, err = store.EnsureSIPSection()
+	if err != nil {
+		t.Fatalf("second EnsureSIPSection() error = %v", err)
+	}
+
+	if migrated {
+		t.Fatal("second EnsureSIPSection() = true, want false")
+	}
+
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read config: %v", err)
+	}
+
+	if !bytes.Equal(data, again) {
+		t.Fatalf("second run rewrote the config:\n%s", again)
+	}
+}
+
+func TestEncodeAddsTheSIPSectionWithoutLosingPersistedValues(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	source := filepath.Join(directory, "config.yaml")
+
+	if err := os.WriteFile(source, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	loaded, err := Load(source)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	data, err := encode(loaded)
+	if err != nil {
+		t.Fatalf("encode() error = %v", err)
+	}
+
+	var document map[string]any
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode encoded config: %v", err)
+	}
+
+	for path, want := range map[string]any{
+		"companion.entrypoints.0.id":                  "main",
+		"companion.entrypoints.0.label":               "Main Gate",
+		"companion.entrypoints.0.devaddr":             "20",
+		"companion.entrypoints.0.capabilities.stream": true,
+		"companion.entrypoints.0.capabilities.unlock": false,
+		"companion.entrypoints.0.capabilities.ring":   true,
+		"companion.sip.from":                          "companion@127.0.0.1:5070",
+		"companion.sip.listen":                        "127.0.0.1:5070",
+		"companion.sip.transport":                     "tcp",
+		"companion.sip.inbound":                       false,
+		"logging.level":                               "debug",
+		"auth.home_assistant.pairing_state":           "claimed",
+		"auth.home_assistant.instance_id":             "0123456789abcdef0123456789abcdef",
+		"auth.home_assistant.bearer_token_hash":       "1111111111111111111111111111111111111111111111111111111111111111",
+		"auth.webui.admin_username":                   "admin",
+		"auth.webui.admin_password_hash":              "$2a$10$abcdefghijklmnopqrstuv",
+		"auth.webui.session_secret":                   "00112233445566778899aabbccddeeff",
+		"system.reboot.enabled":                       true,
+		"system.updates.enabled":                      false,
+		"system.updates.exposed":                      true,
+		"system.services.companion.enabled":           true,
+		"system.services.companion.exposed":           false,
+		"system.services.dropbear.enabled":            false,
+		"system.services.dropbear.exposed":            true,
+		"homekit.enabled":                             true,
+		"homekit.pin":                                 "123-45-679",
+		"homekit.setup_id":                            "7QWE",
+		"homekit.name":                                "Casa Rossi",
+	} {
+		got, ok := yamlPath(document, path)
+		if !ok {
+			t.Errorf("missing YAML key path %q", path)
+
+			continue
+		}
+
+		if got != want {
+			t.Errorf("YAML value at %q = %#v, want %#v", path, got, want)
+		}
+	}
+
+	target := filepath.Join(directory, "reencoded.yaml")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatalf("write encoded config: %v", err)
+	}
+
+	reloaded, err := Load(target)
+	if err != nil {
+		t.Fatalf("Load(re-encoded) error = %v", err)
+	}
+
+	if !reflect.DeepEqual(reloaded, loaded) {
+		t.Fatalf("re-encoded config = %#v, want %#v", reloaded, loaded)
 	}
 }
 
