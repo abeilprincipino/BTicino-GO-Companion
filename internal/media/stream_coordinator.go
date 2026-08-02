@@ -108,6 +108,11 @@ type StreamCoordinator struct {
 	stopping       bool
 	observer       StreamStateObserver
 	logger         *slog.Logger
+	// answeredCallProbe reports whether a stream seen as external belongs to an
+	// inbound call the companion has answered. Nil until the application wires
+	// signaling in, and a nil probe keeps the original behaviour of refusing
+	// every externally owned stream.
+	answeredCallProbe func() bool
 }
 
 // SetStateObserver receives source transitions after their coordinator state is committed.
@@ -120,6 +125,33 @@ func (c *StreamCoordinator) SetStateObserver(observer StreamStateObserver) {
 	if observer != nil {
 		observer(snapshot)
 	}
+}
+
+// SetAnsweredCallProbe supplies the predicate that tells the coordinator whether
+// a stream it sees as external belongs to a call the companion has answered.
+// Such a stream is the companion's to take: the intercom starts its AV while
+// ringing, long before the user answers, so without this an answered call could
+// never reach a lease.
+func (c *StreamCoordinator) SetAnsweredCallProbe(probe func() bool) {
+	c.mu.Lock()
+	c.answeredCallProbe = probe
+	c.mu.Unlock()
+}
+
+// answeredCall runs the probe with c.mu released.
+//
+// The probe locks the signaling manager. Calling it under c.mu would order c.mu
+// before that lock, the reverse of every path that starts in signaling and ends
+// in a read of the coordinator snapshot, so the two orders together would
+// deadlock. The verdict is therefore taken a moment before the critical section
+// that uses it; a call cannot end in that window without the ordinary teardown
+// path observing it.
+func (c *StreamCoordinator) answeredCall() bool {
+	c.mu.Lock()
+	probe := c.answeredCallProbe
+	c.mu.Unlock()
+
+	return probe != nil && probe()
 }
 
 func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *StreamCoordinator {
@@ -175,12 +207,18 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 }
 
 func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint) (*StreamLease, error) {
+	answered := c.answeredCall()
+
 	c.mu.Lock()
 	if c.snapshot.Owner == StreamOwnerExternal {
-		c.mu.Unlock()
-		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
+		if !answered {
+			c.mu.Unlock()
+			c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 
-		return nil, ErrExternalStream
+			return nil, ErrExternalStream
+		}
+
+		c.logger.InfoContext(ctx, "external stream adopted for answered call", "entrypoint_id", entrypoint.ID)
 	}
 
 	if c.leaseID != 0 || c.factory == nil {

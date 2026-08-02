@@ -310,3 +310,55 @@ func (s *backchannelManagedSource) WriteBackchannelRTP(packet *rtp.Packet) error
 	s.packet = packet
 	return nil
 }
+
+func TestStreamCoordinatorAdoptsExternalStreamForAnsweredCall(t *testing.T) {
+	c := NewStreamCoordinator(nil, testManagedSourceFactory())
+	c.SetAnsweredCallProbe(func() bool { return true })
+
+	// The intercom starts its own AV while the call rings, which is what marks
+	// the stream external before anyone asks for a lease.
+	c.ObserveControlTrack(true)
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v, want nil", err)
+	}
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerCompanion {
+		t.Fatalf("owner = %q, want %q", owner, StreamOwnerCompanion)
+	}
+
+	if !c.Release(lease) {
+		t.Fatal("release source lease")
+	}
+}
+
+func TestStreamCoordinatorRejectsExternalStreamWithoutAnsweredCall(t *testing.T) {
+	c := NewStreamCoordinator(nil, testManagedSourceFactory())
+	c.SetAnsweredCallProbe(func() bool { return false })
+	c.ObserveControlTrack(true)
+
+	_, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if !errors.Is(err, ErrExternalStream) {
+		t.Fatalf("Acquire() error = %v, want ErrExternalStream", err)
+	}
+}
+
+func TestStreamCoordinatorAnsweredCallDoesNotOverrideABusyLease(t *testing.T) {
+	c := NewStreamCoordinator(nil, testManagedSourceFactory())
+	c.SetAnsweredCallProbe(func() bool { return true })
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if !errors.Is(err, ErrStreamBusy) {
+		t.Fatalf("second Acquire() error = %v, want ErrStreamBusy — the lease stays exclusive", err)
+	}
+
+	if !c.Release(lease) {
+		t.Fatal("release source lease")
+	}
+}
