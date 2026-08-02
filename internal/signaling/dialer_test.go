@@ -249,8 +249,15 @@ func (h *fakeInboundHandler) collected() []core.CallEndReason {
 	return append([]core.CallEndReason(nil), h.reasons...)
 }
 
+// discardLogger keeps a dialog's own log lines — an answer left unacknowledged
+// is warned about, by a goroutine that outlives the call that abandoned it — off
+// the test output.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func testDialer(handler InboundHandler) *streamDialer {
-	dialer := &streamDialer{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	dialer := &streamDialer{logger: discardLogger()}
 	if handler != nil {
 		dialer.SetInboundHandler(handler)
 	}
@@ -426,6 +433,101 @@ func TestIncomingDialogRespondRoutesOnTheStatusNotTheBody(t *testing.T) {
 			t.Fatal("endPending() = false: a 183 is provisional and leaves the call pending")
 		}
 	})
+}
+
+// TestIncomingDialogAnswerStopsWaitingOnceTheAnswerIsOnTheWire pins the bound on
+// an answer. sipgo keeps retransmitting a 200 OK until the ACK arrives or its
+// INVITE transaction is retired 32s later, with no context anywhere, and the
+// error it finally returns is an error about the ACK — not about the answer,
+// which is long gone. Reporting that to the caller fails an answered call: the
+// card never starts media for it, and never shows the button that hangs it up.
+func TestIncomingDialogAnswerStopsWaitingOnceTheAnswerIsOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	// The write is held for as long as sipgo's retransmit loop would hold it, on
+	// an Established dialog: the answer has been handed to the transaction and
+	// only the ACK is outstanding.
+	session := &fakeServerSession{state: sip.DialogStateEstablished, release: make(chan struct{})}
+	defer close(session.release)
+
+	dialog := &incomingDialog{session: session, id: "call-1", logger: discardLogger()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(ctx, 200, "OK", "v=0") }()
+
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("Respond(200) error = %v, want nil: the answer is on the wire, and failing it strands a call the intercom has connected", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Respond(200) never returned: the caller's context does not bound the wait for the ACK, so an HTTP request sits here for sipgo's full 32s")
+	}
+}
+
+// TestIncomingDialogAnswerWaitsWithoutEvidenceTheAnswerWasSent pins the other
+// half of the same rule. Expiry is reported as success only because sipgo marks
+// the dialog Established before it responds on the transaction; a dialog it has
+// not marked says nothing about the answer having been sent, and there is then
+// nothing to report but the wait itself.
+func TestIncomingDialogAnswerWaitsWithoutEvidenceTheAnswerWasSent(t *testing.T) {
+	t.Parallel()
+
+	session := &fakeServerSession{release: make(chan struct{})}
+	dialog := &incomingDialog{session: session, id: "call-1", logger: discardLogger()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(ctx, 200, "OK", "v=0") }()
+
+	select {
+	case err := <-answered:
+		t.Fatalf("Respond(200) returned (error = %v) for an answer nothing says was ever sent", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(session.release)
+
+	if err := <-answered; err != nil {
+		t.Fatalf("Respond(200) error = %v", err)
+	}
+}
+
+// TestIncomingDialogRejectionStopsWaitingForItsAck pins the bound on the other
+// blocking final response: Hangup answers a ringing call with a 603, and sipgo
+// then waits for an ACK it treats as optional — that wait ends in success
+// whether the ACK arrives or the transaction times out 32s later, so a caller
+// that stops waiting for it gives up on nothing it would have been told about.
+func TestIncomingDialogRejectionStopsWaitingForItsAck(t *testing.T) {
+	t.Parallel()
+
+	session := &fakeServerSession{release: make(chan struct{})}
+	defer close(session.release)
+
+	dialog := &incomingDialog{session: session, id: "call-1", logger: discardLogger()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	declined := make(chan error, 1)
+
+	go func() { declined <- dialog.Respond(ctx, 603, "Decline", "") }()
+
+	select {
+	case err := <-declined:
+		if err != nil {
+			t.Fatalf("Respond(603) error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Respond(603) never returned: the caller's context does not bound the wait for the ACK, so hanging up a ringing call sits here for sipgo's full 32s")
+	}
 }
 
 func TestIncomingDialogEndPendingClaimsRingingDialogOnce(t *testing.T) {

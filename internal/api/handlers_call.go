@@ -9,14 +9,20 @@ import (
 )
 
 // callControlTimeout bounds how long an HTTP request waits on the SIP layer.
-// Answer blocks for the caller's ACK and Hangup blocks for the BYE response;
-// both retransmit for up to 32s before giving up on an unresponsive peer, but
-// the peer here is the intercom's own SIP stack on localhost, which acks in
+// Answer waits for the caller's ACK and Hangup for the BYE response; sipgo
+// retransmits for up to 32s before it gives up on an unresponsive peer, but the
+// peer here is the intercom's own SIP stack on localhost, which acks in
 // milliseconds under normal operation. A few seconds gives that generous
 // headroom without holding the HTTP request (and the button-press UI) open
 // anywhere near the full 32s worst case. It also matches the timeouts the
 // signaling manager already uses internally for its own localhost responses
 // (see signaling.Manager's respondCtx/byeCtx).
+//
+// What this bounds is the wait, not the response. The signaling layer honours the
+// context for an inbound final response and reports a 200 OK that is already on
+// the wire as sent, so a missing ACK costs the button press this timeout — it
+// does not report a failure for a call the intercom has connected (see
+// signaling's incomingDialog.answer).
 const callControlTimeout = 5 * time.Second
 
 func (s *Server) answerCall(w http.ResponseWriter, r *http.Request) {

@@ -704,7 +704,7 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		dialogID = core.DialogID(callID.Value())
 	}
 
-	dialog := &incomingDialog{session: session, id: dialogID}
+	dialog := &incomingDialog{session: session, id: dialogID, logger: d.logger}
 
 	d.inboundDialogs.Store(session.ID, dialog)
 
@@ -883,6 +883,7 @@ type serverSession interface {
 type incomingDialog struct {
 	session serverSession
 	id      core.DialogID
+	logger  *slog.Logger
 
 	// mu guards the two fields below and is held across a provisional response,
 	// so a final one can never start writing while a 180 is still on the wire.
@@ -908,7 +909,11 @@ func (d *incomingDialog) ID() core.DialogID { return d.id }
 // ErrDialogConcluded rather than dropped silently, so a caller that believes it
 // answered the call — and would go on to set up media for it — is told that
 // somebody else concluded the dialog first.
-func (d *incomingDialog) Respond(_ context.Context, status int, reason, body string) error {
+//
+// ctx bounds a final response, which is the only kind that waits for the far
+// end: a provisional one is written and done. See answer and reject for what
+// giving up on that wait does and does not mean.
+func (d *incomingDialog) Respond(ctx context.Context, status int, reason, body string) error {
 	var payload []byte
 	if body != "" {
 		payload = []byte(body)
@@ -935,32 +940,109 @@ func (d *incomingDialog) Respond(_ context.Context, status int, reason, body str
 	}
 
 	// The final response is claimed under the lock and written with it
-	// released: answering blocks until the far end acknowledges, and nothing
-	// else may be written on this dialog afterwards anyway.
+	// released: writing it waits for the far end, and nothing else may be
+	// written on this dialog afterwards anyway.
 	d.concluded = true
 	d.mu.Unlock()
 
 	if status < 300 {
-		// RespondSDP builds the Content-Type and Content-Length an SDP answer
-		// needs, and refuses a nil body, so a bodyless 2xx goes out plain.
-		if payload == nil {
-			if err := d.session.Respond(status, reason, nil); err != nil {
-				return fmt.Errorf("sip answer response: %w", err)
-			}
+		return d.answer(ctx, status, reason, payload)
+	}
 
-			return nil
-		}
+	return d.reject(ctx, status, reason)
+}
 
-		if err := d.session.RespondSDP(payload); err != nil {
+// answer sends the 2xx and stops waiting when ctx expires, which is not the same
+// as abandoning the answer.
+//
+// sipgo takes no context here: DialogServerSession.WriteResponse hands the 200 OK
+// to the INVITE transaction and then stays in a retransmit loop until the ACK
+// arrives or Timer_L retires the transaction, 64*T1 = 32s later. Waiting all of
+// that out is what made an answered call report a failure: the caller's own
+// deadline expired long before, and the error that finally came back was reported
+// for a call the intercom had already connected. A card told its answer failed
+// never starts media for it — and never shows the button that would hang it up.
+//
+// So expiry is reported as success, but only against evidence. WriteResponse
+// stores the response on the dialog and marks it Established before it responds
+// on the transaction, so an Established dialog is one whose answer sipgo has
+// already committed to sending. That state is stored atomically, which is also
+// what publishes the stored response to whoever runs next: sipgo documents
+// Dialog.InviteResponse as not thread safe, and Bye reads it. Without the
+// evidence there is nothing to report but the wait itself, so the caller waits.
+//
+// The write is left to finish either way. It is the only thing that retransmits
+// the answer, and cutting it short would abandon the ACK the moment a caller
+// stopped watching for it.
+func (d *incomingDialog) answer(ctx context.Context, status int, reason string, payload []byte) error {
+	done := make(chan error, 1)
+
+	go func() { done <- d.writeAnswer(status, reason, payload) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+
+	if d.session.LoadState() < sip.DialogStateEstablished {
+		return <-done
+	}
+
+	d.reportAbandoned(done, "inbound sip answer left unacknowledged")
+
+	return nil
+}
+
+func (d *incomingDialog) writeAnswer(status int, reason string, payload []byte) error {
+	// RespondSDP builds the Content-Type and Content-Length an SDP answer needs,
+	// and refuses a nil body, so a bodyless 2xx goes out plain.
+	if payload == nil {
+		if err := d.session.Respond(status, reason, nil); err != nil {
 			return fmt.Errorf("sip answer response: %w", err)
 		}
 
 		return nil
 	}
 
+	if err := d.session.RespondSDP(payload); err != nil {
+		return fmt.Errorf("sip answer response: %w", err)
+	}
+
+	return nil
+}
+
+// reject sends a final response above 2xx and, like answer, stops waiting when
+// ctx expires. What expiry means here is weaker, and does not need evidence.
+//
+// sipgo passes a rejection to the transaction and then waits for its ACK purely
+// for a cleaner exit: that wait ends either way — with the ACK, or with the
+// transaction timing out 32s later — and WriteResponse reports success for both,
+// so a caller that stops waiting gives up on nothing it would have been told
+// about. The rejection is also the last thing that happens on this dialog: it
+// concluded it, and the write closes it, so no later caller can race the part
+// that is still finishing.
+func (d *incomingDialog) reject(ctx context.Context, status int, reason string) error {
+	done := make(chan error, 1)
+
+	go func() { done <- d.writeRejection(status, reason) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+
+	d.reportAbandoned(done, "inbound sip rejection left unacknowledged")
+
+	return nil
+}
+
+func (d *incomingDialog) writeRejection(status int, reason string) error {
 	// A rejection is the end of the dialog, and closing it drops the session
 	// from the server cache, which would otherwise hold it for the lifetime of
-	// the process.
+	// the process. It runs before the result is handed back, so a caller that
+	// sees the write finish sees a closed session too.
 	defer func() { _ = d.session.Close() }()
 
 	if err := d.session.Respond(status, reason, nil); err != nil {
@@ -968,6 +1050,22 @@ func (d *incomingDialog) Respond(_ context.Context, status int, reason, body str
 	}
 
 	return nil
+}
+
+// reportAbandoned logs how a final response ended once nobody is waiting for it
+// any more. Without this the one thing that says the far end never acknowledged
+// a response — on hardware that cannot be inspected — would be discarded.
+func (d *incomingDialog) reportAbandoned(done <-chan error, message string) {
+	logger := d.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	go func() {
+		if err := <-done; err != nil {
+			logger.Warn(message, "dialog_id", string(d.id), "error", err)
+		}
+	}()
 }
 
 func (d *incomingDialog) Bye(ctx context.Context) error {
