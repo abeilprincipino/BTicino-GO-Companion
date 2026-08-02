@@ -349,6 +349,22 @@ func (m *Manager) RemoteDialogEnded() {
 	m.publishLocked(event)
 }
 
+// HasAnsweredInboundCall reports whether the active dialog is an inbound call
+// the companion has answered.
+//
+// The media coordinator asks this before refusing a lease for a stream it sees
+// as externally owned. The intercom starts its AV while the call is still
+// ringing, so the stream is already marked external by the time the user
+// answers; without this the answered call could never obtain a lease and the
+// card would never show video. See
+// docs/superpowers/specs/2026-08-02-inbound-call-stream-ownership-design.md.
+func (m *Manager) HasAnsweredInboundCall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.active != nil && m.activeIncoming
+}
+
 // EndIncoming clears a pending inbound call that will never be answered here.
 func (m *Manager) EndIncoming(reason core.CallEndReason) {
 	// The core layer does not validate the reason, so neither a bare nor an

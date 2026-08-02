@@ -1488,3 +1488,72 @@ func (s *gateSink) delivered() ([]core.Event, bool) {
 
 	return append([]core.Event(nil), s.events...), s.overlap
 }
+
+func TestManager_HasAnsweredInboundCallTracksTheCallLifecycle(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true with no call, want false")
+	}
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true while ringing, want false")
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if !manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = false after Answer, want true")
+	}
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true after Hangup, want false")
+	}
+}
+
+func TestManager_HasAnsweredInboundCallIsFalseAfterRemoteBye(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.RemoteDialogEnded()
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true after the peer ended the dialog, want false")
+	}
+}
+
+func TestManager_HasAnsweredInboundCallIsFalseForOutgoingPreview(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+	if err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true for an outgoing preview, want false")
+	}
+}
