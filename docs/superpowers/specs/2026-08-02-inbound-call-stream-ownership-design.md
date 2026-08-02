@@ -120,9 +120,9 @@ if c.snapshot.Owner == StreamOwnerExternal && !answered {
 ```
 
 The probe **must be evaluated before `c.mu` is taken**, not inside the critical section. The probe
-acquires `m.mu`; calling it under `c.mu` establishes a `c.mu → m.mu` order that is the reverse of
-any path starting in `signaling` and ending in a read of the coordinator snapshot. Evaluating it
-outside costs one extra read per acquisition and removes the deadlock class entirely.
+acquires `m.mu`; calling it under `c.mu` would establish a `c.mu → m.mu` order that no current path
+takes in reverse. Evaluating it outside costs one extra read per acquisition and is what keeps that
+edge from ever mattering.
 
 The resulting staleness is immaterial. A call cannot go from answered to torn down in the interval
 between the two statements without the subsequent teardown observing it; the worst case is a lease
@@ -171,7 +171,9 @@ With `leaseID == 0` and `Owner == Idle`, `observeRequestedTrackLocked` flips the
 During an inbound call two AV consumers exist on the bus: the intercom's own leg and the companion.
 `ObserveControlStop` tears the stream down when `controlLeaseID == leaseID`, and the companion's own
 AddStream sets `controlLeaseID`. A stop frame emitted by the *other* consumer afterwards is
-therefore attributed to our lease and cuts the video mid-call.
+therefore attributed to our lease and torn down: `stop(lease)` runs `finishStop`, which closes the
+`SourceSession`, which calls `sip.Hangup`. The doorbell call itself ends with a BYE — not just the
+picture.
 
 The hazard predates this change, but inbound calls make it far more likely, because this is the only
 scenario with two simultaneous consumers.
@@ -207,6 +209,19 @@ tcpdump -i any -n 'udp port 5000 or udp port 5007'
 
 Traffic must appear after the answer — it does not today. The companion log must show
 `call answered` followed by the stream reaching `live`, and the card must render video.
+
+Two further checks matter for this change specifically:
+
+- Confirm `stream control track requested` appears in the log *after* the adoption, not only
+  before it. `reserve` clears the requested-track flags, and `streamHealth` can only report
+  `Stalled` once both are set again. On the adoption path the intercom is already streaming, so it
+  may emit no further start frames — in which case a lease with no RTP would be held indefinitely,
+  blocking every other consumer.
+- Hang up from the doorbell station, not the card, and time how long the card keeps showing the
+  last frame. `internal/signaling/dialer.go` handles a BYE on an answered inbound dialog by calling
+  `Manager.RemoteDialogEnded()` only and deliberately does not tear media down — correct before
+  this change, when no lease could exist during an inbound call, but now the lease is left
+  outstanding until an OpenWebNet stop frame or the stall watchdog (~5-6s) reclaims it.
 
 ## 8. Out of scope
 

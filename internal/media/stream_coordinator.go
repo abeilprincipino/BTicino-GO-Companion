@@ -140,12 +140,11 @@ func (c *StreamCoordinator) SetAnsweredCallProbe(probe func() bool) {
 
 // answeredCall runs the probe with c.mu released.
 //
-// The probe locks the signaling manager. Calling it under c.mu would order c.mu
-// before that lock, the reverse of every path that starts in signaling and ends
-// in a read of the coordinator snapshot, so the two orders together would
-// deadlock. The verdict is therefore taken a moment before the critical section
-// that uses it; a call cannot end in that window without the ordinary teardown
-// path observing it.
+// The probe locks the signaling manager. Calling it under c.mu would establish
+// a c.mu -> m.mu order that no current path takes in reverse; keeping the call
+// outside the lock is what stops that edge from ever mattering. The verdict is
+// therefore taken a moment before the critical section that uses it; a call
+// cannot end in that window without the ordinary teardown path observing it.
 func (c *StreamCoordinator) answeredCall() bool {
 	c.mu.Lock()
 	probe := c.answeredCallProbe
@@ -210,15 +209,13 @@ func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entry
 	answered := c.answeredCall()
 
 	c.mu.Lock()
-	if c.snapshot.Owner == StreamOwnerExternal {
-		if !answered {
-			c.mu.Unlock()
-			c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
+	adopted := c.snapshot.Owner == StreamOwnerExternal
 
-			return nil, ErrExternalStream
-		}
+	if adopted && !answered {
+		c.mu.Unlock()
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 
-		c.logger.InfoContext(ctx, "external stream adopted for answered call", "entrypoint_id", entrypoint.ID)
+		return nil, ErrExternalStream
 	}
 
 	if c.leaseID != 0 || c.factory == nil {
@@ -235,7 +232,7 @@ func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entry
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID)
+	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "adopted_external", adopted)
 
 	return lease, nil
 }
