@@ -1,6 +1,7 @@
 package openwebnet
 
 import (
+	"bticino-go-companion/internal/media"
 	"context"
 	"errors"
 	"net"
@@ -8,6 +9,10 @@ import (
 	"testing"
 	"time"
 )
+
+// testAVPorts uses distinctive values (neither the old hardcoded 5007/5000 nor
+// each other) so a regression back to the literals is caught.
+var testAVPorts = media.AVPorts{Video: 61007, Audio: 61553}
 
 func TestAVClientStartsProfiledVideoThenAudio(t *testing.T) {
 	server := newAVTestServer(t, FrameACK, FrameACK)
@@ -24,12 +29,12 @@ func TestAVClientStartsProfiledVideoThenAudio(t *testing.T) {
 		}
 	}
 
-	if err := client.Start(context.Background(), true, video, audio); err != nil {
+	if err := client.Start(context.Background(), true, testAVPorts, video, audio); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
 	frames := server.Frames()
-	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#5007#0*##" || frames[1] != "*7*300#127#0#0#1#5000#2*##" {
+	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#61007#0*##" || frames[1] != "*7*300#127#0#0#1#61553#2*##" {
 		t.Fatalf("frames = %v", frames)
 	}
 }
@@ -49,12 +54,12 @@ func TestAVClientUsesObservedFlowAfterNACK(t *testing.T) {
 		}
 	}
 
-	if err := client.Start(context.Background(), false, video, audio); err != nil {
+	if err := client.Start(context.Background(), false, testAVPorts, video, audio); err != nil {
 		t.Fatalf("start with observed video flow: %v", err)
 	}
 
 	frames := server.Frames()
-	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#5007#1*##" {
+	if len(frames) != 2 || frames[0] != "*7*300#127#0#0#1#61007#1*##" {
 		t.Fatalf("frames = %v", frames)
 	}
 }
@@ -63,7 +68,7 @@ func TestAVClientBoundsRejectedAttempts(t *testing.T) {
 	server := newAVTestServer(t, FrameNACK, FrameNACK, FrameNACK)
 	client := newAVTestClient(server)
 
-	err := client.Start(context.Background(), false, &testFlowProbe{}, &testFlowProbe{})
+	err := client.Start(context.Background(), false, testAVPorts, &testFlowProbe{}, &testFlowProbe{})
 	if !errors.Is(err, ErrAVCommandRejected) {
 		t.Fatalf("start error = %v, want rejected command", err)
 	}

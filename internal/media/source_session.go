@@ -23,8 +23,15 @@ type SourceSIP interface {
 	RemoteDialogEnded()
 }
 
+// AVPorts carries the loopback ports the receivers actually bound, which the
+// AV request advertises to the intercom as its send destination.
+type AVPorts struct {
+	Video int
+	Audio int
+}
+
 type SourceAV interface {
-	Start(context.Context, bool, FlowProbe, FlowProbe) error
+	Start(context.Context, bool, AVPorts, FlowProbe, FlowProbe) error
 }
 
 type FlowProbe interface {
@@ -161,7 +168,14 @@ func (s *SourceSession) Start(ctx context.Context) error {
 
 	sipStarted = true
 
-	if err := s.av.Start(startCtx, s.sourceConfig.HighResVideo, s.video, s.audio); err != nil {
+	videoPort := s.video.Metadata().LocalPort
+	audioPort := s.audio.Metadata().LocalPort
+
+	if videoPort == 0 || audioPort == 0 {
+		return fmt.Errorf("media: receiver reported an unbound port (video=%d, audio=%d)", videoPort, audioPort)
+	}
+
+	if err := s.av.Start(startCtx, s.sourceConfig.HighResVideo, AVPorts{Video: videoPort, Audio: audioPort}, s.video, s.audio); err != nil {
 		return fmt.Errorf("start av: %w", err)
 	}
 

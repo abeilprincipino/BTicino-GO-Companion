@@ -54,7 +54,7 @@ func NewAVClient(logger *slog.Logger) *AVClient {
 
 // Start requests video then audio. Each request must receive an ACK or be
 // corroborated by observed RTP, and both streams must subsequently flow.
-func (c *AVClient) Start(ctx context.Context, highRes bool, video, audio media.FlowProbe) error {
+func (c *AVClient) Start(ctx context.Context, highRes bool, ports media.AVPorts, video, audio media.FlowProbe) error {
 	if video == nil || audio == nil {
 		return errors.New("openwebnet av flow probes are required")
 	}
@@ -66,11 +66,11 @@ func (c *AVClient) Start(ctx context.Context, highRes bool, video, audio media.F
 
 	c.logger.InfoContext(ctx, "av activation starting", "video_resolution", resolution)
 
-	if err := c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", 5007, highRes), video); err != nil {
+	if err := c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", ports.Video, highRes), video); err != nil {
 		return err
 	}
 
-	if err := c.startStream(ctx, "audio", BuildAVAddStreamAudio("127.0.0.1", 5000), audio); err != nil {
+	if err := c.startStream(ctx, "audio", BuildAVAddStreamAudio("127.0.0.1", ports.Audio), audio); err != nil {
 		return err
 	}
 

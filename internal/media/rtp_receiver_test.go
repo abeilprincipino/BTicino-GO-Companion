@@ -83,6 +83,48 @@ func TestRTPReceiverRejectsUnexpectedPayloadType(t *testing.T) {
 	}
 }
 
+func TestNewAudioRTPReceiverBindsEphemeralPort(t *testing.T) {
+	ctx := t.Context()
+
+	receiver := NewAudioRTPReceiver(nil, nil)
+	if err := receiver.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+
+	port := receiver.Metadata().LocalPort
+	if port == 0 || port == 5000 {
+		t.Fatalf("bound port = %d, want a non-zero ephemeral port other than the old fixed 5000", port)
+	}
+}
+
+func TestTwoAudioRTPReceiversStartSimultaneouslyWithoutPortCollision(t *testing.T) {
+	ctx := t.Context()
+
+	first := NewAudioRTPReceiver(nil, nil)
+	if err := first.Start(ctx); err != nil {
+		t.Fatalf("first receiver start: %v", err)
+	}
+	defer first.Close()
+
+	second := NewAudioRTPReceiver(nil, nil)
+	if err := second.Start(ctx); err != nil {
+		t.Fatalf("second receiver start: %v", err)
+	}
+	defer second.Close()
+
+	firstPort := first.Metadata().LocalPort
+	secondPort := second.Metadata().LocalPort
+
+	if firstPort == 0 || secondPort == 0 {
+		t.Fatalf("bound ports = %d, %d, want both non-zero", firstPort, secondPort)
+	}
+
+	if firstPort == secondPort {
+		t.Fatalf("both audio receivers bound the same port %d", firstPort)
+	}
+}
+
 func TestRTPReceiverLogsStructuredBindAndFirstPacketFacts(t *testing.T) {
 	ctx := t.Context()
 

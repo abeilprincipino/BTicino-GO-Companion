@@ -13,8 +13,6 @@ import (
 )
 
 const (
-	VideoRTPPort        = 5007
-	AudioRTPPort        = 5000
 	VideoPayloadType    = 96
 	AudioPayloadType    = 110
 	packetStatsInterval = 30 * time.Second
@@ -31,6 +29,7 @@ type RTPMetadata struct {
 	InvalidCount uint64
 	LastPacketAt time.Time
 	LocalAddr    string
+	LocalPort    int
 }
 
 type RTPReceiverConfig struct {
@@ -57,11 +56,11 @@ type RTPReceiver struct {
 }
 
 func NewVideoRTPReceiver(logger *slog.Logger, packet func(*rtp.Packet)) *RTPReceiver {
-	return NewRTPReceiver(RTPReceiverConfig{Address: "127.0.0.1:5007", Codec: "H264", PayloadType: VideoPayloadType, Logger: logger, Packet: packet})
+	return NewRTPReceiver(RTPReceiverConfig{Address: "127.0.0.1:0", Codec: "H264", PayloadType: VideoPayloadType, Logger: logger, Packet: packet})
 }
 
 func NewAudioRTPReceiver(logger *slog.Logger, packet func(*rtp.Packet)) *RTPReceiver {
-	return NewRTPReceiver(RTPReceiverConfig{Address: "127.0.0.1:5000", Codec: "Speex/8000", PayloadType: AudioPayloadType, Logger: logger, Packet: packet})
+	return NewRTPReceiver(RTPReceiverConfig{Address: "127.0.0.1:0", Codec: "Speex/8000", PayloadType: AudioPayloadType, Logger: logger, Packet: packet})
 }
 
 func NewRTPReceiver(cfg RTPReceiverConfig) *RTPReceiver {
@@ -93,7 +92,7 @@ func (r *RTPReceiver) Start(ctx context.Context) error {
 
 	r.conn = conn
 	r.done = make(chan struct{})
-	r.metadata = RTPMetadata{Codec: r.codec, PayloadType: r.payloadType, LocalAddr: conn.LocalAddr().String()}
+	r.metadata = RTPMetadata{Codec: r.codec, PayloadType: r.payloadType, LocalAddr: conn.LocalAddr().String(), LocalPort: conn.LocalAddr().(*net.UDPAddr).Port}
 
 	r.logger.InfoContext(ctx, "rtp receiver bound", "local_addr", r.metadata.LocalAddr)
 	go func(done <-chan struct{}) {

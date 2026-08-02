@@ -187,6 +187,54 @@ func TestSourceSessionCloseReturnsWhenStartupIgnoresCancellation(t *testing.T) {
 	}
 }
 
+func TestSourceSessionPassesBoundReceiverPortsToAVClient(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{}
+	video := &fakeSourceReceiver{port: 41007}
+	audio := &fakeSourceReceiver{port: 41000}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if want := (AVPorts{Video: 41007, Audio: 41000}); av.ports != want {
+		t.Fatalf("av ports = %#v, want %#v", av.ports, want)
+	}
+}
+
+func TestSourceSessionRejectsZeroBoundVideoPort(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{}
+	video := &zeroPortSourceReceiver{}
+	audio := &fakeSourceReceiver{port: 41000}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+	if err := session.Start(context.Background()); err == nil {
+		t.Fatal("start succeeded with a zero-value bound video port")
+	}
+
+	if av.calls != 0 {
+		t.Fatalf("av calls = %d, want 0 — must not advertise port 0 to the intercom", av.calls)
+	}
+}
+
+func TestSourceSessionRejectsZeroBoundAudioPort(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{}
+	video := &fakeSourceReceiver{port: 41007}
+	audio := &zeroPortSourceReceiver{}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+	if err := session.Start(context.Background()); err == nil {
+		t.Fatal("start succeeded with a zero-value bound audio port")
+	}
+
+	if av.calls != 0 {
+		t.Fatalf("av calls = %d, want 0 — must not advertise port 0 to the intercom", av.calls)
+	}
+}
+
 func TestSourceSessionRemoteDialogEndedDuringStartupDoesNotSendBYE(t *testing.T) {
 	sip := &fakeSourceSIP{}
 	av := &blockingSourceAV{started: make(chan struct{})}
@@ -328,12 +376,13 @@ func (*blockingInviteSIP) RemoteDialogEnded()           {}
 type fakeSourceAV struct {
 	calls   int
 	highRes bool
+	ports   AVPorts
 	err     error
 }
 
 type blockingSourceAV struct{ started chan struct{} }
 
-func (a *blockingSourceAV) Start(ctx context.Context, _ bool, _, _ FlowProbe) error {
+func (a *blockingSourceAV) Start(ctx context.Context, _ bool, _ AVPorts, _, _ FlowProbe) error {
 	close(a.started)
 	<-ctx.Done()
 
@@ -345,26 +394,47 @@ type uncooperativeSourceAV struct {
 	release chan struct{}
 }
 
-func (a *uncooperativeSourceAV) Start(context.Context, bool, FlowProbe, FlowProbe) error {
+func (a *uncooperativeSourceAV) Start(context.Context, bool, AVPorts, FlowProbe, FlowProbe) error {
 	close(a.started)
 	<-a.release
 
 	return context.Canceled
 }
 
-func (a *fakeSourceAV) Start(_ context.Context, highRes bool, _, _ FlowProbe) error {
+func (a *fakeSourceAV) Start(_ context.Context, highRes bool, ports AVPorts, _, _ FlowProbe) error {
 	a.calls++
 	a.highRes = highRes
+	a.ports = ports
 
 	return a.err
 }
 
+// fakeSourceReceiver stands in for a real RTPReceiver. Its Metadata().LocalPort
+// defaults to a valid non-zero port when port is left unset, so the many
+// pre-existing tests that don't care about port plumbing keep working; tests
+// that do care set port explicitly. Use zeroPortSourceReceiver for the
+// zero-port (unbound) case, which is deliberately distinct from "unset".
 type fakeSourceReceiver struct {
 	starts int
 	closes int
+	port   int
 }
 
-func (r *fakeSourceReceiver) Start(context.Context) error      { r.starts++; return nil }
-func (r *fakeSourceReceiver) Close() error                     { r.closes++; return nil }
+func (r *fakeSourceReceiver) Start(context.Context) error { r.starts++; return nil }
+func (r *fakeSourceReceiver) Close() error                { r.closes++; return nil }
 func (*fakeSourceReceiver) RecentlyFlowing(time.Duration) bool { return false }
-func (*fakeSourceReceiver) Metadata() RTPMetadata              { return RTPMetadata{} }
+
+func (r *fakeSourceReceiver) Metadata() RTPMetadata {
+	port := r.port
+	if port == 0 {
+		port = 41999
+	}
+
+	return RTPMetadata{LocalPort: port}
+}
+
+// zeroPortSourceReceiver simulates a receiver that has not actually bound a
+// port, reporting LocalPort 0 regardless of the embedded port field.
+type zeroPortSourceReceiver struct{ fakeSourceReceiver }
+
+func (*zeroPortSourceReceiver) Metadata() RTPMetadata { return RTPMetadata{LocalPort: 0} }
