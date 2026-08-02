@@ -387,6 +387,14 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		return nil, fmt.Errorf("create rtsp server: %w", err)
 	}
 
+	// The coordinator refuses a lease for a stream it sees as externally owned.
+	// On an inbound call the intercom starts its AV while ringing, so that flag
+	// is set well before the user answers and the answered call would never get
+	// a lease. The probe tells the coordinator when the external stream is in
+	// fact the companion's own answered call. See
+	// docs/superpowers/specs/2026-08-02-inbound-call-stream-ownership-design.md.
+	rtspServer.Coordinator().SetAnsweredCallProbe(calls.HasAnsweredInboundCall)
+
 	if err := rtspServer.Start(ctx); err != nil {
 		_ = dialer.Close()
 		return nil, err
