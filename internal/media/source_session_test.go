@@ -1,12 +1,20 @@
 package media
 
 import (
+	"bticino-go-companion/internal/signaling"
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// The manager is the production SourceSIP. Asserting it here is what keeps a
+// new lifecycle method on the interface from being added without the manager —
+// the only implementation that owns a real dialog — growing one too.
+var _ SourceSIP = (*signaling.Manager)(nil)
 
 func TestSourceSessionStartsSIPThenAVOnlyOnceAndClosesEverything(t *testing.T) {
 	sip := &fakeSourceSIP{}
@@ -74,12 +82,22 @@ func TestSourceSession_RemoteDialogEndedClosesReceiversWithoutSendingBYE(t *test
 		t.Fatalf("remote cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
 	}
 
+	// Once, not twice: the second call finds the session already stopped, and
+	// the dialog it would drop is by then somebody else's.
+	if sip.remoteEndeds != 1 {
+		t.Fatalf("sip remote dialog notifications = %d, want 1", sip.remoteEndeds)
+	}
+
 	if err := session.Close(context.Background()); err != nil {
 		t.Fatalf("close after remote dialog ended: %v", err)
 	}
 
 	if sip.hangups != 0 {
 		t.Fatalf("BYE count = %d, want 0", sip.hangups)
+	}
+
+	if sip.remoteEndeds != 1 {
+		t.Fatalf("sip remote dialog notifications after close = %d, want 1", sip.remoteEndeds)
 	}
 }
 
@@ -106,7 +124,9 @@ func TestSourceSessionCloseCancelsStartupAndCleansUp(t *testing.T) {
 		t.Fatalf("start error = %v, want context cancellation", err)
 	}
 
-	if sip.hangups != 1 || video.closes != 1 || audio.closes != 1 {
+	// A local teardown sends its own BYE, so the SIP layer learns of the dialog
+	// through Hangup and must not be told twice.
+	if sip.hangups != 1 || sip.remoteEndeds != 0 || video.closes != 1 || audio.closes != 1 {
 		t.Fatalf("cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
 	}
 }
@@ -188,18 +208,110 @@ func TestSourceSessionRemoteDialogEndedDuringStartupDoesNotSendBYE(t *testing.T)
 		t.Fatalf("start error = %v, want context cancellation", err)
 	}
 
-	if sip.hangups != 0 || video.closes != 1 || audio.closes != 1 {
+	// The INVITE had already succeeded when the peer hung up, so the aborted
+	// startup still owes the SIP layer the news that its dialog is gone.
+	if sip.hangups != 0 || sip.remoteEndeds != 1 || video.closes != 1 || audio.closes != 1 {
 		t.Fatalf("cleanup sip=%#v video=%#v audio=%#v", sip, video, audio)
 	}
 }
 
+// TestSourceSessionRemoteDialogEndedClearsTheSharedSIPManager drives the real
+// manager through the outbound preview's remote-BYE path.
+//
+// The session deliberately skips the BYE once the peer has ended the dialog, so
+// Close never runs Hangup — and Hangup is one of only two things that clear
+// Manager.active. The manager is a single process-wide instance shared by the
+// API and every media source, so an active dialog it is never told about is
+// permanent: every later preview fails with ErrActiveDialog and every later
+// inbound INVITE is answered 486 Busy Here.
+func TestSourceSessionRemoteDialogEndedClearsTheSharedSIPManager(t *testing.T) {
+	dialer := &recordingStreamDialer{}
+	manager := signaling.NewManager("192.0.2.10", dialer, nil, nil)
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", manager, &fakeSourceAV{}, video, audio)
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if dialer.startCalls() != 1 {
+		t.Fatalf("preview invites = %d, want 1", dialer.startCalls())
+	}
+
+	session.RemoteDialogEnded()
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close after the remote dialog ended: %v", err)
+	}
+
+	if byes := dialer.byes(); byes != 0 {
+		t.Fatalf("bye count = %d, want 0 — the far end already ended the dialog", byes)
+	}
+
+	// The manager must be free for the next lease. Before this was wired it
+	// stayed active for the life of the process.
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("second start after a remote BYE: %v", err)
+	}
+
+	if dialer.startCalls() != 2 {
+		t.Fatalf("preview invites = %d, want 2 — the manager still holds a dialog the far end tore down", dialer.startCalls())
+	}
+}
+
+type recordingStreamDialer struct {
+	mu      sync.Mutex
+	calls   int
+	dialogs []*recordingOutgoingDialog
+}
+
+func (d *recordingStreamDialer) StartStream(context.Context, string, string) (signaling.OutgoingDialog, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	dialog := &recordingOutgoingDialog{}
+	d.calls++
+	d.dialogs = append(d.dialogs, dialog)
+
+	return dialog, nil
+}
+
+func (d *recordingStreamDialer) startCalls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.calls
+}
+
+func (d *recordingStreamDialer) byes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var total int64
+	for _, dialog := range d.dialogs {
+		total += dialog.byeCount.Load()
+	}
+
+	return total
+}
+
+type recordingOutgoingDialog struct{ byeCount atomic.Int64 }
+
+func (d *recordingOutgoingDialog) Bye(context.Context) error {
+	d.byeCount.Add(1)
+
+	return nil
+}
+
 type fakeSourceSIP struct {
-	startCalls int
-	hangups    int
+	startCalls   int
+	hangups      int
+	remoteEndeds int
 }
 
 func (s *fakeSourceSIP) StartStream(context.Context, string) error { s.startCalls++; return nil }
 func (s *fakeSourceSIP) Hangup(context.Context) error              { s.hangups++; return nil }
+func (s *fakeSourceSIP) RemoteDialogEnded()                        { s.remoteEndeds++ }
 
 type blockingInviteSIP struct{ started chan struct{} }
 
@@ -211,6 +323,7 @@ func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) error {
 }
 
 func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
+func (*blockingInviteSIP) RemoteDialogEnded()           {}
 
 type fakeSourceAV struct {
 	calls   int

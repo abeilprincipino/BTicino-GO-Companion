@@ -15,6 +15,12 @@ var ErrSourceSessionStarted = errors.New("media: source session already started"
 type SourceSIP interface {
 	StartStream(context.Context, string) error
 	Hangup(context.Context) error
+
+	// RemoteDialogEnded drops the dialog the peer has already torn down,
+	// without sending a BYE back. The session calls it on exactly the paths
+	// where it skips Hangup, so the SIP layer is never left holding a dialog
+	// nothing will ever end. See SourceSession.RemoteDialogEnded.
+	RemoteDialogEnded()
 }
 
 type SourceAV interface {
@@ -87,6 +93,12 @@ func (s *SourceSession) Start(ctx context.Context) error {
 			s.mu.Lock()
 
 			hangup := sipStarted && !s.remoteEnded && !s.terminating
+
+			// The startup path is the only one that knows whether the INVITE
+			// had already gone out when the peer ended the dialog, so it is the
+			// one that tells the SIP layer. The two flags are mutually
+			// exclusive — a BYE either goes out or the peer already sent one.
+			remoteEnded := sipStarted && s.remoteEnded && !s.terminating
 			if hangup {
 				s.terminating = true
 			}
@@ -99,6 +111,10 @@ func (s *SourceSession) Start(ctx context.Context) error {
 				}
 
 				cleanupCancel()
+			}
+
+			if remoteEnded {
+				s.sip.RemoteDialogEnded()
 			}
 
 			if audioStarted || videoStarted {
@@ -210,6 +226,29 @@ func (s *SourceSession) Close(ctx context.Context) error {
 
 // RemoteDialogEnded releases local media after the peer terminates the SIP dialog.
 // It deliberately does not send BYE because the peer has already done so.
+//
+// Skipping the BYE is precisely why the SIP layer has to be told. Hangup is what
+// normally makes the SIP layer forget the dialog, and Close will not run it once
+// remoteEnded is set. The manager behind SourceSIP is a single process-wide
+// instance shared by the HTTP API and every media source, so a dialog it still
+// believes is up is permanent: every later preview fails with ErrActiveDialog
+// and every later inbound INVITE is answered 486 Busy Here.
+//
+// The SIP layer is told only where a dialog really existed and no BYE will be
+// sent for it:
+//
+//   - starting — the INVITE may not have gone out yet, and only Start knows.
+//     Cancelling the startup makes its deferred cleanup decide, and notify.
+//   - not started — either no dialog was ever created, or Close already ran
+//     Hangup, or this is a repeat call. Notifying here would drop a dialog this
+//     session does not own, an answered inbound call among them.
+//   - started — the INVITE succeeded and Close is about to skip the BYE. This is
+//     the case that must notify.
+//
+// The SIP layer is called with s.mu released. Nothing reachable from it calls
+// back into a session — the dialer runs its remote-BYE callback on a fresh
+// goroutine holding no lock — so the only edge is s.mu -> the manager's lock,
+// and releasing s.mu first keeps even that one from being taken.
 func (s *SourceSession) RemoteDialogEnded() {
 	s.mu.Lock()
 
@@ -230,6 +269,7 @@ func (s *SourceSession) RemoteDialogEnded() {
 	s.started = false
 	s.mu.Unlock()
 	s.logger.Info("source session stopped by remote sip dialog")
+	s.sip.RemoteDialogEnded()
 	s.closeReceivers()
 }
 
