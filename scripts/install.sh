@@ -206,6 +206,119 @@ health_endpoint_reachable() {
 }
 wait_for_health() { elapsed=0; while [ "${elapsed}" -lt "$2" ]; do health_endpoint_reachable "$1" && return; sleep 1; elapsed=$((elapsed + 1)); done; return 1; }
 
+FLEXISIP_USERS_DB="/etc/flexisip/users/users.db.txt"
+FLEXISIP_ROUTE="/etc/flexisip/users/route.conf"
+FLEXISIP_ROUTE_INT="/etc/flexisip/users/route_int.conf"
+FLEXISIP_DOMAIN_REG="/etc/flexisip/domain-registration.conf"
+SIP_USER="companion"
+
+# Prints the SIP domain the intercom registers under, or fails. A source counts
+# only when it yields a non-empty value: awk exits 0 even when it printed
+# nothing, so keying off its exit status would let the first readable file win
+# with an empty answer and never reach the fallbacks.
+flexisip_domain() {
+	domain_value=""
+	if [ -r "${FLEXISIP_DOMAIN_REG}" ]; then
+		domain_value="$(awk '/^[[:space:]]*#/ { next } NF { print $1; exit }' "${FLEXISIP_DOMAIN_REG}" 2>/dev/null || true)"
+		[ -z "${domain_value}" ] || { printf '%s\n' "${domain_value}"; return 0; }
+	fi
+	for conf in /etc/flexisip/flexisip.conf /home/bticino/cfg/flexisip.conf; do
+		[ -r "${conf}" ] || continue
+		domain_value="$(awk -F= '/^[[:space:]]*(aliases|reg-domains|auth-domains)=/ { print $2; exit }' "${conf}" 2>/dev/null | awk '{ print $1; exit }' || true)"
+		[ -z "${domain_value}" ] || { printf '%s\n' "${domain_value}"; return 0; }
+	done
+	return 1
+}
+
+backup_once() {
+	[ -f "$1" ] || return 1
+	[ -f "$1.companion.bak" ] || cp -p "$1" "$1.companion.bak"
+}
+
+provision_flexisip_user() {
+	domain="$1"
+	for file in "${FLEXISIP_USERS_DB}" "${FLEXISIP_ROUTE}" "${FLEXISIP_ROUTE_INT}"; do
+		if ! backup_once "${file}"; then
+			warn "Missing ${file}; skipping SIP inbound provisioning."
+			return 1
+		fi
+	done
+
+	if ! grep -q "^${SIP_USER}@${domain} " "${FLEXISIP_USERS_DB}"; then
+		hash_line="$(awk -v d="@${domain}" 'index($1, d) { print $2; exit }' "${FLEXISIP_USERS_DB}" || true)"
+		if [ -z "${hash_line}" ]; then
+			warn "No existing user hash found in ${FLEXISIP_USERS_DB}; skipping SIP inbound provisioning."
+			return 1
+		fi
+		printf '%s@%s %s ;\n' "${SIP_USER}" "${domain}" "${hash_line}" >> "${FLEXISIP_USERS_DB}"
+		log "Added ${SIP_USER}@${domain} to users.db.txt"
+	fi
+
+	if ! grep -q "sip:${SIP_USER}@${domain}" "${FLEXISIP_ROUTE}"; then
+		printf '<sip:%s@%s> <sip:127.0.0.1>\n' "${SIP_USER}" "${domain}" >> "${FLEXISIP_ROUTE}"
+		log "Added ${SIP_USER}@${domain} to route.conf"
+	fi
+
+	if grep -q "sip:${SIP_USER}@${domain}" "${FLEXISIP_ROUTE_INT}"; then
+		ok "SIP inbound already provisioned."
+		return 0
+	fi
+
+	tmp="${FLEXISIP_ROUTE_INT}.companion.tmp"
+	sed "s|\(<sip:alluser@${domain}>.*\)$|\1, <sip:${SIP_USER}@${domain}>|" "${FLEXISIP_ROUTE_INT}" > "${tmp}"
+
+	# route_int.conf must stay one line per group; a mangled file breaks the
+	# whole intercom, so validate before replacing the original. The count is
+	# compared as a string: grep -c prints 0 and exits 1 with no match, and an
+	# empty count must take the warn branch rather than make [ ] error out.
+	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" 2>/dev/null || true)"
+	if [ "${alluser_lines}" != "1" ] || ! grep -q "sip:${SIP_USER}@${domain}" "${tmp}"; then
+		rm -f "${tmp}"
+		warn "route_int.conf rewrite failed validation; original left untouched."
+		return 1
+	fi
+
+	mv "${tmp}" "${FLEXISIP_ROUTE_INT}"
+	log "Added ${SIP_USER}@${domain} to the alluser group"
+
+	return 0
+}
+
+enable_sip_inbound() {
+	config="${BASE_DIR}/config.yaml"
+	[ -f "${config}" ] || { warn "Companion config not found at ${config}; enable companion.sip.inbound manually."; return 1; }
+	if grep -q '^[[:space:]]*inbound:' "${config}"; then
+		sed -i 's/^\([[:space:]]*\)inbound:.*/\1inbound: true/' "${config}" || {
+			warn "Could not edit ${config}; enable companion.sip.inbound manually."
+			return 1
+		}
+	else
+		warn "companion.sip section absent from ${config}; enable companion.sip.inbound manually after first start."
+		return 1
+	fi
+	ok "Enabled companion.sip.inbound"
+
+	return 0
+}
+
+setup_sip_inbound() {
+	if [ "${COMPANION_SIP_INBOUND:-1}" = "0" ]; then
+		log "Skipping SIP inbound provisioning (COMPANION_SIP_INBOUND=0)."
+		return 0
+	fi
+
+	domain="$(flexisip_domain || true)"
+	if [ -z "${domain}" ]; then
+		warn "Could not determine the Flexisip domain; skipping SIP inbound provisioning."
+		return 0
+	fi
+
+	log "Provisioning SIP inbound for ${SIP_USER}@${domain}"
+	provision_flexisip_user "${domain}" && enable_sip_inbound || true
+
+	return 0
+}
+
 post_install_checks() {
 	FAILURES=0; pidfile="/var/run/${SERVICE_NAME}.pid"
 	[ -x "${BIN_PATH}" ] && ok "Binary exists: ${BIN_PATH}" || fail "Binary missing or not executable: ${BIN_PATH}"
@@ -253,7 +366,8 @@ main() {
 	require_root; log "Starting companion installation"
 	if [ -n "${1:-}" ]; then log "Using local binary input: $1"; resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"; else download_latest_artifacts; fi
 	install_binary "${SELECTED_BINARY_PATH}"; install_gst_runtime "${SELECTED_GST_DIR}"; register_service "${SELECTED_INIT_TEMPLATE}"
-	start_service; restore_root_ro; post_install_checks
+	start_service; wait_for_health "$(health_url)" "${HEALTHCHECK_TIMEOUT_SEC}" || true
+	setup_sip_inbound; start_service; restore_root_ro; post_install_checks
 	[ "${POST_CHECK_FAILURES}" -eq 0 ] || { log "Installation finished with ${POST_CHECK_FAILURES} failed check(s)."; exit 1; }
 	log "Installation complete."
 }

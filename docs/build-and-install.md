@@ -120,7 +120,7 @@ Per abilitare gli update: `-X ...BuildReleaseRepo=abeilprincipino/BTicino-GO-Com
 ## 3. Installazione sul dispositivo
 
 `install.sh` ha due modalità, decise dalla presenza di un argomento
-([install.sh:254](../scripts/install.sh#L254)):
+([install.sh:367](../scripts/install.sh#L367)):
 
 - **con argomento** → usa il binario locale indicato;
 - **senza argomento** → scarica il bundle dall'ultima release di
@@ -132,7 +132,7 @@ Per l'install locale serve quindi **sempre** passare il path del binario.
 
 Lo script si aspetta due percorsi relativi a sé stesso
 ([install.sh:9-10](../scripts/install.sh#L9-L10) e
-[:232](../scripts/install.sh#L232)):
+[:345](../scripts/install.sh#L345)):
 
 ```
 <stage>/scripts/install.sh          <- lo script
@@ -182,7 +182,7 @@ lrwxrwxrwx  gst/lib/libgstaudio-1.0.so.0 -> libgstaudio-1.0.so.0.1405.0
 ssh root@<IP> 'sh /tmp/stage/scripts/install.sh /tmp/stage/companion'
 ```
 
-Cosa fa, in ordine ([install.sh:252-259](../scripts/install.sh#L252-L259)):
+Cosa fa, in ordine ([install.sh:365-372](../scripts/install.sh#L365-L372)):
 
 1. verifica di essere `root`, poi `mount -o remount,rw /` (ripristinato a `ro` in `trap EXIT`);
 2. copia il binario in `/home/bticino/cfg/extra/companion/companion`, salvando il precedente
@@ -193,7 +193,9 @@ Cosa fa, in ordine ([install.sh:252-259](../scripts/install.sh#L252-L259)):
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);
-6. `restart` del servizio;
+6. `restart` del servizio e attesa dell'health (fino a `COMPANION_HEALTHCHECK_TIMEOUT_SEC`), il
+   tempo che il companion scriva `config.yaml`; poi provisioning dell'utente SIP `companion`
+   in flexisip (§8) e secondo `restart` per rileggere la configurazione;
 7. post-install check, incluso l'health su `http://127.0.0.1:8080/api/v3/health` con timeout
    45 s (`COMPANION_HEALTHCHECK_TIMEOUT_SEC`).
 
@@ -380,3 +382,17 @@ Due incongruenze rilevate leggendo la pipeline, non bloccanti per l'install loca
   genera `.../raw/v3/scripts/install.sh` ([release.yaml:56](../.github/workflows/release.yaml#L56)),
   ma `origin` ha solo `main` — il branch `v3` esiste solo su `upstream`. Una release
   pubblicata da questo fork mostrerebbe un comando di install rotto.
+
+---
+
+## 8. Answering calls from Home Assistant
+
+The installer provisions a `companion@<domain>` SIP user in Flexisip so the
+intercom forks incoming calls to the companion. Run the installer with
+`COMPANION_SIP_INBOUND=0` to skip this and leave the BTicino files untouched.
+
+> **Known limitation.** Logging out and back in from the BTicino DoorEntry app
+> rewrites `/etc/flexisip/users/*` and removes the `companion` user. Answering
+> then stops working **silently** — the card shows the ring but offers no Answer
+> button. Re-run the installer to restore it. Backups of the three files are
+> kept alongside them with a `.companion.bak` suffix.
