@@ -236,6 +236,17 @@ backup_once() {
 	[ -f "$1.companion.bak" ] || cp -p "$1" "$1.companion.bak"
 }
 
+# route_int_has_companion reports whether the companion contact is in the alluser
+# group of $2, not merely somewhere in the file. Anchoring on the alluser contact
+# and refusing a '#' in between is what rejects a match that sits in a trailing
+# comment: the insertion below appends to the end of the line, so on a line such
+# as '<sip:alluser@dom> <sip:x@dom>   # handsets' it lands after the '#' and
+# changes nothing, while a plain grep for the contact finds it there all the same
+# and would report a file that was never provisioned as provisioned.
+route_int_has_companion() {
+	grep -q "sip:alluser@$1>[^#]*sip:${SIP_USER}@$1" "$2"
+}
+
 provision_flexisip_user() {
 	domain="$1"
 	for file in "${FLEXISIP_USERS_DB}" "${FLEXISIP_ROUTE}" "${FLEXISIP_ROUTE_INT}"; do
@@ -260,7 +271,7 @@ provision_flexisip_user() {
 		log "Added ${SIP_USER}@${domain} to route.conf"
 	fi
 
-	if grep -q "sip:${SIP_USER}@${domain}" "${FLEXISIP_ROUTE_INT}"; then
+	if route_int_has_companion "${domain}" "${FLEXISIP_ROUTE_INT}"; then
 		ok "SIP inbound already provisioned."
 		return 0
 	fi
@@ -272,8 +283,14 @@ provision_flexisip_user() {
 	# whole intercom, so validate before replacing the original. The count is
 	# compared as a string: grep -c prints 0 and exits 1 with no match, and an
 	# empty count must take the warn branch rather than make [ ] error out.
+	#
+	# The second half of the check has to look at where the contact landed, not
+	# only whether it is there: the substitution above appends to the end of the
+	# line, which on a line carrying a trailing comment is inside the comment. A
+	# plain grep passes that, and the installer then reports a provisioned file
+	# for a change that does nothing.
 	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" || true)"
-	if [ "${alluser_lines}" != "1" ] || ! grep -q "sip:${SIP_USER}@${domain}" "${tmp}"; then
+	if [ "${alluser_lines}" != "1" ] || ! route_int_has_companion "${domain}" "${tmp}"; then
 		rm -f "${tmp}"
 		warn "route_int.conf rewrite failed validation; original left untouched."
 		return 1
