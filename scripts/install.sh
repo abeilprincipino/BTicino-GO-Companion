@@ -211,6 +211,7 @@ FLEXISIP_ROUTE="/etc/flexisip/users/route.conf"
 FLEXISIP_ROUTE_INT="/etc/flexisip/users/route_int.conf"
 FLEXISIP_DOMAIN_REG="/etc/flexisip/domain-registration.conf"
 SIP_USER="companion"
+SIP_CONFIG_CHANGED=0
 
 # Prints the SIP domain the intercom registers under, or fails. A source counts
 # only when it yields a non-empty value: awk exits 0 even when it printed
@@ -219,12 +220,12 @@ SIP_USER="companion"
 flexisip_domain() {
 	domain_value=""
 	if [ -r "${FLEXISIP_DOMAIN_REG}" ]; then
-		domain_value="$(awk '/^[[:space:]]*#/ { next } NF { print $1; exit }' "${FLEXISIP_DOMAIN_REG}" 2>/dev/null || true)"
+		domain_value="$(awk '/^[[:space:]]*#/ { next } NF { print $1; exit }' "${FLEXISIP_DOMAIN_REG}" || true)"
 		[ -z "${domain_value}" ] || { printf '%s\n' "${domain_value}"; return 0; }
 	fi
 	for conf in /etc/flexisip/flexisip.conf /home/bticino/cfg/flexisip.conf; do
 		[ -r "${conf}" ] || continue
-		domain_value="$(awk -F= '/^[[:space:]]*(aliases|reg-domains|auth-domains)=/ { print $2; exit }' "${conf}" 2>/dev/null | awk '{ print $1; exit }' || true)"
+		domain_value="$(awk -F= '/^[[:space:]]*(aliases|reg-domains|auth-domains)=/ { print $2; exit }' "${conf}" | awk '{ print $1; exit }' || true)"
 		[ -z "${domain_value}" ] || { printf '%s\n' "${domain_value}"; return 0; }
 	done
 	return 1
@@ -271,7 +272,7 @@ provision_flexisip_user() {
 	# whole intercom, so validate before replacing the original. The count is
 	# compared as a string: grep -c prints 0 and exits 1 with no match, and an
 	# empty count must take the warn branch rather than make [ ] error out.
-	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" 2>/dev/null || true)"
+	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" || true)"
 	if [ "${alluser_lines}" != "1" ] || ! grep -q "sip:${SIP_USER}@${domain}" "${tmp}"; then
 		rm -f "${tmp}"
 		warn "route_int.conf rewrite failed validation; original left untouched."
@@ -287,15 +288,31 @@ provision_flexisip_user() {
 enable_sip_inbound() {
 	config="${BASE_DIR}/config.yaml"
 	[ -f "${config}" ] || { warn "Companion config not found at ${config}; enable companion.sip.inbound manually."; return 1; }
-	if grep -q '^[[:space:]]*inbound:' "${config}"; then
-		sed -i 's/^\([[:space:]]*\)inbound:.*/\1inbound: true/' "${config}" || {
-			warn "Could not edit ${config}; enable companion.sip.inbound manually."
-			return 1
-		}
-	else
-		warn "companion.sip section absent from ${config}; enable companion.sip.inbound manually after first start."
+
+	# The companion writes companion.sip itself, migrating config.yaml files that
+	# predate the section, so a missing key means that migration also failed.
+	if ! grep -q '^[[:space:]]*inbound:' "${config}"; then
+		warn "No 'inbound:' key in ${config}; add these two lines under its 'companion:' key and restart ${SERVICE_NAME}:"
+		warn "    sip:"
+		warn "        inbound: true"
 		return 1
 	fi
+
+	if grep -q '^[[:space:]]*inbound:[[:space:]]*true[[:space:]]*$' "${config}"; then
+		ok "companion.sip.inbound is already enabled"
+		return 0
+	fi
+
+	if ! backup_once "${config}"; then
+		warn "Could not back up ${config}; leaving companion.sip.inbound unchanged."
+		return 1
+	fi
+
+	sed -i 's/^\([[:space:]]*\)inbound:.*/\1inbound: true/' "${config}" || {
+		warn "Could not edit ${config}; enable companion.sip.inbound manually."
+		return 1
+	}
+	SIP_CONFIG_CHANGED=1
 	ok "Enabled companion.sip.inbound"
 
 	return 0
@@ -313,8 +330,21 @@ setup_sip_inbound() {
 		return 0
 	fi
 
+	# enable_sip_inbound edits config.yaml, which the companion writes on its
+	# first start, so give it time to appear before touching it.
+	log "Waiting for the companion to write its configuration (up to ${HEALTHCHECK_TIMEOUT_SEC}s)."
+	wait_for_health "$(health_url)" "${HEALTHCHECK_TIMEOUT_SEC}" || true
+
 	log "Provisioning SIP inbound for ${SIP_USER}@${domain}"
-	provision_flexisip_user "${domain}" && enable_sip_inbound || true
+	if provision_flexisip_user "${domain}" && enable_sip_inbound; then
+		# Only a config.yaml edit needs the companion restarted; re-provisioning
+		# the Flexisip files alone changes nothing the companion reads.
+		if [ "${SIP_CONFIG_CHANGED}" -eq 1 ]; then
+			start_service || warn "Could not restart ${SERVICE_NAME}; restart it manually to pick up companion.sip.inbound."
+		fi
+
+		ok "SIP inbound is provisioned. Flexisip may need to be restarted, or the intercom rebooted, before incoming calls reach the companion."
+	fi
 
 	return 0
 }
@@ -366,8 +396,7 @@ main() {
 	require_root; log "Starting companion installation"
 	if [ -n "${1:-}" ]; then log "Using local binary input: $1"; resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"; else download_latest_artifacts; fi
 	install_binary "${SELECTED_BINARY_PATH}"; install_gst_runtime "${SELECTED_GST_DIR}"; register_service "${SELECTED_INIT_TEMPLATE}"
-	start_service; wait_for_health "$(health_url)" "${HEALTHCHECK_TIMEOUT_SEC}" || true
-	setup_sip_inbound; start_service; restore_root_ro; post_install_checks
+	start_service; setup_sip_inbound; restore_root_ro; post_install_checks
 	[ "${POST_CHECK_FAILURES}" -eq 0 ] || { log "Installation finished with ${POST_CHECK_FAILURES} failed check(s)."; exit 1; }
 	log "Installation complete."
 }

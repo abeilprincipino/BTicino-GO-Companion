@@ -120,7 +120,7 @@ Per abilitare gli update: `-X ...BuildReleaseRepo=abeilprincipino/BTicino-GO-Com
 ## 3. Installazione sul dispositivo
 
 `install.sh` ha due modalità, decise dalla presenza di un argomento
-([install.sh:367](../scripts/install.sh#L367)):
+([install.sh:397](../scripts/install.sh#L397)):
 
 - **con argomento** → usa il binario locale indicato;
 - **senza argomento** → scarica il bundle dall'ultima release di
@@ -132,7 +132,7 @@ Per l'install locale serve quindi **sempre** passare il path del binario.
 
 Lo script si aspetta due percorsi relativi a sé stesso
 ([install.sh:9-10](../scripts/install.sh#L9-L10) e
-[:345](../scripts/install.sh#L345)):
+[:375](../scripts/install.sh#L375)):
 
 ```
 <stage>/scripts/install.sh          <- lo script
@@ -182,7 +182,7 @@ lrwxrwxrwx  gst/lib/libgstaudio-1.0.so.0 -> libgstaudio-1.0.so.0.1405.0
 ssh root@<IP> 'sh /tmp/stage/scripts/install.sh /tmp/stage/companion'
 ```
 
-Cosa fa, in ordine ([install.sh:365-372](../scripts/install.sh#L365-L372)):
+Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
 
 1. verifica di essere `root`, poi `mount -o remount,rw /` (ripristinato a `ro` in `trap EXIT`);
 2. copia il binario in `/home/bticino/cfg/extra/companion/companion`, salvando il precedente
@@ -193,9 +193,11 @@ Cosa fa, in ordine ([install.sh:365-372](../scripts/install.sh#L365-L372)):
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);
-6. `restart` del servizio e attesa dell'health (fino a `COMPANION_HEALTHCHECK_TIMEOUT_SEC`), il
-   tempo che il companion scriva `config.yaml`; poi provisioning dell'utente SIP `companion`
-   in flexisip (§8) e secondo `restart` per rileggere la configurazione;
+6. `restart` del servizio; poi, se `COMPANION_SIP_INBOUND` non è `0`, provisioning dell'utente
+   SIP `companion` in flexisip (§8): attesa dell'health (fino a
+   `COMPANION_HEALTHCHECK_TIMEOUT_SEC`) il tempo che il companion scriva `config.yaml`, e un
+   secondo `restart` **solo se** `config.yaml` è stato effettivamente modificato. Con
+   `COMPANION_SIP_INBOUND=0` niente di tutto questo viene eseguito;
 7. post-install check, incluso l'health su `http://127.0.0.1:8080/api/v3/health` con timeout
    45 s (`COMPANION_HEALTHCHECK_TIMEOUT_SEC`).
 
@@ -357,7 +359,7 @@ La CI li esegue su `ubuntu-latest` ad ogni tag `v*` ([release.yaml](../.github/w
 
 ## 6. Variabili d'ambiente di `install.sh`
 
-Rilevanti solo in modalità download (senza argomento), tranne l'ultima:
+Rilevanti solo in modalità download (senza argomento), tranne le ultime due:
 
 | Variabile | Default | Uso |
 |---|---|---|
@@ -367,6 +369,7 @@ Rilevanti solo in modalità download (senza argomento), tranne l'ultima:
 | `COMPANION_RELEASE_BASE_URL` / `_API` | derivati da repo+tag | mirror o registry alternativo |
 | `COMPANION_RELEASE_BUNDLE_SHA256` | *(dal digest dell'API GitHub)* | digest atteso, se l'API non è raggiungibile |
 | `COMPANION_HEALTHCHECK_TIMEOUT_SEC` | `45` | vale **anche** in modalità locale |
+| `COMPANION_SIP_INBOUND` | `1` | `0` salta il provisioning SIP in Flexisip e non tocca i file BTicino (§8); vale **anche** in modalità locale |
 
 ---
 
@@ -390,6 +393,17 @@ Due incongruenze rilevate leggendo la pipeline, non bloccanti per l'install loca
 The installer provisions a `companion@<domain>` SIP user in Flexisip so the
 intercom forks incoming calls to the companion. Run the installer with
 `COMPANION_SIP_INBOUND=0` to skip this and leave the BTicino files untouched.
+
+On the first start after an upgrade the companion adds the `companion.sip`
+section to a `config.yaml` written before that section existed, with
+`inbound: false`, so the installer has an `inbound:` key to enable. Nothing is
+rewritten once the section is on disk.
+
+**Flexisip is not restarted by the installer.** It reads
+`/etc/flexisip/users/*` at startup, so after a successful provisioning run
+(`OK: SIP inbound is provisioned.`) restart Flexisip or reboot the intercom
+before the forked INVITE reaches the companion. Until then the card shows the
+ring but no Answer button, exactly as if provisioning had not run.
 
 > **Known limitation.** Logging out and back in from the BTicino DoorEntry app
 > rewrites `/etc/flexisip/users/*` and removes the `companion` user. Answering
