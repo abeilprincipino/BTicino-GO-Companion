@@ -13,7 +13,11 @@ import (
 var ErrSourceSessionStarted = errors.New("media: source session already started")
 
 type SourceSIP interface {
-	StartStream(context.Context, string) error
+	// StartStream dials the intercom and reports whether it created the SIP
+	// dialog. It reports false when an answered inbound call is already up: no
+	// INVITE goes out and the dialog belongs to that call, so this session must
+	// never send a BYE for it as a side effect of a media teardown.
+	StartStream(context.Context, string) (bool, error)
 	Hangup(context.Context) error
 
 	// RemoteDialogEnded drops the dialog the peer has already torn down,
@@ -61,7 +65,12 @@ type SourceSession struct {
 	startDone    chan struct{}
 	remoteEnded  bool
 	terminating  bool
-	onStarted    func()
+
+	// ownsDialog records whether StartStream created the SIP dialog. False for a
+	// lease adopted for an answered inbound call, whose dialog belongs to the
+	// call: no teardown of this session's media may end it.
+	ownsDialog bool
+	onStarted  func()
 }
 
 func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypointID core.EntrypointID, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
@@ -88,18 +97,23 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	s.starting = true
 	s.remoteEnded = false
 	s.terminating = false
+	s.ownsDialog = false
 	s.startCancel = cancel
 	s.startDone = make(chan struct{})
 	s.mu.Unlock()
 
-	var videoStarted, audioStarted, sipStarted bool
+	var videoStarted, audioStarted, sipStarted, ownsDialog bool
 
 	started := false
 	defer func() {
 		if !started {
 			s.mu.Lock()
 
-			hangup := sipStarted && !s.remoteEnded && !s.terminating
+			// ownsDialog is what keeps a failed startup from ending a call it
+			// merely borrowed. On a lease adopted for an answered inbound call no
+			// INVITE went out, so there is no dialog of ours to BYE — and the one
+			// that exists is the call the user is on.
+			hangup := sipStarted && ownsDialog && !s.remoteEnded && !s.terminating
 
 			// The startup path is the only one that knows whether the INVITE
 			// had already gone out when the peer ended the dialog, so it is the
@@ -162,11 +176,16 @@ func (s *SourceSession) Start(ctx context.Context) error {
 
 	audioStarted = true
 
-	if err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr); err != nil {
+	ownsDialog, err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr)
+	if err != nil {
 		return fmt.Errorf("start outgoing sip: %w", err)
 	}
 
 	sipStarted = true
+
+	s.mu.Lock()
+	s.ownsDialog = ownsDialog
+	s.mu.Unlock()
 
 	videoPort := s.video.Metadata().LocalPort
 	audioPort := s.audio.Metadata().LocalPort

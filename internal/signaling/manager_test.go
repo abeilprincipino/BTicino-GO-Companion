@@ -246,7 +246,7 @@ func TestManager_StartStreamIsOutgoingOnly(t *testing.T) {
 	dialer := &fakeDialer{}
 	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() error = %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestManager_StartStreamRejectsIncomingWithoutAnswering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := manager.StartStream(context.Background(), "21")
+	_, err := manager.StartStream(context.Background(), "21")
 	if !errors.Is(err, ErrIncomingDialog) {
 		t.Fatalf("StartStream() error = %v, want ErrIncomingDialog", err)
 	}
@@ -295,7 +295,7 @@ func TestManager_StartStreamSkipsInviteWhileCallAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() error = %v, want nil", err)
 	}
 
@@ -310,11 +310,11 @@ func TestManager_StartStreamRejectsActiveOutgoingDialog(t *testing.T) {
 	dialer := &fakeDialer{}
 
 	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("first StartStream() error = %v", err)
 	}
 
-	if err := manager.StartStream(context.Background(), "22"); !errors.Is(err, ErrActiveDialog) {
+	if _, err := manager.StartStream(context.Background(), "22"); !errors.Is(err, ErrActiveDialog) {
 		t.Fatalf("second StartStream() error = %v, want ErrActiveDialog", err)
 	}
 
@@ -362,7 +362,7 @@ func TestManager_OnInviteRejectsCallWhileOutgoingStreamActive(t *testing.T) {
 	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", dialer, events, testResolver("main", "21"))
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -397,7 +397,7 @@ func TestManager_OnInviteReservesIncomingBeforeItRings(t *testing.T) {
 	dialog := &hookIncomingDialog{id: testDialogID}
 	dialog.onRespond = func(status int) error {
 		if status == 180 {
-			streamErr = manager.StartStream(context.Background(), "21")
+			_, streamErr = manager.StartStream(context.Background(), "21")
 		}
 
 		return nil
@@ -450,7 +450,7 @@ func TestManager_OnInviteRollsBackReservationWhenRingingFails(t *testing.T) {
 		t.Fatalf("events[1] = %#v, want IncomingCallEnded/cancelled for dialog-1", got[1])
 	}
 
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() after the rollback error = %v, want nil", err)
 	}
 }
@@ -587,7 +587,7 @@ func TestManager_RemoteDialogEndedClearsAnsweredCallWithoutBye(t *testing.T) {
 
 	// Without this the manager keeps believing a call is answered and every
 	// later preview silently succeeds without sending an INVITE.
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() after the remote BYE error = %v", err)
 	}
 
@@ -699,7 +699,7 @@ func TestManager_PreviewTeardownPublishesNothing(t *testing.T) {
 	events := &syncEventSink{}
 
 	manager := NewManager("192.0.2.10", dialer, events, testResolver("main", "21"))
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -740,7 +740,7 @@ func TestManager_ConcurrentLifecycleLeavesNoDialogUnreferenced(t *testing.T) {
 
 		go func() { defer wg.Done(); _ = manager.OnInvite(context.Background(), dialog) }()
 		go func() { defer wg.Done(); _ = manager.Answer(context.Background()) }()
-		go func() { defer wg.Done(); _ = manager.StartStream(context.Background(), "21") }()
+		go func() { defer wg.Done(); _, _ = manager.StartStream(context.Background(), "21") }()
 		go func() { defer wg.Done(); _ = manager.Hangup(context.Background()) }()
 
 		wg.Wait()
@@ -765,7 +765,7 @@ func TestManager_ConcurrentLifecycleLeavesNoDialogUnreferenced(t *testing.T) {
 
 	// A leaked flag would make every later preview succeed without dialling.
 	before := dialer.calls
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatalf("StartStream() after the race error = %v", err)
 	}
 
@@ -892,7 +892,10 @@ func TestManager_StalledSinkDoesNotBlockTheStateLock(t *testing.T) {
 	// And the state lock is still free for signalling.
 	streamed := make(chan error, 1)
 
-	go func() { streamed <- manager.StartStream(context.Background(), "21") }()
+	go func() {
+		_, err := manager.StartStream(context.Background(), "21")
+		streamed <- err
+	}()
 
 	select {
 	case err := <-streamed:
@@ -997,7 +1000,7 @@ func TestManager_StartStreamWrapsDialerError(t *testing.T) {
 
 	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
-	err := manager.StartStream(context.Background(), "21")
+	_, err := manager.StartStream(context.Background(), "21")
 	if !errors.Is(err, dialErr) {
 		t.Fatalf("StartStream() error = %v, want %v", err, dialErr)
 	}
@@ -1549,11 +1552,48 @@ func TestManager_HasAnsweredInboundCallIsFalseForOutgoingPreview(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
-	if err := manager.StartStream(context.Background(), "21"); err != nil {
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
 		t.Fatal(err)
 	}
 
 	if manager.HasAnsweredInboundCall() {
 		t.Fatal("HasAnsweredInboundCall() = true for an outgoing preview, want false")
+	}
+}
+
+func TestManager_StartStreamReportsThatItCreatedTheDialog(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	created, err := manager.StartStream(context.Background(), "21")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !created {
+		t.Fatal("StartStream() created = false for an outgoing preview, want true")
+	}
+}
+
+func TestManager_StartStreamCreatesNoDialogDuringAnsweredInboundCall(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+	if err := manager.OnInvite(context.Background(), &fakeIncomingDialog{id: testDialogID}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := manager.StartStream(context.Background(), "21")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if created {
+		t.Fatal("StartStream() created = true during an answered inbound call, want false — no INVITE goes out, so the dialog is the call's")
 	}
 }

@@ -435,32 +435,41 @@ func (m *Manager) stopIncomingExpiryLocked() {
 	}
 }
 
-func (m *Manager) StartStream(ctx context.Context, devAddr string) error {
+// StartStream dials the intercom and reports whether this call created the SIP
+// dialog.
+//
+// It reports false when an answered inbound call is already up: the intercom is
+// streaming for that call, no INVITE goes out, and the dialog belongs to the
+// call rather than to the media session that asked. media.SourceSession needs
+// that distinction to know whether a BYE of its own is ever appropriate — a
+// teardown of its media must not end a call the user is on. See
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
+func (m *Manager) StartStream(ctx context.Context, devAddr string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.incoming != nil {
-		return ErrIncomingDialog
+		return false, ErrIncomingDialog
 	}
 
 	// The intercom is already streaming for the answered call; a second INVITE
 	// would come back as 486 Busy Here.
 	if m.activeIncoming {
-		return nil
+		return false, nil
 	}
 
 	if m.active != nil {
-		return ErrActiveDialog
+		return false, ErrActiveDialog
 	}
 
 	dialog, err := m.dialer.StartStream(ctx, devAddr, BuildOffer(m.host, devAddr))
 	if err != nil {
-		return fmt.Errorf("outgoing stream: %w", err)
+		return false, fmt.Errorf("outgoing stream: %w", err)
 	}
 
 	m.active = dialog
 
-	return nil
+	return true, nil
 }
 
 // publishLocked hands a committed state transition to the sink. It must be

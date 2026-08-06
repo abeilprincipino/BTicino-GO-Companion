@@ -351,23 +351,32 @@ func (d *recordingOutgoingDialog) Bye(context.Context) error {
 	return nil
 }
 
+// adopted makes StartStream report that it created no dialog, which is what the
+// manager does during an answered inbound call. It defaults to false, so every
+// test that does not opt in stands for an outbound preview that owns its dialog.
 type fakeSourceSIP struct {
 	startCalls   int
 	hangups      int
 	remoteEndeds int
+	adopted      bool
 }
 
-func (s *fakeSourceSIP) StartStream(context.Context, string) error { s.startCalls++; return nil }
-func (s *fakeSourceSIP) Hangup(context.Context) error              { s.hangups++; return nil }
-func (s *fakeSourceSIP) RemoteDialogEnded()                        { s.remoteEndeds++ }
+func (s *fakeSourceSIP) StartStream(context.Context, string) (bool, error) {
+	s.startCalls++
+
+	return !s.adopted, nil
+}
+
+func (s *fakeSourceSIP) Hangup(context.Context) error { s.hangups++; return nil }
+func (s *fakeSourceSIP) RemoteDialogEnded()           { s.remoteEndeds++ }
 
 type blockingInviteSIP struct{ started chan struct{} }
 
-func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) error {
+func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) (bool, error) {
 	close(s.started)
 	<-ctx.Done()
 
-	return fmt.Errorf("wait for invite answer: %w", ctx.Err())
+	return false, fmt.Errorf("wait for invite answer: %w", ctx.Err())
 }
 
 func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
@@ -438,3 +447,22 @@ func (r *fakeSourceReceiver) Metadata() RTPMetadata {
 type zeroPortSourceReceiver struct{ fakeSourceReceiver }
 
 func (*zeroPortSourceReceiver) Metadata() RTPMetadata { return RTPMetadata{LocalPort: 0} }
+
+func TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall(t *testing.T) {
+	sip := &fakeSourceSIP{adopted: true}
+	av := &fakeSourceAV{err: errors.New("nack")}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C100X", DevAddr: "20"}, "main", sip, av, video, audio)
+
+	if err := session.Start(context.Background()); err == nil {
+		t.Fatal("Start() error = nil, want the AV failure")
+	}
+
+	if sip.hangups != 0 {
+		t.Fatalf("BYE count = %d, want 0 — the dialog belongs to the answered call, not to this session", sip.hangups)
+	}
+
+	if video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("receivers not released: video=%#v audio=%#v", video, audio)
+	}
+}
