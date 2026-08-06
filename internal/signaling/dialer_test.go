@@ -1404,3 +1404,58 @@ func TestStreamDialerCloseWaitsForInboundHandlers(t *testing.T) {
 	waitClosed(t, returned, "onInvite() did not return once its transaction was terminated")
 	waitClosed(t, closed, "Close() did not return once the inbound handler had finished")
 }
+
+// The lease an answered inbound call holds is released by nothing else. Before
+// the media hook fired here, the card kept its last frame until an OpenWebNet
+// stop frame or the stall watchdog reclaimed the lease.
+func TestStreamDialerAnsweredInboundByeReleasesTheMediaLease(t *testing.T) {
+	handler := newRingingInboundHandler()
+	dialer := testInboundDialer(t, handler)
+
+	released := make(chan struct{})
+	dialer.SetRemoteDialogEnded(func() { close(released) })
+
+	invite := testInviteRequest()
+	recorder := siptest.NewServerTxRecorder(invite)
+
+	returned := make(chan struct{})
+
+	go func() {
+		defer close(returned)
+
+		dialer.onInvite(invite, recorder)
+	}()
+
+	dialog := waitRinging(t, handler)
+	session := serverSessionOf(t, dialog)
+
+	answered := make(chan error, 1)
+
+	go func() { answered <- dialog.Respond(context.Background(), 200, "OK", "v=0\r\n") }()
+
+	waitDialogState(t, session, sip.DialogStateEstablished)
+
+	ack := testAckRequest(session)
+	dialer.onAck(ack, siptest.NewServerTxRecorder(ack))
+
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("Respond(200) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never completed after the ACK")
+	}
+
+	bye := testByeRequest(session)
+	dialer.onBye(bye, siptest.NewServerTxRecorder(bye))
+
+	select {
+	case <-released:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the media hook never fired for a BYE on an answered inbound call: the lease would be left outstanding")
+	}
+
+	recorder.Terminate()
+	waitClosed(t, returned, "onInvite() did not return once its INVITE transaction had retired")
+}

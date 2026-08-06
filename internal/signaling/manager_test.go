@@ -1597,3 +1597,30 @@ func TestManager_StartStreamCreatesNoDialogDuringAnsweredInboundCall(t *testing.
 		t.Fatal("StartStream() created = true during an answered inbound call, want false — no INVITE goes out, so the dialog is the call's")
 	}
 }
+
+// TestManager_OnInviteRespondsBusyWhileADialogIsActive pins the invariant that
+// the media teardown on a remote BYE relies on: an outbound preview and an
+// answered inbound call cannot coexist, so notifying the media hook from the
+// dialer's BYE handler cannot reach an unrelated preview's lease. If this test
+// is ever changed, revisit that branch in internal/signaling/dialer.go.
+func TestManager_OnInviteRespondsBusyWhileADialogIsActive(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(dialog.responses) != 1 || dialog.responses[0].status != 486 {
+		t.Fatalf("responses = %#v, want a single 486 Busy Here", dialog.responses)
+	}
+
+	if err := manager.Answer(context.Background()); !errors.Is(err, ErrNoIncomingDialog) {
+		t.Fatalf("Answer() error = %v, want ErrNoIncomingDialog — the refused INVITE was never reserved", err)
+	}
+}

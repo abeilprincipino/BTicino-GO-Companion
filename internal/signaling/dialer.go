@@ -289,23 +289,38 @@ func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) 
 	}
 
 	if answered {
-		// Manager.RemoteDialogEnded clears the active call without sending a BYE
-		// back, because the far end has already sent one.
+		// Two notifications, and both are needed.
 		//
-		// It is reached through the inbound handler this dialer already holds,
-		// and deliberately not through the remoteDialogEnded callback: that one
-		// is the outbound stream hook, owned by the media source, and means the
-		// preview's own dialog went away. Calling it here would tear down media
-		// for a call the user is still on.
+		// The handler is the manager: it clears the active call without sending a
+		// BYE back, because the far end has already sent one.
 		//
-		// The call is synchronous, which is safe because this goroutine is
+		// The callback is the media source's, and it was deliberately omitted here
+		// until inbound answering could hold a media lease: the hook meant "the
+		// preview's own dialog went away", so firing it would have torn down media
+		// for a call the user was still on. An answered call can now hold the
+		// lease, and nothing else releases it — without this the card keeps its
+		// last frame until an OpenWebNet stop frame or the stall watchdog reclaims
+		// it.
+		//
+		// It cannot reach an unrelated preview's lease: OnInvite answers busy
+		// while any dialog is active, so a preview and an answered inbound call
+		// cannot coexist. TestManager_OnInviteRespondsBusyWhileADialogIsActive
+		// pins that invariant. See
+		// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
+		//
+		// The manager call is synchronous, which is safe because this goroutine is
 		// already tracked by inboundWG and RemoteDialogEnded neither blocks nor
 		// re-enters the dialer: it takes the manager's state lock, clears the
 		// active dialog and queues the event for the manager's own drain
-		// goroutine.
+		// goroutine. The media callback runs on a goroutine of its own and reaches
+		// the manager a second time, which is harmless: RemoteDialogEnded returns
+		// early when nothing is active, and only the first call publishes
+		// CallHungUp.
 		if handler := d.inboundHandler(); handler != nil {
 			handler.RemoteDialogEnded()
 		}
+
+		d.notifyRemoteDialogEnded()
 
 		d.logger.Info("inbound sip call ended by remote", "dialog_id", inboundDialogID(dialog))
 
