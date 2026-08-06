@@ -618,7 +618,25 @@ type bridgeSource struct {
 	bridge *media.AudioBridge
 }
 
-var _ media.ManagedSourceBackchannel = (*bridgeSource)(nil)
+var (
+	_ media.ManagedSourceBackchannel = (*bridgeSource)(nil)
+	_ media.ManagedSourceCallEnder   = (*bridgeSource)(nil)
+)
+
+// EndCallOnClose forwards the consumer-release signal to the session that holds
+// the SIP dialog.
+//
+// The forwarder is what makes the capability reach production at all. The
+// coordinator finds it by type assertion on the ManagedSource it was handed, and
+// that is always a *bridgeSource, which holds the session as a named field
+// rather than embedding it. Without this method the assertion misses in silence
+// and releasing a lease adopted for an answered inbound call sends no BYE: the
+// media goes and the doorbell call stays up, the visitor talking to nobody —
+// the mirror of the defect the capability exists to fix. The assertion above is
+// what keeps a future method on the interface from being forgotten here.
+func (s *bridgeSource) EndCallOnClose() {
+	s.source.EndCallOnClose()
+}
 
 func (s *bridgeSource) Start(ctx context.Context) error {
 	if err := s.bridge.Start(ctx); err != nil {
