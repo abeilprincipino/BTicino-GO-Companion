@@ -102,7 +102,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	s.startDone = make(chan struct{})
 	s.mu.Unlock()
 
-	var videoStarted, audioStarted, sipStarted, ownsDialog bool
+	var videoStarted, audioStarted, sipStarted bool
 
 	started := false
 	defer func() {
@@ -113,7 +113,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 			// merely borrowed. On a lease adopted for an answered inbound call no
 			// INVITE went out, so there is no dialog of ours to BYE — and the one
 			// that exists is the call the user is on.
-			hangup := sipStarted && ownsDialog && !s.remoteEnded && !s.terminating
+			hangup := sipStarted && s.ownsDialog && !s.remoteEnded && !s.terminating
 
 			// The startup path is the only one that knows whether the INVITE
 			// had already gone out when the peer ended the dialog, so it is the
@@ -176,7 +176,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 
 	audioStarted = true
 
-	ownsDialog, err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr)
+	owns, err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr)
 	if err != nil {
 		return fmt.Errorf("start outgoing sip: %w", err)
 	}
@@ -184,7 +184,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	sipStarted = true
 
 	s.mu.Lock()
-	s.ownsDialog = ownsDialog
+	s.ownsDialog = owns
 	s.mu.Unlock()
 
 	videoPort := s.video.Metadata().LocalPort

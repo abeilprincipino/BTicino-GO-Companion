@@ -307,6 +307,29 @@ func TestSourceSessionRemoteDialogEndedClearsTheSharedSIPManager(t *testing.T) {
 	}
 }
 
+func TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall(t *testing.T) {
+	sip := &fakeSourceSIP{adopted: true}
+	av := &fakeSourceAV{err: errors.New("nack")}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C100X", DevAddr: "20"}, "main", sip, av, video, audio)
+
+	if err := session.Start(context.Background()); err == nil {
+		t.Fatal("Start() error = nil, want the AV failure")
+	}
+
+	if sip.hangups != 0 {
+		t.Fatalf("BYE count = %d, want 0 — the dialog belongs to the answered call, not to this session", sip.hangups)
+	}
+
+	if sip.remoteEndeds != 0 {
+		t.Fatalf("remote dialog notifications = %d, want 0 — the peer did not end anything", sip.remoteEndeds)
+	}
+
+	if video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("receivers not released: video=%#v audio=%#v", video, audio)
+	}
+}
+
 type recordingStreamDialer struct {
 	mu      sync.Mutex
 	calls   int
@@ -447,22 +470,3 @@ func (r *fakeSourceReceiver) Metadata() RTPMetadata {
 type zeroPortSourceReceiver struct{ fakeSourceReceiver }
 
 func (*zeroPortSourceReceiver) Metadata() RTPMetadata { return RTPMetadata{LocalPort: 0} }
-
-func TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall(t *testing.T) {
-	sip := &fakeSourceSIP{adopted: true}
-	av := &fakeSourceAV{err: errors.New("nack")}
-	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
-	session := NewSourceSession(nil, SourceConfig{Model: "C100X", DevAddr: "20"}, "main", sip, av, video, audio)
-
-	if err := session.Start(context.Background()); err == nil {
-		t.Fatal("Start() error = nil, want the AV failure")
-	}
-
-	if sip.hangups != 0 {
-		t.Fatalf("BYE count = %d, want 0 — the dialog belongs to the answered call, not to this session", sip.hangups)
-	}
-
-	if video.closes != 1 || audio.closes != 1 {
-		t.Fatalf("receivers not released: video=%#v audio=%#v", video, audio)
-	}
-}
