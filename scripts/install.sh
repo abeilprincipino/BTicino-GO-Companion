@@ -208,7 +208,6 @@ wait_for_health() { elapsed=0; while [ "${elapsed}" -lt "$2" ]; do health_endpoi
 
 FLEXISIP_USERS_DB="/etc/flexisip/users/users.db.txt"
 FLEXISIP_ROUTE="/etc/flexisip/users/route.conf"
-FLEXISIP_ROUTE_INT="/etc/flexisip/users/route_int.conf"
 FLEXISIP_DOMAIN_REG="/etc/flexisip/domain-registration.conf"
 SIP_USER="companion"
 SIP_CONFIG_CHANGED=0
@@ -236,20 +235,24 @@ backup_once() {
 	[ -f "$1.companion.bak" ] || cp -p "$1" "$1.companion.bak"
 }
 
-# route_int_has_companion reports whether the companion contact is in the alluser
+# route_has_companion reports whether the companion contact is in the alluser
 # group of $2, not merely somewhere in the file. Anchoring on the alluser contact
 # and refusing a '#' in between is what rejects a match that sits in a trailing
 # comment: the insertion below appends to the end of the line, so on a line such
 # as '<sip:alluser@dom> <sip:x@dom>   # handsets' it lands after the '#' and
 # changes nothing, while a plain grep for the contact finds it there all the same
 # and would report a file that was never provisioned as provisioned.
-route_int_has_companion() {
+route_has_companion() {
 	grep -q "sip:alluser@$1>[^#]*sip:${SIP_USER}@$1" "$2"
 }
 
 provision_flexisip_user() {
 	domain="$1"
-	for file in "${FLEXISIP_USERS_DB}" "${FLEXISIP_ROUTE}" "${FLEXISIP_ROUTE_INT}"; do
+	# route_int.conf is deliberately absent: flexisip reads
+	# static-records-file=/etc/flexisip/users/route.conf, so editing route_int.conf
+	# provisioned nothing. Requiring a file this installer no longer writes would
+	# fail an installation for no reason.
+	for file in "${FLEXISIP_USERS_DB}" "${FLEXISIP_ROUTE}"; do
 		if ! backup_once "${file}"; then
 			warn "Missing ${file}; skipping SIP inbound provisioning."
 			return 1
@@ -266,23 +269,26 @@ provision_flexisip_user() {
 		log "Added ${SIP_USER}@${domain} to users.db.txt"
 	fi
 
-	if ! grep -q "sip:${SIP_USER}@${domain}" "${FLEXISIP_ROUTE}"; then
-		printf '<sip:%s@%s> <sip:127.0.0.1>\n' "${SIP_USER}" "${domain}" >> "${FLEXISIP_ROUTE}"
-		log "Added ${SIP_USER}@${domain} to route.conf"
-	fi
+	# No static record is written. One used to be, pointing at <sip:127.0.0.1> —
+	# which resolves to flexisip itself rather than the companion's listener.
+	# Dynamic registration supplies a correct contact, so the record added nothing
+	# and made flexisip fork every inbound INVITE twice, delivering every doorbell
+	# call to the companion in duplicate. Devices provisioned before this change
+	# keep that line until it is removed by hand; see
+	# docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
 
-	if route_int_has_companion "${domain}" "${FLEXISIP_ROUTE_INT}"; then
+	if route_has_companion "${domain}" "${FLEXISIP_ROUTE}"; then
 		ok "SIP inbound already provisioned."
 		return 0
 	fi
 
-	tmp="${FLEXISIP_ROUTE_INT}.companion.tmp"
-	sed "s|\(<sip:alluser@${domain}>.*\)$|\1, <sip:${SIP_USER}@${domain}>|" "${FLEXISIP_ROUTE_INT}" > "${tmp}"
+	tmp="${FLEXISIP_ROUTE}.companion.tmp"
+	sed "s|\(<sip:alluser@${domain}>.*\)$|\1, <sip:${SIP_USER}@${domain}>|" "${FLEXISIP_ROUTE}" > "${tmp}"
 
-	# route_int.conf must stay one line per group; a mangled file breaks the
-	# whole intercom, so validate before replacing the original. The count is
-	# compared as a string: grep -c prints 0 and exits 1 with no match, and an
-	# empty count must take the warn branch rather than make [ ] error out.
+	# route.conf must stay one line per group; a mangled file breaks the whole
+	# intercom, so validate before replacing the original. The count is compared
+	# as a string: grep -c prints 0 and exits 1 with no match, and an empty count
+	# must take the warn branch rather than make [ ] error out.
 	#
 	# The second half of the check has to look at where the contact landed, not
 	# only whether it is there: the substitution above appends to the end of the
@@ -290,13 +296,13 @@ provision_flexisip_user() {
 	# plain grep passes that, and the installer then reports a provisioned file
 	# for a change that does nothing.
 	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" || true)"
-	if [ "${alluser_lines}" != "1" ] || ! route_int_has_companion "${domain}" "${tmp}"; then
+	if [ "${alluser_lines}" != "1" ] || ! route_has_companion "${domain}" "${tmp}"; then
 		rm -f "${tmp}"
-		warn "route_int.conf rewrite failed validation; original left untouched."
+		warn "route.conf rewrite failed validation; original left untouched."
 		return 1
 	fi
 
-	mv "${tmp}" "${FLEXISIP_ROUTE_INT}"
+	mv "${tmp}" "${FLEXISIP_ROUTE}"
 	log "Added ${SIP_USER}@${domain} to the alluser group"
 
 	return 0
