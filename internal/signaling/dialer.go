@@ -302,20 +302,30 @@ func (d *streamDialer) onInboundBye(req *sip.Request, tx sip.ServerTransaction) 
 		// last frame until an OpenWebNet stop frame or the stall watchdog reclaims
 		// it.
 		//
-		// It cannot reach an unrelated preview's lease: OnInvite answers busy
-		// while any dialog is active, so a preview and an answered inbound call
-		// cannot coexist. TestManager_OnInviteRespondsBusyWhileADialogIsActive
-		// pins that invariant. See
+		// It cannot reach a lease whose dialog is somebody else's, because while an
+		// answered inbound call is up no other lease can have a dialog of its own.
+		// A preview started during such a call is not refused — StartStream returns
+		// created=false and adopts the call's dialog rather than dialing
+		// (Manager.StartStream) — and OnInvite answers 486 while any dialog is
+		// active, so no second dialog appears from the other direction either.
+		// TestManager_StartStreamCreatesNoDialogDuringAnsweredInboundCall pins the
+		// half that would actually break this call; the 486 half is pinned by
+		// TestManager_OnInviteRejectsCallWhileOutgoingStreamActive. See
 		// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
 		//
 		// The manager call is synchronous, which is safe because this goroutine is
 		// already tracked by inboundWG and RemoteDialogEnded neither blocks nor
 		// re-enters the dialer: it takes the manager's state lock, clears the
-		// active dialog and queues the event for the manager's own drain
-		// goroutine. The media callback runs on a goroutine of its own and reaches
-		// the manager a second time, which is harmless: RemoteDialogEnded returns
-		// early when nothing is active, and only the first call publishes
-		// CallHungUp.
+		// active dialog and queues the event for the manager's own drain goroutine.
+		//
+		// The media callback then runs on a goroutine of its own and reaches the
+		// manager a second time. RemoteDialogEnded clears whatever is active when
+		// it runs — not merely "this call" — so what makes the second hop a no-op
+		// is ordering, not the method: the synchronous call above has already
+		// cleared this call and published CallHungUp. The residual window is a
+		// preview started in the gap between the two, which the late callback would
+		// then drop without a BYE. Closing it needs per-call dialog identity down
+		// in the media lease, which this fix deliberately does not introduce.
 		if handler := d.inboundHandler(); handler != nil {
 			handler.RemoteDialogEnded()
 		}
