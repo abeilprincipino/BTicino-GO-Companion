@@ -15,23 +15,27 @@
 - An outbound preview must behave exactly as it does today. `ownsDialog == true` reproduces current behaviour on every path; every existing test that does not opt into adoption must pass unchanged.
 - Safe by default: a teardown cause added in the future must not end a call unless it says so. `endsCall` is false in the zero value, and only `causeConsumerReleased` sets it true.
 - This plan changes only *whether a teardown ends the SIP call*. It must not change *when* a teardown happens. Do not touch `ObserveControlStop`'s guards, `Reconcile`'s stall logic, or `ObserveControlTrack`.
-- Task 5 is independent of Tasks 1-4 — it shares only the debugging session that found it. It may be executed and committed in any order relative to them.
+- Task 4 is independent of Tasks 1-3 — it shares only the debugging session that found it. It may be executed and committed in any order relative to them.
 - Out of scope, do not implement: confirming a stop frame against RTP flow; telling the intercom a call was answered elsewhere; removing bad static records from already-installed devices.
 
 ---
 
-### Task 1: The SIP layer reports whether it created the dialog
+### Task 1: The SIP layer reports dialog ownership, and a failed startup honours it
 
 **Files:**
 - Modify: `internal/signaling/manager.go:438-464` (`StartStream`)
-- Modify: `internal/media/source_session.go:15-24` (the `SourceSIP` interface), `:49-65` (the struct), `:88-93` (per-start reset), `:165-169` (the call site)
-- Test: `internal/signaling/manager_test.go`, `internal/media/source_session_test.go:354-374` (the fakes)
+- Modify: `internal/media/source_session.go:15-24` (the `SourceSIP` interface), `:49-65` (the struct), `:88-93` (per-start reset), `:100-112` (the deferred cleanup), `:165-169` (the call site)
+- Test: `internal/signaling/manager_test.go`, `internal/media/source_session_test.go` (new tests, and the fakes at `:354-374`)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `func (m *Manager) StartStream(context.Context, string) (bool, error)` — reports `true` when it dialed, `false` when an answered inbound call meant no INVITE went out. `SourceSession.ownsDialog` holds the answer; Tasks 2 and 3 read it.
+- Produces: `func (m *Manager) StartStream(context.Context, string) (bool, error)` — reports `true` when it dialed, `false` when an answered inbound call meant no INVITE went out. `SourceSession.ownsDialog` holds the answer; Task 2 reads it too.
 
-This task stores the fact and changes no behaviour. Tasks 2 and 3 act on it.
+`ownsDialog` is created *and* consumed here in one task on purpose. A commit that only stored it would leave a field written and never read, which `unused` and `ineffassign` — both enabled in `.golangci.yml` — would rightly flag as dead state.
+
+The BYE site this task closes is the one a teardown-reason check could never reach: the deferred cleanup inside `Start` runs before any teardown reason exists. The other site, `Close`, is Task 2's.
+
+The work comes in two TDD waves — the signaling report first, then the startup gate that consumes it. Each wave's test must fail before its implementation.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -185,7 +189,7 @@ Replace lines 165-169:
 	s.mu.Unlock()
 ```
 
-`:=` is correct here even though `ownsDialog` already exists: it and the `var` line are both at `Start`'s top-level scope, so `ownsDialog` is assigned rather than shadowed, and `err` — which is only ever declared inside `if` statements above — is newly declared. The deferred cleanup in Task 2 reads the same local.
+`:=` is correct here even though `ownsDialog` already exists: it and the `var` line are both at `Start`'s top-level scope, so `ownsDialog` is assigned rather than shadowed, and `err` — which is only ever declared inside `if` statements above — is newly declared. The deferred cleanup gated in Step 11 reads the same local.
 
 - [ ] **Step 7: Update the media test fakes**
 
@@ -224,7 +228,7 @@ func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
 func (*blockingInviteSIP) RemoteDialogEnded()           {}
 ```
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 8: Run the first wave to verify it passes**
 
 Run: `go test ./internal/signaling/ -run TestManager_StartStream -v`
 Expected: PASS, two tests.
@@ -234,28 +238,7 @@ Expected: no build output; both packages `ok`.
 
 If another package fails to build on `StartStream`, it is calling the manager's method. Fix it by discarding the new value with `_, err := ...` — no other caller needs the ownership fact.
 
-- [ ] **Step 9: Commit**
-
-```bash
-git add internal/signaling/manager.go internal/signaling/manager_test.go internal/media/source_session.go internal/media/source_session_test.go
-git commit -m "feat(signaling): report whether StartStream created the dialog"
-```
-
----
-
-### Task 2: A failed startup never BYEs a dialog it did not create
-
-**Files:**
-- Modify: `internal/media/source_session.go:100-112` (the deferred cleanup inside `Start`)
-- Test: `internal/media/source_session_test.go`
-
-**Interfaces:**
-- Consumes: `SourceSession.ownsDialog` and `fakeSourceSIP.adopted` from Task 1.
-- Produces: nothing for later tasks.
-
-This is the BYE site that a teardown-reason check could never reach: it runs from inside `Start`, before any teardown reason exists.
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 9: Write the failing test for the startup gate**
 
 Append to `internal/media/source_session_test.go`:
 
@@ -280,14 +263,14 @@ func TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall(t *testing.T) {
 }
 ```
 
-`TestSourceSessionCleansUpSIPAndReceiversWhenAVFails` at line 46 is the owned-dialog counterpart and must keep passing untouched: it asserts `sip.hangups != 1` is a failure.
+`TestSourceSessionCleansUpSIPAndReceiversWhenAVFails` at line 46 is the owned-dialog counterpart and must keep passing untouched: it treats `sip.hangups != 1` as a failure.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 10: Run it to verify it fails**
 
 Run: `go test ./internal/media/ -run TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall -v`
 Expected: FAIL with `BYE count = 1, want 0`.
 
-- [ ] **Step 3: Gate the startup BYE on ownership**
+- [ ] **Step 11: Gate the startup BYE on ownership**
 
 In `internal/media/source_session.go`, replace line 102:
 
@@ -307,24 +290,24 @@ with:
 
 Leave the `remoteEnded` line below it unchanged: when the peer really ended the dialog, the SIP layer must be told whether or not the dialog was ours.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 12: Run the tests to verify they pass**
 
 Run: `go test ./internal/media/ -run TestSourceSession -v`
 Expected: PASS, including `TestSourceSessionCleansUpSIPAndReceiversWhenAVFails`.
 
-Run: `go test -race ./internal/media/`
-Expected: `ok  	bticino-go-companion/internal/media`
+Run: `go test -race ./internal/media/ ./internal/signaling/`
+Expected: both packages `ok`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
-git add internal/media/source_session.go internal/media/source_session_test.go
+git add internal/signaling/manager.go internal/signaling/manager_test.go internal/media/source_session.go internal/media/source_session_test.go
 git commit -m "fix(media): keep a failed startup from ending an adopted call"
 ```
 
 ---
 
-### Task 3: A media teardown ends the call only when the consumer released it
+### Task 2: A media teardown ends the call only when the consumer released it
 
 **Files:**
 - Modify: `internal/media/stream_coordinator.go` — new type and causes near the constants at lines 21-24; `sourceEvents` at `:256-270`; `startSource` at `:304`, `:311`; `Reconcile` at `:375`; `Release` at `:384`; `stop` at `:409-437`; `finishStop` at `:439-476`; `ObserveControlStop` at `:528`
@@ -738,7 +721,7 @@ git commit -m "fix(media): let only a consumer release end the call"
 
 ---
 
-### Task 4: A BYE on an answered inbound call releases the media lease
+### Task 3: A BYE on an answered inbound call releases the media lease
 
 **Files:**
 - Modify: `internal/signaling/dialer.go:291-313` (the `answered` branch of the BYE handler)
@@ -914,13 +897,13 @@ git commit -m "fix(signaling): release media when the peer ends an answered call
 
 ---
 
-### Task 5: The flexisip provisioning defects
+### Task 4: The flexisip provisioning defects
 
 **Files:**
 - Modify: `scripts/install.sh:209-303` (`FLEXISIP_ROUTE_INT`, `route_int_has_companion`, `provision_flexisip_user`)
 
 **Interfaces:**
-- Consumes: nothing. Independent of Tasks 1-4 and may be done in any order relative to them.
+- Consumes: nothing. Independent of Tasks 1-3 and may be done in any order relative to them.
 - Produces: nothing.
 
 `scripts/` has no test harness, so this task is verified by reading the diff and by a run on the device. Keep the change small enough to read.
@@ -1063,12 +1046,12 @@ git commit -m "fix(install): provision the companion in the route file flexisip 
 
 ---
 
-### Task 6: On-device verification
+### Task 5: On-device verification
 
 **Files:** none. This task changes no code. It is the gate that says the fix works on real hardware.
 
 **Interfaces:**
-- Consumes: a deployed binary containing Tasks 1 to 4.
+- Consumes: a deployed binary containing Tasks 1 to 3.
 
 - [ ] **Step 1: Deploy and restart**
 
@@ -1090,7 +1073,7 @@ In the companion log, expect a `stream teardown started` whose `reason` is **not
 
 - [ ] **Step 4: Confirm a consumer release still ends the call**
 
-Ring, answer from the card, then hang up from the card. The doorbell call must end. This is the behaviour Task 3 deliberately preserved, and the one most at risk from the change.
+Ring, answer from the card, then hang up from the card. The doorbell call must end. This is the behaviour Task 2 deliberately preserved, and the one most at risk from the change.
 
 - [ ] **Step 5: Confirm the outbound preview is unchanged**
 
@@ -1098,7 +1081,7 @@ With no call in progress, open the preview from the card and close it. It must s
 
 - [ ] **Step 6: Confirm a remote hangup clears the card**
 
-Ring, answer from the card, then hang up at the doorbell station. The card must stop showing the last frame promptly rather than holding it for the several seconds it took before Task 4.
+Ring, answer from the card, then hang up at the doorbell station. The card must stop showing the last frame promptly rather than holding it for the several seconds it took before Task 3.
 
 - [ ] **Step 7: If the picture drops, capture the evidence for the deferred work**
 
