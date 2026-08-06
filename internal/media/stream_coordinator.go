@@ -23,6 +23,43 @@ const (
 	watchInterval    = time.Second
 )
 
+// stopCause says why a lease is being torn down, and whether that teardown may
+// end the SIP call behind it.
+//
+// Only a consumer letting go of the lease ends the call: without a WebRTC
+// session there is no audio path to the user, so a call left up would leave the
+// visitor talking to nobody. Every other cause is a media-layer misfortune — a
+// foreign OpenWebNet stop frame, an RTP stall, a transport failure, a failed
+// startup — and the user may still be mid-conversation, so the call must
+// survive it and the card can re-offer to get the picture back.
+//
+// endsCall is false in the zero value on purpose: a cause added later cannot
+// end a call unless it says so. See
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
+type stopCause struct {
+	reason   string
+	endsCall bool
+}
+
+var (
+	causeConsumerReleased = stopCause{reason: "consumer released", endsCall: true}
+	causeRemoteBYE        = stopCause{reason: "remote sip bye"}
+	causeControlStop      = stopCause{reason: "openwebnet stream stop"}
+	causeTracksStalled    = stopCause{reason: "rtp tracks stalled"}
+	causeSourceFailure    = stopCause{reason: "managed source failure"}
+	causeSourceCreation   = stopCause{reason: "source creation failed"}
+	causeStartupFailed    = stopCause{reason: "source startup failed"}
+	causeStartupTimedOut  = stopCause{reason: "source startup timed out"}
+)
+
+// ManagedSourceCallEnder is an optional capability of a managed source that
+// carries a SIP call it did not create. Such a source keeps the call up through
+// its own teardown unless finishStop tells it otherwise, which it does only for
+// a teardown a consumer asked for.
+type ManagedSourceCallEnder interface {
+	EndCallOnClose()
+}
+
 type StreamOwner string
 
 type StreamHealth string
@@ -179,7 +216,7 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 
 	source, cleanup, err := c.factory(entrypoint, c.sourceEvents(lease, events))
 	if err != nil || source == nil {
-		c.finishStop(lease, nil, cleanup, "source creation failed")
+		c.finishStop(lease, nil, cleanup, causeSourceCreation)
 
 		if err != nil {
 			c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", err)
@@ -254,7 +291,7 @@ func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents
 			}
 		},
 		RemoteBYE: func() {
-			c.stop(lease, "remote sip bye")
+			c.stop(lease, causeRemoteBYE)
 
 			if events.RemoteBYE != nil {
 				events.RemoteBYE()
@@ -262,7 +299,7 @@ func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents
 		},
 		Failed: func(err error) {
 			c.logger.Error("media source failed", "lease_id", lease.id, "error", err)
-			c.stop(lease, "managed source failure")
+			c.stop(lease, causeSourceFailure)
 
 			if events.Failed != nil {
 				events.Failed(err)
@@ -301,14 +338,14 @@ func (c *StreamCoordinator) startSource(lifecycleCtx, startupCtx context.Context
 	case err := <-startResult:
 		if err != nil {
 			c.logger.ErrorContext(lifecycleCtx, "media source start failed", "lease_id", lease.id, "entrypoint_id", entrypointID, "error", err)
-			c.stop(lease, "source startup failed")
+			c.stop(lease, causeStartupFailed)
 
 			return err
 		}
 	case <-startupCtx.Done():
 		// Teardown may need to wait for a cooperative source startup, but the
 		// signaling request must not remain blocked beyond its startup budget.
-		go c.stop(lease, "source startup timed out")
+		go c.stop(lease, causeStartupTimedOut)
 		return startupCtx.Err()
 	}
 
@@ -372,7 +409,7 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 
 	if stalled {
 		c.logger.Warn("stream stalled; stopping source", "lease_id", lease.id, "video_last_packet_at", videoLastPacket, "audio_last_packet_at", audioLastPacket)
-		c.stop(lease, "rtp tracks stalled")
+		c.stop(lease, causeTracksStalled)
 
 		return true
 	}
@@ -380,8 +417,10 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 	return false
 }
 
+// Release ends the lease and, with it, the SIP call behind it. That is the one
+// teardown the user asked for.
 func (c *StreamCoordinator) Release(lease *StreamLease) bool {
-	return c.stop(lease, "consumer released")
+	return c.stop(lease, causeConsumerReleased)
 }
 
 // WriteBackchannelRTP forwards uplink RTP only to the current live source lease.
@@ -406,7 +445,7 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 	return backchannel.WriteBackchannelRTP(packet)
 }
 
-func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {
+func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 	if lease == nil {
 		return false
 	}
@@ -414,14 +453,14 @@ func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
-		c.logger.Debug("stream stop ignored; lease is no longer active", "lease_id", lease.id, "reason", reason)
+		c.logger.Debug("stream stop ignored; lease is no longer active", "lease_id", lease.id, "reason", cause.reason)
 
 		return false
 	}
 
 	if c.stopping {
 		c.mu.Unlock()
-		c.logger.Debug("stream stop ignored; teardown already in progress", "lease_id", lease.id, "reason", reason)
+		c.logger.Debug("stream stop ignored; teardown already in progress", "lease_id", lease.id, "reason", cause.reason)
 
 		return false
 	}
@@ -430,16 +469,25 @@ func (c *StreamCoordinator) stop(lease *StreamLease, reason string) bool {
 	source, cleanup := c.source, c.cleanup
 	c.source, c.cleanup = nil, nil
 	c.mu.Unlock()
-	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", reason)
-	c.finishStop(lease, source, cleanup, reason)
+	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", cause.reason)
+	c.finishStop(lease, source, cleanup, cause)
 
 	return true
 }
 
-func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource, cleanup func(), reason string) {
+func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource, cleanup func(), cause stopCause) {
 	var closeErr error
 
 	if source != nil {
+		// Told before Close, because Close is where the source decides whether to
+		// send a BYE. A source that did not create its dialog keeps the call up
+		// unless this ran.
+		if cause.endsCall {
+			if ender, ok := source.(ManagedSourceCallEnder); ok {
+				ender.EndCallOnClose()
+			}
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		closeErr = source.Close(ctx)
 
@@ -468,11 +516,11 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 	}
 
 	if closeErr != nil {
-		c.logger.Error("stream teardown failed", "lease_id", lease.id, "reason", reason, "error", fmt.Errorf("close managed source: %w", closeErr))
+		c.logger.Error("stream teardown failed", "lease_id", lease.id, "reason", cause.reason, "error", fmt.Errorf("close managed source: %w", closeErr))
 		return
 	}
 
-	c.logger.Info("stream teardown completed", "lease_id", lease.id, "reason", reason)
+	c.logger.Info("stream teardown completed", "lease_id", lease.id, "reason", cause.reason)
 }
 
 // ObserveControlTrack marks a requested track from an OpenWebNet AV start frame.
@@ -525,7 +573,7 @@ func (c *StreamCoordinator) ObserveControlStop() {
 
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.stop(lease, "openwebnet stream stop")
+	c.stop(lease, causeControlStop)
 }
 
 func (c *StreamCoordinator) observeRequestedTrackLocked(video bool) {

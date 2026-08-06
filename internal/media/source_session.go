@@ -49,7 +49,10 @@ type SourceReceiver interface {
 	Metadata() RTPMetadata
 }
 
-// SourceSession owns the SIP dialog and both RTP sockets for one device source.
+// SourceSession owns both RTP sockets for one device source, and owns the SIP
+// dialog only when it created it. A lease adopted for an answered inbound call
+// borrows the call's dialog: see ownsDialog, and
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
 type SourceSession struct {
 	mu           sync.Mutex
 	logger       *slog.Logger
@@ -70,7 +73,11 @@ type SourceSession struct {
 	// lease adopted for an answered inbound call, whose dialog belongs to the
 	// call: no teardown of this session's media may end it.
 	ownsDialog bool
-	onStarted  func()
+
+	// endCallOnClose lets a teardown the consumer asked for end a dialog this
+	// session did not create. Nothing else may.
+	endCallOnClose bool
+	onStarted      func()
 }
 
 func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypointID core.EntrypointID, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
@@ -98,6 +105,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	s.remoteEnded = false
 	s.terminating = false
 	s.ownsDialog = false
+	s.endCallOnClose = false
 	s.startCancel = cancel
 	s.startDone = make(chan struct{})
 	s.mu.Unlock()
@@ -216,6 +224,22 @@ func (s *SourceSession) SetStartedCallback(callback func()) {
 	s.mu.Unlock()
 }
 
+// EndCallOnClose tells the session that the teardown about to run came from the
+// consumer letting go of the lease, so the next Close must end the SIP call even
+// for a dialog this session did not create.
+//
+// Releasing the lease ending the doorbell call is deliberate: without a WebRTC
+// session there is no audio path to the user, so a call left up would leave the
+// visitor talking to nobody. What must not end the call is a media teardown
+// under a consumer that is still there — a foreign OpenWebNet stop frame, an
+// RTP stall, a transport failure. See
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
+func (s *SourceSession) EndCallOnClose() {
+	s.mu.Lock()
+	s.endCallOnClose = true
+	s.mu.Unlock()
+}
+
 func (s *SourceSession) Close(ctx context.Context) error {
 	s.mu.Lock()
 	if s.starting {
@@ -239,7 +263,7 @@ func (s *SourceSession) Close(ctx context.Context) error {
 	s.logger.InfoContext(ctx, "source session stopping")
 	s.started = false
 
-	hangup := !s.remoteEnded && !s.terminating
+	hangup := !s.remoteEnded && !s.terminating && (s.ownsDialog || s.endCallOnClose)
 	if hangup {
 		s.terminating = true
 	}

@@ -362,3 +362,86 @@ func TestStreamCoordinatorAnsweredCallDoesNotOverrideABusyLease(t *testing.T) {
 		t.Fatal("release source lease")
 	}
 }
+
+type callEndingSource struct {
+	closes       int
+	endCallCalls int
+}
+
+func (*callEndingSource) Start(context.Context) error   { return nil }
+func (s *callEndingSource) Close(context.Context) error { s.closes++; return nil }
+func (s *callEndingSource) EndCallOnClose()             { s.endCallCalls++ }
+
+func TestStreamCoordinatorConsumerReleaseEndsTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Release(lease) {
+		t.Fatal("release source lease")
+	}
+
+	if source.endCallCalls != 1 {
+		t.Fatalf("EndCallOnClose calls = %d, want 1", source.endCallCalls)
+	}
+}
+
+func TestStreamCoordinatorOpenWebNetStopDoesNotEndTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	endControlAttempt(c)
+	c.ObserveControlStop()
+
+	if source.closes != 1 {
+		t.Fatalf("source closes = %d, want 1 — the media teardown itself is unchanged", source.closes)
+	}
+
+	if source.endCallCalls != 0 {
+		t.Fatalf("EndCallOnClose calls = %d, want 0 — a foreign stop frame must not end the call", source.endCallCalls)
+	}
+
+	if c.Release(lease) {
+		t.Fatal("released an already stopped lease")
+	}
+}
+
+func TestStreamCoordinatorStalledTracksDoNotEndTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	c.ObserveControlTrack(false)
+	endControlAttempt(c)
+
+	if !c.Reconcile(lease, time.Now().Add(2*trackFlowTimeout)) {
+		t.Fatal("Reconcile() = false, want true — both requested tracks are long past the flow timeout")
+	}
+
+	if source.endCallCalls != 0 {
+		t.Fatalf("EndCallOnClose calls = %d, want 0 — an RTP stall must not end the call", source.endCallCalls)
+	}
+}

@@ -330,6 +330,47 @@ func TestSourceSessionFailedStartupDoesNotBYEAnAdoptedCall(t *testing.T) {
 	}
 }
 
+func TestSourceSessionCloseDoesNotBYEAnAdoptedCall(t *testing.T) {
+	sip := &fakeSourceSIP{adopted: true}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, &fakeSourceAV{}, video, audio)
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if sip.hangups != 0 {
+		t.Fatalf("BYE count = %d, want 0 — a media teardown must not end the call the user is on", sip.hangups)
+	}
+
+	if video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("receivers not released: video=%#v audio=%#v", video, audio)
+	}
+}
+
+func TestSourceSessionCloseEndsAnAdoptedCallWhenTheConsumerReleased(t *testing.T) {
+	sip := &fakeSourceSIP{adopted: true}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	session.EndCallOnClose()
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if sip.hangups != 1 {
+		t.Fatalf("BYE count = %d, want 1 — the user let go of the lease, which ends the doorbell call on purpose", sip.hangups)
+	}
+}
+
 type recordingStreamDialer struct {
 	mu      sync.Mutex
 	calls   int

@@ -268,14 +268,17 @@ func (m *Manager) Decline(ctx context.Context) error {
 }
 
 // Hangup is idempotent: tearing down a call that is already gone is not an
-// error, because SourceSession.Close runs it again on every normal teardown.
+// error, because SourceSession.Close may run it again on a later teardown.
 //
-// It deliberately has no counterpart to StartStream's no-op on an answered
-// inbound call: media.SourceSession.Close runs Hangup on every lease teardown,
-// and that ends a live doorbell call on purpose. Without the WebRTC session
-// there is no audio path to the user, so keeping the SIP call up would leave the
-// visitor talking to nobody. The asymmetry with StartStream — which does nothing
-// rather than dial while such a call is up — is intended.
+// It has no counterpart to StartStream's no-op on an answered inbound call, and
+// needs none: the decision now lives with the caller. Releasing the lease still
+// ends a live doorbell call on purpose, because without a WebRTC session there
+// is no audio path and the visitor would talk to nobody. But a teardown the
+// consumer did not ask for — a foreign OpenWebNet stop frame, an RTP stall, a
+// transport failure — no longer reaches here at all: SourceSession.Close skips
+// Hangup for a dialog it did not create unless EndCallOnClose said otherwise.
+// Ending the call for those was the defect fixed in
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 
