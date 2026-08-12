@@ -425,7 +425,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		}
 	}
 
-	rt := system.NewRuntimeControl(system.NewInitServiceAdapter(nil), system.NewRebootAdapter(nil), allowed)
+	rt := system.NewRuntimeControl(system.NewInitScriptAdapter(nil), system.NewRebootAdapter(nil), allowed)
 	build := system.CurrentBuildInfo()
 	policy := func() system.UpdatePolicy {
 		cfg := configStore.Snapshot().System
