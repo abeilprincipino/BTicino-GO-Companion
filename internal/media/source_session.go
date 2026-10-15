@@ -21,7 +21,7 @@ type SourceSIP interface {
 
 	// AdoptRingingCall is StartStream for a ringing preview: it never dials, and
 	// reports whether the inbound call has already been answered.
-	AdoptRingingCall(devAddr string) (bool, error)
+	AdoptRingingCall(entrypointID core.EntrypointID) (bool, error)
 
 	// HangupCall ends an active dialog with a BYE and leaves a ringing call
 	// alone. It is the only hangup a media session may reach: rejecting a ringing
@@ -214,7 +214,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	if preview {
 		var err error
 
-		answered, err = s.sip.AdoptRingingCall(s.sourceConfig.DevAddr)
+		answered, err = s.sip.AdoptRingingCall(s.entrypointID)
 		if err != nil {
 			return fmt.Errorf("adopt ringing call: %w", err)
 		}

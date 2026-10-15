@@ -480,7 +480,7 @@ func (s *fakeSourceSIP) StartStream(context.Context, string) (bool, error) {
 	return !s.adopted, nil
 }
 
-func (s *fakeSourceSIP) AdoptRingingCall(string) (bool, error) {
+func (s *fakeSourceSIP) AdoptRingingCall(core.EntrypointID) (bool, error) {
 	s.adoptCalls++
 
 	return s.adoptAnswered, s.adoptErr
@@ -498,9 +498,9 @@ func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) (bool, er
 	return false, fmt.Errorf("wait for invite answer: %w", ctx.Err())
 }
 
-func (*blockingInviteSIP) AdoptRingingCall(string) (bool, error) { return false, nil }
-func (*blockingInviteSIP) HangupCall(context.Context) error      { return nil }
-func (*blockingInviteSIP) RemoteDialogEnded()                    {}
+func (*blockingInviteSIP) AdoptRingingCall(core.EntrypointID) (bool, error) { return false, nil }
+func (*blockingInviteSIP) HangupCall(context.Context) error                 { return nil }
+func (*blockingInviteSIP) RemoteDialogEnded()                               {}
 
 type fakeSourceAV struct {
 	calls      int
@@ -789,5 +789,28 @@ func TestSourceSessionPromotedPreviewEndsTheCallWhenTheConsumerReleases(t *testi
 
 	if call.byeCount() != 1 {
 		t.Fatalf("byes = %d, want 1 — the user let go of an answered call", call.byeCount())
+	}
+}
+
+// A C100X replaces the session's devaddr with a module ID, so the session and
+// the manager's resolver disagree on it; the entrypoint ID is what they share.
+func TestSourceSessionRingingPreviewAdoptsByEntrypointNotDevAddr(t *testing.T) {
+	dialer := &recordingStreamDialer{}
+	manager := signaling.NewManager("127.0.0.1", dialer, nil, func() (core.EntrypointID, string) { return "main", "20" })
+	call := &recordingIncomingDialog{id: "call-1"}
+
+	if err := manager.OnInvite(context.Background(), call); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C100X", DevAddr: "module-7"}, "main", manager, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v — the preview must adopt the ring of its own entrypoint", err)
+	}
+
+	if dialer.startCalls() != 0 {
+		t.Fatalf("invites = %d, want 0 — adopting never dials", dialer.startCalls())
 	}
 }

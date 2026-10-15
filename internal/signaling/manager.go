@@ -75,17 +75,18 @@ type Manager struct {
 	events  EventSink
 	resolve EntrypointResolver
 
-	incoming        IncomingDialog
-	incomingDevAddr string
-	incomingExpiry  *time.Timer
-	incomingTimeout time.Duration
+	incoming           IncomingDialog
+	incomingDevAddr    string
+	incomingEntrypoint core.EntrypointID
+	incomingExpiry     *time.Timer
+	incomingTimeout    time.Duration
 
 	active         OutgoingDialog
 	activeID       core.DialogID
 	activeIncoming bool
-	// activeDevAddr is the entrypoint the answered inbound call belongs to, kept
-	// because Answer clears incomingDevAddr.
-	activeDevAddr string
+	// activeEntrypoint is the entrypoint the answered inbound call belongs to,
+	// kept because Answer clears incomingEntrypoint.
+	activeEntrypoint core.EntrypointID
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -147,6 +148,7 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog) error {
 	// rejecting every later inbound call.
 	m.incoming = dialog
 	m.incomingDevAddr = devAddr
+	m.incomingEntrypoint = entrypointID
 	m.startIncomingExpiryLocked(dialog)
 	m.publishLocked(core.IncomingCallStarted{DialogID: dialog.ID(), EntrypointID: entrypointID})
 
@@ -191,7 +193,7 @@ func (m *Manager) respondBusy(ctx context.Context, dialog IncomingDialog) error 
 func (m *Manager) Answer(ctx context.Context) error {
 	m.mu.Lock()
 
-	dialog, devAddr := m.incoming, m.incomingDevAddr
+	dialog, devAddr, entrypointID := m.incoming, m.incomingDevAddr, m.incomingEntrypoint
 	if dialog == nil {
 		m.mu.Unlock()
 
@@ -242,10 +244,11 @@ func (m *Manager) Answer(ctx context.Context) error {
 	m.stopIncomingExpiryLocked()
 	m.incoming = nil
 	m.incomingDevAddr = ""
+	m.incomingEntrypoint = ""
 	m.active = dialog
 	m.activeID = dialog.ID()
 	m.activeIncoming = true
-	m.activeDevAddr = devAddr
+	m.activeEntrypoint = entrypointID
 	m.publishLocked(core.CallAnswered{DialogID: dialog.ID()})
 
 	return nil
@@ -335,7 +338,7 @@ func (m *Manager) byeActiveLocked(ctx context.Context) error {
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
-	m.activeDevAddr = ""
+	m.activeEntrypoint = ""
 
 	// activeID is empty exactly for an outbound preview, because StartStream
 	// publishes nothing: the projector never saw a dialog, and
@@ -371,7 +374,7 @@ func (m *Manager) RemoteDialogEnded() {
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
-	m.activeDevAddr = ""
+	m.activeEntrypoint = ""
 
 	// See Hangup: an empty dialog ID is an outbound preview, which the
 	// projector knows nothing about.
@@ -419,17 +422,18 @@ func (m *Manager) HasRingingInboundCall() bool {
 // Here from an intercom still winding the call down. See
 // docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 //
-// devAddr is the entrypoint the preview is for. Another entrypoint's ring is
-// not its call to borrow: on an install with several, its preview would show
-// the wrong door.
-func (m *Manager) AdoptRingingCall(devAddr string) (bool, error) {
+// entrypointID is the entrypoint the preview is for, not a devaddr: the media
+// layer may replace its own devaddr (a C100X module ID), so only the ID is
+// shared. Another entrypoint's ring is not its call to borrow: on an install
+// with several, its preview would show the wrong door.
+func (m *Manager) AdoptRingingCall(entrypointID core.EntrypointID) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	switch {
-	case m.incoming != nil && devAddr == m.incomingDevAddr:
+	case m.incoming != nil && entrypointID == m.incomingEntrypoint:
 		return false, nil
-	case m.active != nil && m.activeIncoming && devAddr == m.activeDevAddr:
+	case m.active != nil && m.activeIncoming && entrypointID == m.activeEntrypoint:
 		return true, nil
 	default:
 		return false, ErrNoInboundCall
@@ -475,6 +479,7 @@ func (m *Manager) takeIncomingLocked(expected IncomingDialog) IncomingDialog {
 	m.stopIncomingExpiryLocked()
 	m.incoming = nil
 	m.incomingDevAddr = ""
+	m.incomingEntrypoint = ""
 
 	return dialog
 }
