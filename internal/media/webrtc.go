@@ -366,7 +366,7 @@ func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSes
 	// until the peer or client explicitly closes the session.
 	lifecycleCtx := context.WithoutCancel(ctx)
 	startupCtx, startupCancel := context.WithTimeout(ctx, webrtcSourceStartupTimeout)
-	lease, err := s.coordinator.AcquireWithStartup(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
+	lease, err := s.coordinator.AcquireRingingPreview(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
 		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
 		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
 		RemoteBYE: func() { s.closeSession(session.id, "remote SIP BYE") },

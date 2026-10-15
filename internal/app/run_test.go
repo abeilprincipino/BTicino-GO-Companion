@@ -226,3 +226,43 @@ func testListener(t *testing.T) net.Listener {
 func writeOK(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
+
+type recordingRingingCoordinator struct{ calls []string }
+
+func (r *recordingRingingCoordinator) PromoteRinging() { r.calls = append(r.calls, "promote") }
+func (r *recordingRingingCoordinator) StopRinging()    { r.calls = append(r.calls, "stop") }
+
+func TestRouteRingingPreviewFollowsTheCall(t *testing.T) {
+	coordinator := &recordingRingingCoordinator{}
+
+	var applied []core.Event
+
+	route := routeRingingPreview(coordinator, func(event core.Event) { applied = append(applied, event) })
+
+	events := []core.Event{
+		core.IncomingCallStarted{DialogID: "d"},
+		core.CallAnswered{DialogID: "d"},
+		core.IncomingCallEnded{DialogID: "d", Reason: core.CallEndReasonElsewhere},
+		core.CallDeclined{DialogID: "d"},
+		core.CallHungUp{DialogID: "d"},
+		nil,
+	}
+	for _, event := range events {
+		route(event)
+	}
+
+	want := []string{"promote", "stop", "stop", "stop"}
+	if len(coordinator.calls) != len(want) {
+		t.Fatalf("coordinator calls = %v, want %v", coordinator.calls, want)
+	}
+
+	for i := range want {
+		if coordinator.calls[i] != want[i] {
+			t.Fatalf("coordinator calls = %v, want %v", coordinator.calls, want)
+		}
+	}
+
+	if len(applied) != len(events) {
+		t.Fatalf("applied %d events, want %d — every event still reaches the projector", len(applied), len(events))
+	}
+}

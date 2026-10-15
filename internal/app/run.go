@@ -134,7 +134,7 @@ func run(
 	// answers 503 Service Unavailable. Refusing the one call that can arrive in
 	// this startup window is honest and self-correcting; dropping its event is
 	// neither.
-	runtime.calls.SetEvents(eventSinkFunc(applyEvent))
+	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), applyEvent)))
 
 	if runtime.inboundSIP {
 		runtime.dialer.SetInboundHandler(runtime.calls)
@@ -394,6 +394,10 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// fact the companion's own answered call. See
 	// docs/superpowers/specs/2026-08-02-inbound-call-stream-ownership-design.md.
 	rtspServer.Coordinator().SetAnsweredCallProbe(calls.HasAnsweredInboundCall)
+	// While the call rings only a ringing preview may take the stream: RTSP and
+	// HomeKit wait for the answer. See
+	// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+	rtspServer.Coordinator().SetRingingCallProbe(calls.HasRingingInboundCall)
 
 	if err := rtspServer.Start(ctx); err != nil {
 		_ = dialer.Close()
@@ -537,6 +541,32 @@ type eventSinkFunc func(core.Event)
 
 func (f eventSinkFunc) Publish(event core.Event) { f(event) }
 
+// ringingPreviewCoordinator is the part of the stream coordinator the call
+// events drive.
+type ringingPreviewCoordinator interface {
+	PromoteRinging()
+	StopRinging()
+}
+
+// routeRingingPreview lets the call events move a ringing preview along: the
+// answer promotes it in place, every way the ring ends without that answer
+// stops it. The companion closes the preview on its own rather than relying on
+// the card. Neither call blocks the SIP event drain for long: promotion runs on
+// its own goroutine, and stopping a preview only closes local sockets. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func routeRingingPreview(coordinator ringingPreviewCoordinator, next func(core.Event)) func(core.Event) {
+	return func(event core.Event) {
+		next(event)
+
+		switch event.(type) {
+		case core.CallAnswered:
+			coordinator.PromoteRinging()
+		case core.IncomingCallEnded, core.CallDeclined, core.CallHungUp:
+			coordinator.StopRinging()
+		}
+	}
+}
+
 func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) func(core.Event) {
 	return func(event core.Event) {
 		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
@@ -619,8 +649,9 @@ type bridgeSource struct {
 }
 
 var (
-	_ media.ManagedSourceBackchannel = (*bridgeSource)(nil)
-	_ media.ManagedSourceCallEnder   = (*bridgeSource)(nil)
+	_ media.ManagedSourceBackchannel    = (*bridgeSource)(nil)
+	_ media.ManagedSourceCallEnder      = (*bridgeSource)(nil)
+	_ media.ManagedSourceRingingPreview = (*bridgeSource)(nil)
 )
 
 // EndCallOnClose forwards the consumer-release signal to the session that holds
@@ -636,6 +667,18 @@ var (
 // what keeps a future method on the interface from being forgotten here.
 func (s *bridgeSource) EndCallOnClose() {
 	s.source.EndCallOnClose()
+}
+
+// PrepareRingingPreview and Answered forward the ringing-preview capability to
+// the session, for the same reason EndCallOnClose does: the coordinator finds it
+// by type assertion on the *bridgeSource, and a missing forwarder would make
+// every preview fail as a source that cannot serve one.
+func (s *bridgeSource) PrepareRingingPreview() {
+	s.source.PrepareRingingPreview()
+}
+
+func (s *bridgeSource) Answered(ctx context.Context) error {
+	return s.source.Answered(ctx)
 }
 
 func (s *bridgeSource) Start(ctx context.Context) error {
