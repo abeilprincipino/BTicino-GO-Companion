@@ -72,6 +72,8 @@ type streamDialer struct {
 	transport         string
 	logger            *slog.Logger
 	remoteDialogEnded func()
+	keepalivePort     int
+	keepaliveInterval time.Duration
 	callbackMu        sync.RWMutex
 	listenerCancel    context.CancelFunc
 	registerCancel    context.CancelFunc
@@ -141,6 +143,8 @@ func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
 		transport:         normalizeTransport(cfg.Transport),
 		logger:            logger.With("component", "media.sip", "target", target.URI.User+"@"+target.URI.Host, "domain", strings.TrimSpace(cfg.Domain), "transport", normalizeTransport(cfg.Transport)),
 		remoteDialogEnded: cfg.RemoteDialogEnded,
+		keepalivePort:     AudioSDPPort,
+		keepaliveInterval: mediaKeepaliveInterval,
 		listenerCancel:    listenerCancel,
 		registerCancel:    registerCancel,
 	}
@@ -351,6 +355,14 @@ func (d *streamDialer) notifyRemoteDialogEnded() {
 }
 
 // SetRemoteDialogEnded assigns the callback for the sole active stream.
+// keepDialogAlive starts the media keepalive of one established dialog. It
+// runs until ctx, the dialog's context, ends.
+func (d *streamDialer) keepDialogAlive(ctx context.Context, dialogID, remoteSDP string) {
+	logger := d.logger.With("dialog_id", dialogID)
+
+	startDialogKeepalive(ctx, logger, remoteSDP, d.keepalivePort, d.keepaliveInterval)
+}
+
 func (d *streamDialer) SetRemoteDialogEnded(callback func()) {
 	d.callbackMu.Lock()
 	d.remoteDialogEnded = callback
@@ -505,6 +517,10 @@ func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (Outgoi
 		_ = dialog.Close()
 		return nil, fmt.Errorf("ack invite: %w", err)
 	}
+
+	// The dialog's own context, not ctx: the keepalive must outlive this call
+	// and end with the dialog, whichever side ends it.
+	d.keepDialogAlive(dialog.Context(), dialog.ID, string(dialog.InviteResponse.Body()))
 
 	d.logger.InfoContext(ctx, "sip stream established")
 
@@ -733,14 +749,29 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	d.inboundDialogs.Store(session.ID, dialog)
 
+	// The far end's offer says where it expects our audio; the keepalive is
+	// aimed there once the call is answered.
+	remoteSDP := string(req.Body())
+
+	var keepaliveOnce sync.Once
+
 	// The map entry lives exactly as long as the dialog, which is why this
 	// handler cannot own it: the handler returns 32 seconds into an answered
 	// call while the dialog goes on. Every way a dialog ends — a CANCEL, a
 	// rejection, a BYE from either side, a local hangup — drives it to Ended,
 	// so this fires exactly once and never for a call that is still up.
+	//
+	// Confirmed — our 2xx has been ACKed — is the moment the call is really up,
+	// so that is when its media keepalive starts. It stops on its own when the
+	// dialog context ends.
 	session.OnState(func(state sip.DialogState) {
-		if state == sip.DialogStateEnded {
+		switch state {
+		case sip.DialogStateEnded:
 			d.inboundDialogs.Delete(session.ID)
+		case sip.DialogStateConfirmed:
+			keepaliveOnce.Do(func() {
+				d.keepDialogAlive(session.Context(), string(dialogID), remoteSDP)
+			})
 		}
 	})
 
