@@ -1702,7 +1702,7 @@ func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
 	dialer := &fakeDialer{}
 	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
 
-	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+	if _, err := manager.AdoptRingingCall("21"); !errors.Is(err, ErrNoInboundCall) {
 		t.Fatalf("AdoptRingingCall() idle error = %v, want ErrNoInboundCall", err)
 	}
 
@@ -1710,7 +1710,7 @@ func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	answered, err := manager.AdoptRingingCall()
+	answered, err := manager.AdoptRingingCall("21")
 	if err != nil || answered {
 		t.Fatalf("AdoptRingingCall() while ringing = (%v, %v), want (false, nil)", answered, err)
 	}
@@ -1719,7 +1719,7 @@ func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	answered, err = manager.AdoptRingingCall()
+	answered, err = manager.AdoptRingingCall("21")
 	if err != nil || !answered {
 		t.Fatalf("AdoptRingingCall() after Answer = (%v, %v), want (true, nil)", answered, err)
 	}
@@ -1728,12 +1728,39 @@ func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+	if _, err := manager.AdoptRingingCall("21"); !errors.Is(err, ErrNoInboundCall) {
 		t.Fatalf("AdoptRingingCall() after hangup error = %v, want ErrNoInboundCall", err)
 	}
 
 	if dialer.calls != 0 {
 		t.Fatalf("dialer calls = %d, want 0 — adopting never dials", dialer.calls)
+	}
+}
+
+func TestManager_AdoptRingingCallRefusesAnotherEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdoptRingingCall("22"); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall() for another entrypoint while ringing error = %v, want ErrNoInboundCall", err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdoptRingingCall("22"); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall() for another entrypoint after Answer error = %v, want ErrNoInboundCall", err)
+	}
+
+	if answered, err := manager.AdoptRingingCall("21"); err != nil || !answered {
+		t.Fatalf("AdoptRingingCall() for its own entrypoint after Answer = (%v, %v), want (true, nil)", answered, err)
 	}
 }
 
@@ -1745,7 +1772,7 @@ func TestManager_AdoptRingingCallRefusesAnOutgoingPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+	if _, err := manager.AdoptRingingCall("21"); !errors.Is(err, ErrNoInboundCall) {
 		t.Fatalf("AdoptRingingCall() during an outgoing preview error = %v, want ErrNoInboundCall", err)
 	}
 }

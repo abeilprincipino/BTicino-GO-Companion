@@ -83,6 +83,9 @@ type Manager struct {
 	active         OutgoingDialog
 	activeID       core.DialogID
 	activeIncoming bool
+	// activeDevAddr is the entrypoint the answered inbound call belongs to, kept
+	// because Answer clears incomingDevAddr.
+	activeDevAddr string
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -242,6 +245,7 @@ func (m *Manager) Answer(ctx context.Context) error {
 	m.active = dialog
 	m.activeID = dialog.ID()
 	m.activeIncoming = true
+	m.activeDevAddr = devAddr
 	m.publishLocked(core.CallAnswered{DialogID: dialog.ID()})
 
 	return nil
@@ -331,6 +335,7 @@ func (m *Manager) byeActiveLocked(ctx context.Context) error {
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
+	m.activeDevAddr = ""
 
 	// activeID is empty exactly for an outbound preview, because StartStream
 	// publishes nothing: the projector never saw a dialog, and
@@ -366,6 +371,7 @@ func (m *Manager) RemoteDialogEnded() {
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
+	m.activeDevAddr = ""
 
 	// See Hangup: an empty dialog ID is an outbound preview, which the
 	// projector knows nothing about.
@@ -412,14 +418,18 @@ func (m *Manager) HasRingingInboundCall() bool {
 // before the preview got here; a fresh INVITE would only come back 486 Busy
 // Here from an intercom still winding the call down. See
 // docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
-func (m *Manager) AdoptRingingCall() (bool, error) {
+//
+// devAddr is the entrypoint the preview is for. Another entrypoint's ring is
+// not its call to borrow: on an install with several, its preview would show
+// the wrong door.
+func (m *Manager) AdoptRingingCall(devAddr string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	switch {
-	case m.incoming != nil:
+	case m.incoming != nil && devAddr == m.incomingDevAddr:
 		return false, nil
-	case m.active != nil && m.activeIncoming:
+	case m.active != nil && m.activeIncoming && devAddr == m.activeDevAddr:
 		return true, nil
 	default:
 		return false, ErrNoInboundCall

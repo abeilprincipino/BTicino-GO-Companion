@@ -480,7 +480,7 @@ func (s *fakeSourceSIP) StartStream(context.Context, string) (bool, error) {
 	return !s.adopted, nil
 }
 
-func (s *fakeSourceSIP) AdoptRingingCall() (bool, error) {
+func (s *fakeSourceSIP) AdoptRingingCall(string) (bool, error) {
 	s.adoptCalls++
 
 	return s.adoptAnswered, s.adoptErr
@@ -498,9 +498,9 @@ func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) (bool, er
 	return false, fmt.Errorf("wait for invite answer: %w", ctx.Err())
 }
 
-func (*blockingInviteSIP) AdoptRingingCall() (bool, error)  { return false, nil }
-func (*blockingInviteSIP) HangupCall(context.Context) error { return nil }
-func (*blockingInviteSIP) RemoteDialogEnded()               {}
+func (*blockingInviteSIP) AdoptRingingCall(string) (bool, error) { return false, nil }
+func (*blockingInviteSIP) HangupCall(context.Context) error      { return nil }
+func (*blockingInviteSIP) RemoteDialogEnded()                    {}
 
 type fakeSourceAV struct {
 	calls      int
