@@ -1610,7 +1610,6 @@ func TestManager_StartStreamCreatesNoDialogDuringAnsweredInboundCall(t *testing.
 	}
 }
 
-
 func TestManager_HangupCallLeavesARingingCallAlone(t *testing.T) {
 	t.Parallel()
 
