@@ -1610,3 +1610,169 @@ func TestManager_StartStreamCreatesNoDialogDuringAnsweredInboundCall(t *testing.
 	}
 }
 
+
+func TestManager_HangupCallLeavesARingingCallAlone(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatalf("HangupCall() error = %v, want nil", err)
+	}
+
+	// Only the 180. A 603 here would end every fork of the doorbell call, the
+	// indoor unit's included.
+	if len(dialog.responses) != 1 || dialog.responses[0].status != 180 {
+		t.Fatalf("responses = %#v, want only 180 Ringing", dialog.responses)
+	}
+
+	if !manager.HasRingingInboundCall() {
+		t.Fatal("HasRingingInboundCall() = false, want the call still ringing")
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatalf("Answer() after HangupCall error = %v, want the call still answerable", err)
+	}
+}
+
+func TestManager_HangupCallByesAnAnsweredCall(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatalf("HangupCall() error = %v", err)
+	}
+
+	if dialog.byes != 1 {
+		t.Fatalf("bye count = %d, want 1", dialog.byes)
+	}
+
+	if manager.HasAnsweredInboundCall() {
+		t.Fatal("HasAnsweredInboundCall() = true after HangupCall, want false")
+	}
+}
+
+func TestManager_HangupCallByesAnOutgoingPreview(t *testing.T) {
+	t.Parallel()
+
+	dialer := &fakeDialer{}
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
+
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatalf("HangupCall() error = %v", err)
+	}
+
+	if leaked := dialer.unbyedDialogs(); len(leaked) != 0 {
+		t.Fatalf("unbyed outbound dialogs = %v, want none", leaked)
+	}
+}
+
+func TestManager_HangupCallOnIdleIsANoop(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatalf("HangupCall() on idle manager error = %v, want nil", err)
+	}
+}
+
+func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	dialer := &fakeDialer{}
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
+
+	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall() idle error = %v, want ErrNoInboundCall", err)
+	}
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	answered, err := manager.AdoptRingingCall()
+	if err != nil || answered {
+		t.Fatalf("AdoptRingingCall() while ringing = (%v, %v), want (false, nil)", answered, err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	answered, err = manager.AdoptRingingCall()
+	if err != nil || !answered {
+		t.Fatalf("AdoptRingingCall() after Answer = (%v, %v), want (true, nil)", answered, err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall() after hangup error = %v, want ErrNoInboundCall", err)
+	}
+
+	if dialer.calls != 0 {
+		t.Fatalf("dialer calls = %d, want 0 — adopting never dials", dialer.calls)
+	}
+}
+
+func TestManager_AdoptRingingCallRefusesAnOutgoingPreview(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdoptRingingCall(); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall() during an outgoing preview error = %v, want ErrNoInboundCall", err)
+	}
+}
+
+func TestManager_HasRingingInboundCallTracksTheRing(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	if manager.HasRingingInboundCall() {
+		t.Fatal("HasRingingInboundCall() = true with no call, want false")
+	}
+
+	if err := manager.OnInvite(context.Background(), &fakeIncomingDialog{id: testDialogID}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !manager.HasRingingInboundCall() {
+		t.Fatal("HasRingingInboundCall() = false while ringing, want true")
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if manager.HasRingingInboundCall() {
+		t.Fatal("HasRingingInboundCall() = true after Answer, want false")
+	}
+}

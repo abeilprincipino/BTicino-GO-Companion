@@ -95,8 +95,11 @@ one. They are separated:
 - **`Hangup`** (unchanged) — still used by `POST /api/v3/call/hangup`, where ending a ringing call
   with 603 is a user action.
 
-`Manager.StartStream` with a ringing call returns `(false, nil)`: no INVITE, the session does not own
-a dialog, exactly as for an answered inbound call.
+`Manager.StartStream` keeps refusing a ringing call (`ErrIncomingDialog`). A session prepared as a
+ringing preview calls **`AdoptRingingCall`** instead: it never dials, reports whether the call is
+already answered, and fails with `ErrNoInboundCall` once the ring is over. Keeping the two apart
+means an RTSP or HomeKit source that races past the coordinator's gate still cannot attach to the
+ring.
 
 The invariant is held by the manager, not by the session's state: whatever phase a session believes
 it is in, the media path cannot produce a 603. This closes the class of defect from

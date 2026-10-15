@@ -14,6 +14,7 @@ var (
 	ErrNoIncomingDialog = errors.New("sip: no incoming dialog")
 	ErrIncomingDialog   = errors.New("sip: an incoming dialog exists")
 	ErrActiveDialog     = errors.New("sip: an active dialog exists")
+	ErrNoInboundCall    = errors.New("sip: no inbound call to adopt")
 )
 
 const defaultIncomingTimeout = 60 * time.Second
@@ -268,44 +269,19 @@ func (m *Manager) Decline(ctx context.Context) error {
 }
 
 // Hangup is idempotent: tearing down a call that is already gone is not an
-// error, because SourceSession.Close may run it again on a later teardown.
+// error.
 //
-// It has no counterpart to StartStream's no-op on an answered inbound call, and
-// needs none: the decision now lives with the caller. Releasing the lease still
-// ends a live doorbell call on purpose, because without a WebRTC session there
-// is no audio path and the visitor would talk to nobody. But a teardown the
-// consumer did not ask for — a foreign OpenWebNet stop frame, an RTP stall, a
-// transport failure — no longer reaches here at all: SourceSession.Close skips
-// Hangup for a dialog it did not create unless EndCallOnClose said otherwise.
-// Ending the call for those was the defect fixed in
-// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
+// It ends whatever call is up, a ringing one included, which it answers 603
+// Decline. That is right for POST /api/v3/call/hangup, where the user is
+// rejecting the call, and wrong for anything a media teardown does: a 6xx ends
+// every fork of the doorbell call, the indoor unit's included. The media path
+// therefore uses HangupCall, never this. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 
-	if active := m.active; active != nil {
-		dialogID := m.activeID
-		m.active = nil
-		m.activeID = ""
-		m.activeIncoming = false
-
-		// activeID is empty exactly for an outbound preview, because
-		// StartStream publishes nothing: the projector never saw a dialog, and
-		// CallHungUp{DialogID: ""} would be rejected as an invalid transition.
-		// The guard says nothing about why Hangup was called — it discriminates
-		// which dialog is being torn down, an outbound preview or a dialog the
-		// projector knows about, which for an answered inbound call it does.
-		var event core.Event
-		if dialogID != "" {
-			event = core.CallHungUp{DialogID: dialogID}
-		}
-
-		m.publishLocked(event)
-
-		if err := active.Bye(ctx); err != nil {
-			return fmt.Errorf("sip bye: %w", err)
-		}
-
-		return nil
+	if m.active != nil {
+		return m.byeActiveLocked(ctx)
 	}
 
 	dialog := m.takeIncomingLocked(nil)
@@ -319,6 +295,55 @@ func (m *Manager) Hangup(ctx context.Context) error {
 
 	if err := dialog.Respond(ctx, 603, "Decline", ""); err != nil {
 		return fmt.Errorf("sip decline response: %w", err)
+	}
+
+	return nil
+}
+
+// HangupCall ends the active dialog with a BYE and does nothing else: a call
+// that is only ringing, or no call at all, is left exactly as it is.
+//
+// It is the only hangup a media session can reach. A session's teardown —
+// whether a consumer let go of the lease or the media failed — must never
+// reject a ringing doorbell call, because the 603 would end every fork,
+// including the indoor unit that is still ringing. Releasing the lease of an
+// answered call still ends it on purpose: without a WebRTC session there is no
+// audio path and the visitor would talk to nobody. See
+// docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md and
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func (m *Manager) HangupCall(ctx context.Context) error {
+	m.mu.Lock()
+
+	if m.active == nil {
+		m.mu.Unlock()
+
+		return nil
+	}
+
+	return m.byeActiveLocked(ctx)
+}
+
+// byeActiveLocked drops the active dialog and sends its BYE. m.mu must be held
+// and m.active must be set; it releases m.mu, like publishLocked.
+func (m *Manager) byeActiveLocked(ctx context.Context) error {
+	active := m.active
+	dialogID := m.activeID
+	m.active = nil
+	m.activeID = ""
+	m.activeIncoming = false
+
+	// activeID is empty exactly for an outbound preview, because StartStream
+	// publishes nothing: the projector never saw a dialog, and
+	// CallHungUp{DialogID: ""} would be rejected as an invalid transition.
+	var event core.Event
+	if dialogID != "" {
+		event = core.CallHungUp{DialogID: dialogID}
+	}
+
+	m.publishLocked(event)
+
+	if err := active.Bye(ctx); err != nil {
+		return fmt.Errorf("sip bye: %w", err)
 	}
 
 	return nil
@@ -366,6 +391,39 @@ func (m *Manager) HasAnsweredInboundCall() bool {
 	defer m.mu.Unlock()
 
 	return m.active != nil && m.activeIncoming
+}
+
+// HasRingingInboundCall reports whether an inbound call is ringing and not yet
+// answered here. The media coordinator asks it to decide which consumers may
+// take the stream during the ring: only a ringing preview may.
+func (m *Manager) HasRingingInboundCall() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.incoming != nil
+}
+
+// AdoptRingingCall lets a ringing preview borrow the inbound call's stream
+// without dialling. It reports whether the call has already been answered,
+// which tells the session to start audio too.
+//
+// It never creates a dialog, so the session that calls it never owns one: no
+// teardown of its media can end the call. ErrNoInboundCall means the ring ended
+// before the preview got here; a fresh INVITE would only come back 486 Busy
+// Here from an intercom still winding the call down. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func (m *Manager) AdoptRingingCall() (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch {
+	case m.incoming != nil:
+		return false, nil
+	case m.active != nil && m.activeIncoming:
+		return true, nil
+	default:
+		return false, ErrNoInboundCall
+	}
 }
 
 // EndIncoming clears a pending inbound call that will never be answered here.
