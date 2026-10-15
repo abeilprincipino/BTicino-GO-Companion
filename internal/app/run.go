@@ -551,16 +551,23 @@ type ringingPreviewCoordinator interface {
 // routeRingingPreview lets the call events move a ringing preview along: the
 // answer promotes it in place, every way the ring ends without that answer
 // stops it. The companion closes the preview on its own rather than relying on
-// the card. Neither call blocks the SIP event drain for long: promotion runs on
-// its own goroutine, and stopping a preview only closes local sockets. See
+// the card.
+//
+// The answer promotes before the event is applied: next broadcasts to
+// WebSocket clients with per-write deadlines, so a slow client would otherwise
+// delay the audio, and PromoteRinging does not block (the promotion runs on its
+// own goroutine). A stop runs after next, so clients hear the ring ended before
+// the session closes; it can wait on the drain, up to the 10 s Close bound. See
 // docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 func routeRingingPreview(coordinator ringingPreviewCoordinator, next func(core.Event)) func(core.Event) {
 	return func(event core.Event) {
+		if _, answered := event.(core.CallAnswered); answered {
+			coordinator.PromoteRinging()
+		}
+
 		next(event)
 
 		switch event.(type) {
-		case core.CallAnswered:
-			coordinator.PromoteRinging()
 		case core.IncomingCallEnded, core.CallDeclined, core.CallHungUp:
 			coordinator.StopRinging()
 		}
