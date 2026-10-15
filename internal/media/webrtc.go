@@ -205,7 +205,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	}
 
 	for _, previousSessionID := range previousSessionIDs {
-		s.closeSession(previousSessionID, "superseded by successor session")
+		s.closeSessionWith(previousSessionID, "superseded by successor session", s.coordinator.Handover)
 	}
 
 	session, err := s.newOfferSession(sessionID, entrypointID, iceServers, onLocalCandidate)
@@ -664,6 +664,13 @@ func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) err
 }
 
 func (s *WebRTCService) closeSession(sessionID, reason string) {
+	s.closeSessionWith(sessionID, reason, s.coordinator.Release)
+}
+
+// closeSessionWith is the one close implementation. dropLease says what happens
+// to the stream lease: Release for a consumer that lets go, Handover for one a
+// successor replaces, so that the call the successor adopts is not ended.
+func (s *WebRTCService) closeSessionWith(sessionID, reason string, dropLease func(*StreamLease) bool) {
 	s.mu.Lock()
 
 	session := s.sessions[sessionID]
@@ -685,7 +692,7 @@ func (s *WebRTCService) closeSession(sessionID, reason string) {
 		session.mu.Unlock()
 
 		if lease != nil {
-			s.coordinator.Release(lease)
+			dropLease(lease)
 		}
 
 		video := session.outboundRTPStats("video")

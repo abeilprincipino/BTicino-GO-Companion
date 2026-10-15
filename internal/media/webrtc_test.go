@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,6 +135,58 @@ func TestWebRTCServiceOfferReplacesPreviousSessionForEntrypoint(t *testing.T) {
 
 	if source.closes != 1 || coordinator.Snapshot().Owner != StreamOwnerCompanion {
 		t.Fatalf("closes=%d snapshot=%#v", source.closes, coordinator.Snapshot())
+	}
+}
+
+func TestWebRTCServiceSupersededSessionDoesNotEndTheCall(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		sources []*callEndingSource
+	)
+
+	coordinator := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		source := &callEndingSource{}
+
+		mu.Lock()
+		sources = append(sources, source)
+		mu.Unlock()
+
+		return source, nil, nil
+	})
+	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
+
+	firstOffer, firstClient := testWebRTCOffer(t)
+	defer firstClient.Close()
+
+	if _, err := service.Offer(context.Background(), "session-1", "main", firstOffer, nil, nil); err != nil {
+		t.Fatalf("offer first session: %v", err)
+	}
+
+	secondOffer, secondClient := testWebRTCOffer(t)
+	defer secondClient.Close()
+
+	if _, err := service.Offer(context.Background(), "session-2", "main", secondOffer, nil, nil); err != nil {
+		t.Fatalf("offer replacement session: %v", err)
+	}
+
+	mu.Lock()
+	created := len(sources)
+	mu.Unlock()
+
+	if created != 2 {
+		t.Fatalf("sources created = %d, want 2", created)
+	}
+
+	if sources[0].closes != 1 || sources[0].endCallCalls != 0 {
+		t.Fatalf("superseded source: closes=%d endCalls=%d, want 1 and 0 — the successor adopts the call", sources[0].closes, sources[0].endCallCalls)
+	}
+
+	if err := service.Close("session-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	if sources[1].closes != 1 || sources[1].endCallCalls != 1 {
+		t.Fatalf("closed source: closes=%d endCalls=%d, want 1 and 1 — a client close still ends the call", sources[1].closes, sources[1].endCallCalls)
 	}
 }
 

@@ -393,6 +393,34 @@ func TestStreamCoordinatorConsumerReleaseEndsTheCall(t *testing.T) {
 	}
 }
 
+func TestStreamCoordinatorHandoverDoesNotEndTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Handover(lease) {
+		t.Fatal("hand over source lease")
+	}
+
+	if source.closes != 1 {
+		t.Fatalf("source closes = %d, want 1", source.closes)
+	}
+
+	if source.endCallCalls != 0 {
+		t.Fatalf("EndCallOnClose calls = %d, want 0 — the successor adopts the call", source.endCallCalls)
+	}
+
+	if _, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{}); err != nil {
+		t.Fatalf("acquire after handover: %v", err)
+	}
+}
+
 func TestStreamCoordinatorOpenWebNetStopDoesNotEndTheCall(t *testing.T) {
 	source := &callEndingSource{}
 	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {

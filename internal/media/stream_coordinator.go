@@ -49,15 +49,16 @@ type stopCause struct {
 }
 
 var (
-	causeConsumerReleased = stopCause{reason: "consumer released", endsCall: true}
-	causeRemoteBYE        = stopCause{reason: "remote sip bye"}
-	causeControlStop      = stopCause{reason: "openwebnet stream stop"}
-	causeTracksStalled    = stopCause{reason: "rtp tracks stalled"}
-	causeSourceFailure    = stopCause{reason: "managed source failure"}
-	causeSourceCreation   = stopCause{reason: "source creation failed"}
-	causeStartupFailed    = stopCause{reason: "source startup failed"}
-	causeStartupTimedOut  = stopCause{reason: "source startup timed out"}
-	causeRingingEnded     = stopCause{reason: "ringing call ended"}
+	causeConsumerReleased   = stopCause{reason: "consumer released", endsCall: true}
+	causeConsumerSuperseded = stopCause{reason: "consumer superseded"}
+	causeRemoteBYE          = stopCause{reason: "remote sip bye"}
+	causeControlStop        = stopCause{reason: "openwebnet stream stop"}
+	causeTracksStalled      = stopCause{reason: "rtp tracks stalled"}
+	causeSourceFailure      = stopCause{reason: "managed source failure"}
+	causeSourceCreation     = stopCause{reason: "source creation failed"}
+	causeStartupFailed      = stopCause{reason: "source startup failed"}
+	causeStartupTimedOut    = stopCause{reason: "source startup timed out"}
+	causeRingingEnded       = stopCause{reason: "ringing call ended"}
 )
 
 // ManagedSourceCallEnder is an optional capability of a managed source that
@@ -534,10 +535,19 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 	return false
 }
 
-// Release ends the lease and, with it, the SIP call behind it. That is the one
-// teardown the user asked for.
+// Release ends the lease and, with it, the SIP call behind it. That is the
+// teardown a consumer that lets go of the stream asks for; a consumer replaced
+// by a successor uses Handover instead.
 func (c *StreamCoordinator) Release(lease *StreamLease) bool {
 	return c.stop(lease, causeConsumerReleased)
+}
+
+// Handover ends the lease because another consumer of the same entrypoint is
+// replacing it. Unlike Release it never ends the call: the successor takes the
+// stream over and adopts the call. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func (c *StreamCoordinator) Handover(lease *StreamLease) bool {
+	return c.stop(lease, causeConsumerSuperseded)
 }
 
 // PromoteRinging turns the ringing preview into the answered call: the
