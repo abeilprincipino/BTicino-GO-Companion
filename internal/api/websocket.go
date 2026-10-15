@@ -396,7 +396,19 @@ func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID 
 		response = Message{Type: "answer", ID: message.ID, Payload: mustJSON(map[string]string{"session_id": sessionID, "answer_sdp": answer})}
 	case "candidate":
 		var payload webrtcCandidatePayload
-		if json.Unmarshal(message.Payload, &payload) != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {
+
+		unmarshalErr := json.Unmarshal(message.Payload, &payload)
+		if unmarshalErr != nil || payload.SessionID != sessionID || strings.TrimSpace(payload.Candidate.Candidate) == "" {
+			// Say which check failed: a candidate addressed to a session this
+			// socket no longer holds looks the same to the client as a
+			// malformed one.
+			s.logger.DebugContext(ctx, "webrtc candidate rejected",
+				"reason", "invalid_candidate",
+				"unmarshal_error", unmarshalErr != nil,
+				"payload_session_id", payload.SessionID,
+				"active_session_id", sessionID,
+				"candidate_empty", strings.TrimSpace(payload.Candidate.Candidate) == "")
+
 			response = webrtcError(message.ID, "invalid_candidate", "candidate is invalid")
 			break
 		}
