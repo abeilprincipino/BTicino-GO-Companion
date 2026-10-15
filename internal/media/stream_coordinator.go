@@ -184,6 +184,11 @@ type StreamCoordinator struct {
 	// first, the end of the ring through the second.
 	leaseEvents    SourceEvents
 	consumerEvents SourceEvents
+
+	// promoteCancel cancels the promotion in flight, if any. stop takes it so a
+	// lease torn down mid-promotion does not keep retrying the audio request
+	// against a closed session.
+	promoteCancel context.CancelFunc
 }
 
 // SetStateObserver receives source transitions after their coordinator state is committed.
@@ -444,6 +449,12 @@ func (c *StreamCoordinator) startSource(lifecycleCtx, startupCtx context.Context
 }
 
 func (c *StreamCoordinator) finishStart(lease *StreamLease) {
+	// Sampled before c.mu, for the reason given on answeredCall. A call answered
+	// between reserve's ringing probe and now, while the drain's PromoteRinging
+	// found no lease, would otherwise leave this lease a preview for the whole
+	// call. A later CallAnswered event finds previewRinging already false.
+	answered := c.answeredCall()
+
 	c.mu.Lock()
 
 	var (
@@ -452,6 +463,7 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 		promote  bool
 		pSource  ManagedSourceRingingPreview
 		pFailed  func(error)
+		pCtx     context.Context
 	)
 
 	if c.leaseID == lease.id {
@@ -459,9 +471,10 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 		snapshot = c.snapshot
 		observer = c.observer
 
-		// The call was answered while this preview was starting.
-		if c.promotePending && c.previewRinging && !c.stopping {
-			pSource, pFailed = c.takePromotionLocked()
+		// The call was answered while this preview was starting, or before it
+		// had a lease at all.
+		if c.previewRinging && (c.promotePending || answered) && !c.stopping {
+			pSource, pFailed, pCtx = c.takePromotionLocked()
 			promote = true
 		}
 	}
@@ -472,7 +485,7 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 	}
 
 	if promote {
-		go c.promote(lease, pSource, pFailed)
+		go c.promote(lease, pCtx, pSource, pFailed)
 	}
 }
 
@@ -548,35 +561,56 @@ func (c *StreamCoordinator) PromoteRinging() {
 	}
 
 	lease := &StreamLease{id: c.leaseID}
-	source, failed := c.takePromotionLocked()
+	source, failed, ctx := c.takePromotionLocked()
 	c.mu.Unlock()
 
-	go c.promote(lease, source, failed)
+	go c.promote(lease, ctx, source, failed)
 }
 
-// takePromotionLocked ends the preview phase and returns what promote needs.
-// c.mu must be held.
-func (c *StreamCoordinator) takePromotionLocked() (ManagedSourceRingingPreview, func(error)) {
+// takePromotionLocked ends the preview phase and returns what promote needs,
+// including the promotion's context, whose cancel func stop can reach. c.mu
+// must be held.
+func (c *StreamCoordinator) takePromotionLocked() (ManagedSourceRingingPreview, func(error), context.Context) {
 	c.previewRinging = false
 	c.promotePending = false
 
+	// The audio request is sent after startup, when OpenWebNet frames are no
+	// longer attributed to the lease, so ObserveControlTrack never records it.
+	// Without this the stall watchdog needs a requested audio track it can never
+	// see and could not stop a promoted preview.
+	c.snapshot.Audio.Requested = true
+	if c.snapshot.Audio.RequestedAt.IsZero() {
+		c.snapshot.Audio.RequestedAt = time.Now()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), promotionTimeout)
+	c.promoteCancel = cancel
+
 	source, _ := c.source.(ManagedSourceRingingPreview)
 
-	return source, c.leaseEvents.Failed
+	return source, c.leaseEvents.Failed, ctx
 }
 
 // promote asks the source for audio. A failure stops the lease as a source
 // failure, which does not end the call: the consumer sees its session close and
 // can open a normal one, which adopts the answered call.
-func (c *StreamCoordinator) promote(lease *StreamLease, source ManagedSourceRingingPreview, failed func(error)) {
+func (c *StreamCoordinator) promote(lease *StreamLease, ctx context.Context, source ManagedSourceRingingPreview, failed func(error)) {
+	// Releases the timer whatever the outcome; stop's cancel is idempotent with it.
+	defer c.releasePromotion(lease)
+
 	if source == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), promotionTimeout)
-	defer cancel()
-
 	if err := source.Answered(ctx); err != nil {
+		// A lease torn down meanwhile cancelled the request: the failure is the
+		// teardown's doing, and its consumer already has its own end signal.
+		if errors.Is(ctx.Err(), context.Canceled) || !c.leaseCurrent(lease) {
+			c.logger.Debug("ringing preview promotion abandoned; the lease is gone", "lease_id", lease.id, "error", err)
+
+			return
+		}
+
 		c.logger.Warn("ringing preview could not join the answered call; the call stays up", "lease_id", lease.id, "error", err)
 
 		if failed != nil {
@@ -587,6 +621,29 @@ func (c *StreamCoordinator) promote(lease *StreamLease, source ManagedSourceRing
 	}
 
 	c.logger.Info("ringing preview joined the answered call", "lease_id", lease.id)
+}
+
+// leaseCurrent reports whether lease is still the live, not-stopping lease.
+func (c *StreamCoordinator) leaseCurrent(lease *StreamLease) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.leaseID == lease.id && !c.stopping
+}
+
+// releasePromotion cancels the promotion context of lease, freeing its timer.
+func (c *StreamCoordinator) releasePromotion(lease *StreamLease) {
+	c.mu.Lock()
+
+	var cancel context.CancelFunc
+	if c.leaseID == lease.id {
+		cancel, c.promoteCancel = c.promoteCancel, nil
+	}
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // StopRinging ends a ringing preview because the ring is over without this
@@ -659,7 +716,16 @@ func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 	c.stopping = true
 	source, cleanup := c.source, c.cleanup
 	c.source, c.cleanup = nil, nil
+	promoteCancel := c.promoteCancel
+	c.promoteCancel = nil
 	c.mu.Unlock()
+
+	// Cancelled after unlocking out of habit: cancelling a context runs no
+	// coordinator code, so doing it under c.mu would also be safe.
+	if promoteCancel != nil {
+		promoteCancel()
+	}
+
 	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", cause.reason)
 	c.finishStop(lease, source, cleanup, cause)
 
@@ -697,6 +763,7 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.stopping = false
 		c.previewRinging = false
 		c.promotePending = false
+		c.promoteCancel = nil
 		c.leaseEvents = SourceEvents{}
 		c.consumerEvents = SourceEvents{}
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}

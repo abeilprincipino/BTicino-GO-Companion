@@ -687,8 +687,10 @@ func TestStreamCoordinatorPromotionDuringStartupRunsOnceTheSourceIsUp(t *testing
 	c := ringingCoordinator(source, &ringing)
 
 	acquired := make(chan error, 1)
+	leaseCh := make(chan *StreamLease, 1)
 	go func() {
-		_, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		l, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		leaseCh <- l
 		acquired <- err
 	}()
 
@@ -706,6 +708,8 @@ func TestStreamCoordinatorPromotionDuringStartupRunsOnceTheSourceIsUp(t *testing
 	}
 
 	waitSignal(t, source.answeredCh, "Answered after startup")
+
+	c.Release(<-leaseCh)
 }
 
 func TestStreamCoordinatorPromotionFailureStopsTheLeaseWithoutEndingTheCall(t *testing.T) {
@@ -758,6 +762,133 @@ func TestStreamCoordinatorBlocksTheBackchannelWhileRinging(t *testing.T) {
 
 	if err := c.WriteBackchannelRTP(lease, testRTPPacket(2)); err != nil {
 		t.Fatalf("WriteBackchannelRTP() after the answer error = %v", err)
+	}
+
+	c.Release(lease)
+}
+
+// blockingAnswerSource holds Answered until its context ends, as the real
+// source does while its audio request retries.
+type blockingAnswerSource struct {
+	*ringingPreviewSource
+	answerStarted chan struct{}
+	answerDone    chan error
+}
+
+func (s *blockingAnswerSource) Answered(ctx context.Context) error {
+	s.answerStarted <- struct{}{}
+	<-ctx.Done()
+	s.answerDone <- ctx.Err()
+
+	return ctx.Err()
+}
+
+func TestStreamCoordinatorReleaseCancelsAPromotionInFlight(t *testing.T) {
+	ringing := true
+	source := &blockingAnswerSource{
+		ringingPreviewSource: newRingingPreviewSource(),
+		answerStarted:        make(chan struct{}, 1),
+		answerDone:           make(chan error, 1),
+	}
+	c := ringingCoordinator(source, &ringing)
+
+	var (
+		mu          sync.Mutex
+		failedCalls int
+	)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(error) {
+			mu.Lock()
+			failedCalls++
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.PromoteRinging()
+	waitSignal(t, source.answerStarted, "Answered to start")
+
+	if !c.Release(lease) {
+		t.Fatal("Release() = false")
+	}
+
+	select {
+	case err := <-source.answerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Answered ended with %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Answered kept running after the lease was released")
+	}
+
+	// promote decides on the failure just after Answered returns; give it the
+	// chance to wrongly report one.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if failedCalls != 0 {
+		t.Fatalf("consumer Failed called %d times, want 0 — the teardown is not a promotion failure", failedCalls)
+	}
+}
+
+func TestStreamCoordinatorWatchdogStopsAPromotedPreviewWithoutEndingTheCall(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The video request is the only one seen while the lease was starting.
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	endControlAttempt(c)
+
+	c.PromoteRinging()
+	waitSignal(t, source.answeredCh, "Answered")
+
+	if !c.Reconcile(lease, time.Now().Add(trackFlowTimeout+time.Second)) {
+		t.Fatal("Reconcile() = false, want true — both tracks are requested and silent past the flow timeout")
+	}
+
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0 — a stall must not end the call", closes, endCalls)
+	}
+}
+
+func TestStreamCoordinatorLeaseBornInTheAnswerWindowIsPromoted(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+	c.SetAnsweredCallProbe(func() bool { return true })
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No PromoteRinging: the CallAnswered event was drained before the lease
+	// existed, so only finishStart can notice the answer.
+	waitSignal(t, source.answeredCh, "Answered without a PromoteRinging")
+
+	if err := c.WriteBackchannelRTP(lease, testRTPPacket(1)); err != nil {
+		t.Fatalf("WriteBackchannelRTP() error = %v, want the microphone open", err)
+	}
+
+	c.PromoteRinging()
+
+	// Answered would signal again from its goroutine; allow it to.
+	time.Sleep(100 * time.Millisecond)
+
+	if _, answered, _, _ := source.counts(); answered != 1 {
+		t.Fatalf("answered = %d, want 1", answered)
 	}
 
 	c.Release(lease)
