@@ -921,3 +921,76 @@ func TestStreamCoordinatorLeaseBornInTheAnswerWindowIsPromoted(t *testing.T) {
 
 	c.Release(lease)
 }
+
+func TestStreamCoordinatorControlStopTellsTheConsumerItsRingingPreviewIsLost(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	var (
+		failures []error
+		mu       sync.Mutex
+	)
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			failures = append(failures, err)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The start frame ObserveControlStop matches against must have been seen
+	// while the source attempt was starting.
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	endControlAttempt(c)
+
+	c.ObserveControlStop()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(failures) != 1 || !errors.Is(failures[0], ErrRingingPreviewLost) {
+		t.Fatalf("consumer told %v, want exactly one ErrRingingPreviewLost", failures)
+	}
+
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0 — a lost preview must not end the call", closes, endCalls)
+	}
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", owner)
+	}
+}
+
+func TestStreamCoordinatorControlStopDoesNotNotifyAnOrdinaryLeaseConsumer(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	failed := 0
+
+	if _, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(error) { failed++ },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	beginControlAttempt(c)
+	c.ObserveControlTrack(true)
+	endControlAttempt(c)
+	c.ObserveControlStop()
+
+	if source.closes != 1 {
+		t.Fatalf("source closes = %d, want 1 — the stop must have run", source.closes)
+	}
+
+	if failed != 0 {
+		t.Fatalf("consumer Failed called %d times, want 0 — only ringing previews are announced", failed)
+	}
+}

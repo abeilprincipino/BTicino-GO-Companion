@@ -18,6 +18,7 @@ var (
 	ErrBackchannelUnavailable = errors.New("media: backchannel is unavailable")
 	ErrRingingCall            = errors.New("media: intercom call is ringing")
 	ErrRingingEnded           = errors.New("media: ringing call ended")
+	ErrRingingPreviewLost     = errors.New("media: ringing preview lost")
 )
 
 const (
@@ -728,6 +729,16 @@ func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 	c.source, c.cleanup = nil, nil
 	promoteCancel := c.promoteCancel
 	c.promoteCancel = nil
+
+	// A ringing preview lost to the media layer would otherwise leave the
+	// consumer holding a dead session that the user could still answer on. Told
+	// after the teardown so the consumer closes its session; the card then falls
+	// back to answering with a fresh offer, which adopts the answered call.
+	// StopRinging notifies for itself, and release or handover never do.
+	var previewLost func(error)
+	if c.previewRinging && (cause == causeControlStop || cause == causeTracksStalled) {
+		previewLost = c.consumerEvents.Failed
+	}
 	c.mu.Unlock()
 
 	// Cancelled after unlocking out of habit: cancelling a context runs no
@@ -738,6 +749,10 @@ func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 
 	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", cause.reason)
 	c.finishStop(lease, source, cleanup, cause)
+
+	if previewLost != nil {
+		previewLost(fmt.Errorf("%w: %s", ErrRingingPreviewLost, cause.reason))
+	}
 
 	return true
 }
