@@ -59,6 +59,21 @@ func (c *AVClient) Start(ctx context.Context, highRes bool, ports media.AVPorts,
 		return errors.New("openwebnet av flow probes are required")
 	}
 
+	if err := c.StartVideo(ctx, highRes, ports.Video, video); err != nil {
+		return err
+	}
+
+	return c.StartAudio(ctx, ports.Audio, audio)
+}
+
+// StartVideo requests the video stream alone. A ringing preview starts with it:
+// the intercom has no audio to give before the call is answered. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func (c *AVClient) StartVideo(ctx context.Context, highRes bool, port int, probe media.FlowProbe) error {
+	if probe == nil {
+		return errors.New("openwebnet av video flow probe is required")
+	}
+
 	resolution := "low"
 	if highRes {
 		resolution = "high"
@@ -66,15 +81,18 @@ func (c *AVClient) Start(ctx context.Context, highRes bool, ports media.AVPorts,
 
 	c.logger.InfoContext(ctx, "av activation starting", "video_resolution", resolution)
 
-	if err := c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", ports.Video, highRes), video); err != nil {
-		return err
+	return c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", port, highRes), probe)
+}
+
+// StartAudio requests the audio stream alone, on a port the session bound at
+// start. It is how a ringing preview gains audio once the call is answered,
+// without restarting anything.
+func (c *AVClient) StartAudio(ctx context.Context, port int, probe media.FlowProbe) error {
+	if probe == nil {
+		return errors.New("openwebnet av audio flow probe is required")
 	}
 
-	if err := c.startStream(ctx, "audio", BuildAVAddStreamAudio("127.0.0.1", ports.Audio), audio); err != nil {
-		return err
-	}
-
-	return nil
+	return c.startStream(ctx, "audio", BuildAVAddStreamAudio("127.0.0.1", port), probe)
 }
 
 func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe media.FlowProbe) error {

@@ -447,10 +447,37 @@ func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
 func (*blockingInviteSIP) RemoteDialogEnded()           {}
 
 type fakeSourceAV struct {
-	calls   int
-	highRes bool
-	ports   AVPorts
-	err     error
+	calls      int
+	highRes    bool
+	ports      AVPorts
+	err        error
+	videoCalls int
+	audioCalls int
+	audioPort  int
+	audioErr   error
+}
+
+func (a *fakeSourceAV) Start(_ context.Context, highRes bool, ports AVPorts, _, _ FlowProbe) error {
+	a.calls++
+	a.highRes = highRes
+	a.ports = ports
+
+	return a.err
+}
+
+func (a *fakeSourceAV) StartVideo(_ context.Context, highRes bool, port int, _ FlowProbe) error {
+	a.videoCalls++
+	a.highRes = highRes
+	a.ports.Video = port
+
+	return a.err
+}
+
+func (a *fakeSourceAV) StartAudio(_ context.Context, port int, _ FlowProbe) error {
+	a.audioCalls++
+	a.audioPort = port
+
+	return a.audioErr
 }
 
 type blockingSourceAV struct{ started chan struct{} }
@@ -461,6 +488,15 @@ func (a *blockingSourceAV) Start(ctx context.Context, _ bool, _ AVPorts, _, _ Fl
 
 	return ctx.Err()
 }
+
+func (a *blockingSourceAV) StartVideo(ctx context.Context, _ bool, _ int, _ FlowProbe) error {
+	close(a.started)
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
+func (*blockingSourceAV) StartAudio(context.Context, int, FlowProbe) error { return nil }
 
 type uncooperativeSourceAV struct {
 	started chan struct{}
@@ -474,13 +510,14 @@ func (a *uncooperativeSourceAV) Start(context.Context, bool, AVPorts, FlowProbe,
 	return context.Canceled
 }
 
-func (a *fakeSourceAV) Start(_ context.Context, highRes bool, ports AVPorts, _, _ FlowProbe) error {
-	a.calls++
-	a.highRes = highRes
-	a.ports = ports
+func (a *uncooperativeSourceAV) StartVideo(context.Context, bool, int, FlowProbe) error {
+	close(a.started)
+	<-a.release
 
-	return a.err
+	return context.Canceled
 }
+
+func (*uncooperativeSourceAV) StartAudio(context.Context, int, FlowProbe) error { return nil }
 
 // fakeSourceReceiver stands in for a real RTPReceiver. Its Metadata().LocalPort
 // defaults to a valid non-zero port when port is left unset, so the many

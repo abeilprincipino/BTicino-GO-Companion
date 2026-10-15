@@ -158,3 +158,45 @@ func newAVTestClient(server *avTestServer) *AVClient {
 
 	return client
 }
+
+func TestAVClientStartVideoSendsOnlyTheVideoFrame(t *testing.T) {
+	server := newAVTestServer(t, FrameACK)
+	client := newAVTestClient(server)
+	video := &testFlowProbe{}
+	server.onFrame = func(int) { video.flowing = true }
+
+	if err := client.StartVideo(context.Background(), false, testAVPorts.Video, video); err != nil {
+		t.Fatalf("StartVideo: %v", err)
+	}
+
+	frames := server.Frames()
+	if len(frames) != 1 || frames[0] != "*7*300#127#0#0#1#61007#1*##" {
+		t.Fatalf("frames = %v, want only the low-res video request", frames)
+	}
+}
+
+func TestAVClientStartAudioSendsOnlyTheAudioFrame(t *testing.T) {
+	server := newAVTestServer(t, FrameACK)
+	client := newAVTestClient(server)
+	audio := &testFlowProbe{}
+	server.onFrame = func(int) { audio.flowing = true }
+
+	if err := client.StartAudio(context.Background(), testAVPorts.Audio, audio); err != nil {
+		t.Fatalf("StartAudio: %v", err)
+	}
+
+	frames := server.Frames()
+	if len(frames) != 1 || frames[0] != "*7*300#127#0#0#1#61553#2*##" {
+		t.Fatalf("frames = %v, want only the audio request", frames)
+	}
+}
+
+func TestAVClientStartAudioBoundsRejectedAttempts(t *testing.T) {
+	server := newAVTestServer(t, FrameNACK, FrameNACK, FrameNACK)
+	client := newAVTestClient(server)
+
+	err := client.StartAudio(context.Background(), testAVPorts.Audio, &testFlowProbe{})
+	if !errors.Is(err, ErrAVCommandRejected) {
+		t.Fatalf("StartAudio error = %v, want rejected command", err)
+	}
+}

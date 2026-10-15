@@ -36,6 +36,8 @@ type AVPorts struct {
 
 type SourceAV interface {
 	Start(context.Context, bool, AVPorts, FlowProbe, FlowProbe) error
+	StartVideo(context.Context, bool, int, FlowProbe) error
+	StartAudio(context.Context, int, FlowProbe) error
 }
 
 type FlowProbe interface {
