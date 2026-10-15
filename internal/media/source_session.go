@@ -18,11 +18,20 @@ type SourceSIP interface {
 	// INVITE goes out and the dialog belongs to that call, so this session must
 	// never send a BYE for it as a side effect of a media teardown.
 	StartStream(context.Context, string) (bool, error)
-	Hangup(context.Context) error
+
+	// AdoptRingingCall is StartStream for a ringing preview: it never dials, and
+	// reports whether the inbound call has already been answered.
+	AdoptRingingCall() (bool, error)
+
+	// HangupCall ends an active dialog with a BYE and leaves a ringing call
+	// alone. It is the only hangup a media session may reach: rejecting a ringing
+	// call with a 603 would end every fork, the indoor unit's included. See
+	// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+	HangupCall(context.Context) error
 
 	// RemoteDialogEnded drops the dialog the peer has already torn down,
 	// without sending a BYE back. The session calls it on exactly the paths
-	// where it skips Hangup, so the SIP layer is never left holding a dialog
+	// where it skips HangupCall, so the SIP layer is never left holding a dialog
 	// nothing will ever end. See SourceSession.RemoteDialogEnded.
 	RemoteDialogEnded()
 }
@@ -80,6 +89,14 @@ type SourceSession struct {
 	// session did not create. Nothing else may.
 	endCallOnClose bool
 	onStarted      func()
+
+	// ringingPreview makes Start borrow the ringing inbound call instead of
+	// dialling, and start video only. Set by PrepareRingingPreview before Start.
+	ringingPreview bool
+
+	// ringing is true while a started preview is still video-only, waiting for
+	// the answer. Answered clears it once audio is flowing.
+	ringing bool
 }
 
 func NewSourceSession(logger *slog.Logger, sourceConfig SourceConfig, entrypointID core.EntrypointID, sip SourceSIP, av SourceAV, video, audio SourceReceiver) *SourceSession {
@@ -108,6 +125,8 @@ func (s *SourceSession) Start(ctx context.Context) error {
 	s.terminating = false
 	s.ownsDialog = false
 	s.endCallOnClose = false
+	s.ringing = false
+	preview := s.ringingPreview
 	s.startCancel = cancel
 	s.startDone = make(chan struct{})
 	s.mu.Unlock()
@@ -137,7 +156,7 @@ func (s *SourceSession) Start(ctx context.Context) error {
 
 			if hangup {
 				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := s.sip.Hangup(cleanupCtx); err != nil {
+				if err := s.sip.HangupCall(cleanupCtx); err != nil {
 					s.logger.WarnContext(cleanupCtx, "sip cleanup after startup failure failed", "error", err)
 				}
 
@@ -186,9 +205,26 @@ func (s *SourceSession) Start(ctx context.Context) error {
 
 	audioStarted = true
 
-	owns, err := s.sip.StartStream(startCtx, s.sourceConfig.DevAddr)
-	if err != nil {
-		return fmt.Errorf("start outgoing sip: %w", err)
+	// A ringing preview borrows the call: no INVITE, no dialog of its own, so no
+	// teardown of this session can end the call while it rings.
+	var owns bool
+
+	answered := true
+
+	if preview {
+		var err error
+
+		answered, err = s.sip.AdoptRingingCall()
+		if err != nil {
+			return fmt.Errorf("adopt ringing call: %w", err)
+		}
+	} else {
+		var err error
+
+		owns, err = s.sip.StartStream(startCtx, s.sourceConfig.DevAddr)
+		if err != nil {
+			return fmt.Errorf("start outgoing sip: %w", err)
+		}
 	}
 
 	sipStarted = true
@@ -204,17 +240,33 @@ func (s *SourceSession) Start(ctx context.Context) error {
 		return fmt.Errorf("media: receiver reported an unbound port (video=%d, audio=%d)", videoPort, audioPort)
 	}
 
-	if err := s.av.Start(startCtx, s.sourceConfig.HighResVideo, AVPorts{Video: videoPort, Audio: audioPort}, s.video, s.audio); err != nil {
-		return fmt.Errorf("start av: %w", err)
+	ports := AVPorts{Video: videoPort, Audio: audioPort}
+
+	// The intercom has no audio before the answer, so a preview of a call that
+	// is still ringing asks for video alone; Answered adds the audio later on
+	// the port bound here.
+	var avErr error
+	if answered {
+		avErr = s.av.Start(startCtx, s.sourceConfig.HighResVideo, ports, s.video, s.audio)
+	} else {
+		avErr = s.av.StartVideo(startCtx, s.sourceConfig.HighResVideo, ports.Video, s.video)
+	}
+
+	if avErr != nil {
+		return fmt.Errorf("start av: %w", avErr)
 	}
 
 	if err := startCtx.Err(); err != nil {
 		return fmt.Errorf("start source session: %w", err)
 	}
 
+	s.mu.Lock()
+	s.ringing = !answered
+	s.mu.Unlock()
+
 	started = true
 
-	s.logger.InfoContext(startCtx, "source session started")
+	s.logger.InfoContext(startCtx, "source session started", "ringing_preview", preview, "ringing", !answered)
 
 	return nil
 }
@@ -240,6 +292,52 @@ func (s *SourceSession) EndCallOnClose() {
 	s.mu.Lock()
 	s.endCallOnClose = true
 	s.mu.Unlock()
+}
+
+// PrepareRingingPreview makes the next Start serve a consumer that took the
+// stream while the inbound call rings: it borrows the call instead of dialling
+// and asks for video only. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+func (s *SourceSession) PrepareRingingPreview() {
+	s.mu.Lock()
+	s.ringingPreview = true
+	s.mu.Unlock()
+}
+
+// Ringing reports whether the session is a started preview still waiting for
+// the answer: video only, no audio requested yet.
+func (s *SourceSession) Ringing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.ringing
+}
+
+// Answered completes a ringing preview once the call is answered: it asks the
+// intercom for audio on the port bound at Start. Video, sockets and the
+// consumer's session are untouched, which is what makes the answer instant.
+// It is a no-op on a session that is not ringing, so a repeated call is safe.
+// On failure the session stays ringing and the caller decides what to do.
+func (s *SourceSession) Answered(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.started || !s.ringing {
+		s.mu.Unlock()
+
+		return nil
+	}
+	s.mu.Unlock()
+
+	if err := s.av.StartAudio(ctx, s.audio.Metadata().LocalPort, s.audio); err != nil {
+		return fmt.Errorf("start av audio: %w", err)
+	}
+
+	s.mu.Lock()
+	s.ringing = false
+	s.mu.Unlock()
+
+	s.logger.InfoContext(ctx, "ringing preview joined the answered call")
+
+	return nil
 }
 
 func (s *SourceSession) Close(ctx context.Context) error {
@@ -273,7 +371,7 @@ func (s *SourceSession) Close(ctx context.Context) error {
 	s.closeReceivers()
 
 	if hangup {
-		if err := s.sip.Hangup(ctx); err != nil {
+		if err := s.sip.HangupCall(ctx); err != nil {
 			return fmt.Errorf("stop outgoing sip: %w", err)
 		}
 	}
@@ -286,7 +384,7 @@ func (s *SourceSession) Close(ctx context.Context) error {
 // RemoteDialogEnded releases local media after the peer terminates the SIP dialog.
 // It deliberately does not send BYE because the peer has already done so.
 //
-// Skipping the BYE is precisely why the SIP layer has to be told. Hangup is what
+// Skipping the BYE is precisely why the SIP layer has to be told. HangupCall is what
 // normally makes the SIP layer forget the dialog, and Close will not run it once
 // remoteEnded is set. The manager behind SourceSIP is a single process-wide
 // instance shared by the HTTP API and every media source, so a dialog it still

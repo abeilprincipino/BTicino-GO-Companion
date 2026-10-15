@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/signaling"
 	"context"
 	"errors"
@@ -415,14 +416,62 @@ func (d *recordingOutgoingDialog) Bye(context.Context) error {
 	return nil
 }
 
+// recordingIncomingDialog is a ringing doorbell call as the manager sees it: it
+// records every final or provisional response and every BYE.
+type recordingIncomingDialog struct {
+	id core.DialogID
+
+	mu        sync.Mutex
+	responses []int
+	byes      int
+}
+
+func (d *recordingIncomingDialog) ID() core.DialogID { return d.id }
+
+func (d *recordingIncomingDialog) Respond(_ context.Context, status int, _, _ string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.responses = append(d.responses, status)
+
+	return nil
+}
+
+func (d *recordingIncomingDialog) Bye(context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.byes++
+
+	return nil
+}
+
+func (d *recordingIncomingDialog) statuses() []int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return append([]int(nil), d.responses...)
+}
+
+func (d *recordingIncomingDialog) byeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.byes
+}
+
 // adopted makes StartStream report that it created no dialog, which is what the
 // manager does during an answered inbound call. It defaults to false, so every
 // test that does not opt in stands for an outbound preview that owns its dialog.
+// adoptAnswered and adoptErr drive AdoptRingingCall for ringing previews.
 type fakeSourceSIP struct {
-	startCalls   int
-	hangups      int
-	remoteEndeds int
-	adopted      bool
+	startCalls    int
+	adoptCalls    int
+	hangups       int
+	remoteEndeds  int
+	adopted       bool
+	adoptAnswered bool
+	adoptErr      error
 }
 
 func (s *fakeSourceSIP) StartStream(context.Context, string) (bool, error) {
@@ -431,8 +480,14 @@ func (s *fakeSourceSIP) StartStream(context.Context, string) (bool, error) {
 	return !s.adopted, nil
 }
 
-func (s *fakeSourceSIP) Hangup(context.Context) error { s.hangups++; return nil }
-func (s *fakeSourceSIP) RemoteDialogEnded()           { s.remoteEndeds++ }
+func (s *fakeSourceSIP) AdoptRingingCall() (bool, error) {
+	s.adoptCalls++
+
+	return s.adoptAnswered, s.adoptErr
+}
+
+func (s *fakeSourceSIP) HangupCall(context.Context) error { s.hangups++; return nil }
+func (s *fakeSourceSIP) RemoteDialogEnded()               { s.remoteEndeds++ }
 
 type blockingInviteSIP struct{ started chan struct{} }
 
@@ -443,8 +498,9 @@ func (s *blockingInviteSIP) StartStream(ctx context.Context, _ string) (bool, er
 	return false, fmt.Errorf("wait for invite answer: %w", ctx.Err())
 }
 
-func (*blockingInviteSIP) Hangup(context.Context) error { return nil }
-func (*blockingInviteSIP) RemoteDialogEnded()           {}
+func (*blockingInviteSIP) AdoptRingingCall() (bool, error)  { return false, nil }
+func (*blockingInviteSIP) HangupCall(context.Context) error { return nil }
+func (*blockingInviteSIP) RemoteDialogEnded()               {}
 
 type fakeSourceAV struct {
 	calls      int
@@ -548,3 +604,190 @@ func (r *fakeSourceReceiver) Metadata() RTPMetadata {
 type zeroPortSourceReceiver struct{ fakeSourceReceiver }
 
 func (*zeroPortSourceReceiver) Metadata() RTPMetadata { return RTPMetadata{LocalPort: 0} }
+
+func TestSourceSessionRingingPreviewAdoptsWithoutDialingAndStartsVideoOnly(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, &fakeSourceReceiver{port: 61007}, &fakeSourceReceiver{port: 61553})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if sip.startCalls != 0 || sip.adoptCalls != 1 {
+		t.Fatalf("sip start=%d adopt=%d, want 0 and 1 — a ringing preview never dials", sip.startCalls, sip.adoptCalls)
+	}
+
+	if av.videoCalls != 1 || av.calls != 0 || av.audioCalls != 0 || av.ports.Video != 61007 {
+		t.Fatalf("av = %#v, want one video-only request on the bound port", av)
+	}
+
+	if !session.Ringing() {
+		t.Fatal("Ringing() = false, want true")
+	}
+}
+
+func TestSourceSessionRingingPreviewOfAnAnsweredCallStartsBothTracks(t *testing.T) {
+	sip := &fakeSourceSIP{adoptAnswered: true}
+	av := &fakeSourceAV{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if av.calls != 1 || av.videoCalls != 0 || session.Ringing() {
+		t.Fatalf("av=%#v ringing=%v, want a full start — the call was answered before the preview got there", av, session.Ringing())
+	}
+}
+
+func TestSourceSessionRingingPreviewFailsOnceTheRingIsOver(t *testing.T) {
+	sip := &fakeSourceSIP{adoptErr: signaling.ErrNoInboundCall}
+	av := &fakeSourceAV{}
+	video, audio := &fakeSourceReceiver{}, &fakeSourceReceiver{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, video, audio)
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); !errors.Is(err, signaling.ErrNoInboundCall) {
+		t.Fatalf("start error = %v, want ErrNoInboundCall", err)
+	}
+
+	if sip.startCalls != 0 || sip.hangups != 0 || av.videoCalls != 0 || av.calls != 0 {
+		t.Fatalf("sip=%#v av=%#v, want no INVITE, no hangup, no AV request", sip, av)
+	}
+
+	if video.closes != 1 || audio.closes != 1 {
+		t.Fatalf("receivers not released: video=%#v audio=%#v", video, audio)
+	}
+}
+
+func TestSourceSessionAnsweredAsksForAudioOnTheBoundPort(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, &fakeSourceReceiver{port: 61007}, &fakeSourceReceiver{port: 61553})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := session.Answered(context.Background()); err != nil {
+		t.Fatalf("Answered: %v", err)
+	}
+
+	if av.audioCalls != 1 || av.audioPort != 61553 || session.Ringing() {
+		t.Fatalf("av=%#v ringing=%v, want one audio request on the port bound at start", av, session.Ringing())
+	}
+
+	if err := session.Answered(context.Background()); err != nil || av.audioCalls != 1 {
+		t.Fatalf("second Answered err=%v audio calls=%d, want a no-op", err, av.audioCalls)
+	}
+}
+
+func TestSourceSessionAnsweredFailureKeepsTheSessionRinging(t *testing.T) {
+	sip := &fakeSourceSIP{}
+	av := &fakeSourceAV{audioErr: errors.New("nack")}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", sip, av, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := session.Answered(context.Background()); err == nil {
+		t.Fatal("Answered error = nil, want the audio failure")
+	}
+
+	if !session.Ringing() {
+		t.Fatal("Ringing() = false after a failed promotion, want true")
+	}
+}
+
+func TestSourceSessionAnsweredOnAnOrdinarySessionIsANoop(t *testing.T) {
+	av := &fakeSourceAV{}
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", &fakeSourceSIP{}, av, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := session.Answered(context.Background()); err != nil || av.audioCalls != 0 {
+		t.Fatalf("Answered err=%v audio calls=%d, want a no-op", err, av.audioCalls)
+	}
+}
+
+// The invariant of docs/superpowers/specs/2026-10-15-ringing-preview-design.md,
+// held against the real manager: whatever the session is told, its teardown
+// during the ring sends neither a BYE nor a 603.
+func TestSourceSessionRingingPreviewTeardownNeverRejectsTheCall(t *testing.T) {
+	dialer := &recordingStreamDialer{}
+	manager := signaling.NewManager("127.0.0.1", dialer, nil, func() (core.EntrypointID, string) { return "main", "20" })
+	call := &recordingIncomingDialog{id: "call-1"}
+
+	if err := manager.OnInvite(context.Background(), call); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", manager, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// The consumer let go of the lease: the one teardown allowed to end a call.
+	session.EndCallOnClose()
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if statuses := call.statuses(); len(statuses) != 1 || statuses[0] != 180 {
+		t.Fatalf("responses = %v, want only 180 — a 603 would end every fork of the doorbell call", statuses)
+	}
+
+	if call.byeCount() != 0 || dialer.startCalls() != 0 {
+		t.Fatalf("byes=%d invites=%d, want 0 and 0", call.byeCount(), dialer.startCalls())
+	}
+
+	if !manager.HasRingingInboundCall() {
+		t.Fatal("HasRingingInboundCall() = false, want the call still ringing")
+	}
+}
+
+func TestSourceSessionPromotedPreviewEndsTheCallWhenTheConsumerReleases(t *testing.T) {
+	dialer := &recordingStreamDialer{}
+	manager := signaling.NewManager("127.0.0.1", dialer, nil, func() (core.EntrypointID, string) { return "main", "20" })
+	call := &recordingIncomingDialog{id: "call-1"}
+
+	if err := manager.OnInvite(context.Background(), call); err != nil {
+		t.Fatal(err)
+	}
+
+	session := NewSourceSession(nil, SourceConfig{Model: "C300X", DevAddr: "20"}, "main", manager, &fakeSourceAV{}, &fakeSourceReceiver{}, &fakeSourceReceiver{})
+	session.PrepareRingingPreview()
+
+	if err := session.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Answered(context.Background()); err != nil {
+		t.Fatalf("Answered: %v", err)
+	}
+
+	session.EndCallOnClose()
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if call.byeCount() != 1 {
+		t.Fatalf("byes = %d, want 1 — the user let go of an answered call", call.byeCount())
+	}
+}
