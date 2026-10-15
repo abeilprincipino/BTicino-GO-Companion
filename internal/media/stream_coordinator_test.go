@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -444,4 +445,320 @@ func TestStreamCoordinatorStalledTracksDoNotEndTheCall(t *testing.T) {
 	if source.endCallCalls != 0 {
 		t.Fatalf("EndCallOnClose calls = %d, want 0 — an RTP stall must not end the call", source.endCallCalls)
 	}
+}
+
+// ringingPreviewSource is a managed source that can serve a ringing preview.
+// startGate, when set, holds Start until closed; started is signalled when
+// Start begins. answeredCh receives one value per Answered call.
+type ringingPreviewSource struct {
+	mu           sync.Mutex
+	prepared     int
+	answered     int
+	closes       int
+	endCallCalls int
+	answerErr    error
+	packet       *rtp.Packet
+
+	startGate  chan struct{}
+	started    chan struct{}
+	answeredCh chan struct{}
+}
+
+func newRingingPreviewSource() *ringingPreviewSource {
+	return &ringingPreviewSource{started: make(chan struct{}, 1), answeredCh: make(chan struct{}, 4)}
+}
+
+func (s *ringingPreviewSource) Start(context.Context) error {
+	s.started <- struct{}{}
+	if s.startGate != nil {
+		<-s.startGate
+	}
+
+	return nil
+}
+
+func (s *ringingPreviewSource) Close(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closes++
+
+	return nil
+}
+
+func (s *ringingPreviewSource) EndCallOnClose() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.endCallCalls++
+}
+
+func (s *ringingPreviewSource) PrepareRingingPreview() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.prepared++
+}
+
+func (s *ringingPreviewSource) Answered(context.Context) error {
+	s.mu.Lock()
+	s.answered++
+	err := s.answerErr
+	s.mu.Unlock()
+
+	s.answeredCh <- struct{}{}
+
+	return err
+}
+
+func (s *ringingPreviewSource) WriteBackchannelRTP(packet *rtp.Packet) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.packet = packet
+
+	return nil
+}
+
+func (s *ringingPreviewSource) counts() (prepared, answered, closes, endCalls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.prepared, s.answered, s.closes, s.endCallCalls
+}
+
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func ringingCoordinator(source ManagedSource, ringing *bool) *StreamCoordinator {
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+	c.SetRingingCallProbe(func() bool { return *ringing })
+
+	return c
+}
+
+var testEntrypoint = config.Entrypoint{ID: "main", DevAddr: "20"}
+
+func TestStreamCoordinatorRefusesAnOrdinaryLeaseWhileRinging(t *testing.T) {
+	ringing := true
+	c := ringingCoordinator(&fakeManagedSource{}, &ringing)
+
+	if _, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{}); !errors.Is(err, ErrRingingCall) {
+		t.Fatalf("Acquire() with an idle stream error = %v, want ErrRingingCall", err)
+	}
+
+	// The intercom's own AV for the ring marks the stream external; the refusal
+	// must not depend on that.
+	c.ObserveControlTrack(true)
+
+	if _, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{}); !errors.Is(err, ErrRingingCall) {
+		t.Fatalf("Acquire() with an external stream error = %v, want ErrRingingCall", err)
+	}
+}
+
+func TestStreamCoordinatorRingingPreviewAdoptsTheExternalStream(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+	c.ObserveControlTrack(true)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatalf("AcquireRingingPreview() error = %v", err)
+	}
+
+	if prepared, _, _, _ := source.counts(); prepared != 1 {
+		t.Fatalf("PrepareRingingPreview calls = %d, want 1", prepared)
+	}
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerCompanion {
+		t.Fatalf("owner = %q, want %q", owner, StreamOwnerCompanion)
+	}
+
+	c.Release(lease)
+}
+
+func TestStreamCoordinatorRingingPreviewNeedsACapableSource(t *testing.T) {
+	ringing := true
+	c := ringingCoordinator(&fakeManagedSource{}, &ringing)
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{}); !errors.Is(err, ErrStreamBusy) {
+		t.Fatalf("AcquireRingingPreview() error = %v, want ErrStreamBusy", err)
+	}
+
+	ringing = false
+
+	lease, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatalf("Acquire() after the refused preview error = %v, want the lease freed", err)
+	}
+
+	c.Release(lease)
+}
+
+func TestStreamCoordinatorPreviewOutsideTheRingIsAnOrdinaryLease(t *testing.T) {
+	ringing := false
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if prepared, _, _, _ := source.counts(); prepared != 0 {
+		t.Fatalf("PrepareRingingPreview calls = %d, want 0", prepared)
+	}
+
+	c.StopRinging()
+
+	if _, _, closes, _ := source.counts(); closes != 0 {
+		t.Fatalf("closes = %d, want 0 — StopRinging must leave an ordinary lease alone", closes)
+	}
+
+	c.Release(lease)
+}
+
+func TestStreamCoordinatorStopRingingEndsThePreviewWithoutEndingTheCall(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	var failed error
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(err error) { failed = err },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.StopRinging()
+
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0", closes, endCalls)
+	}
+
+	if !errors.Is(failed, ErrRingingEnded) {
+		t.Fatalf("consumer told %v, want ErrRingingEnded", failed)
+	}
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", owner)
+	}
+}
+
+func TestStreamCoordinatorPromoteRingingAnswersTheSourceOnce(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ringing = false
+	c.PromoteRinging()
+	waitSignal(t, source.answeredCh, "Answered")
+
+	c.PromoteRinging()
+	c.StopRinging()
+
+	if _, answered, closes, _ := source.counts(); answered != 1 || closes != 0 {
+		t.Fatalf("answered=%d closes=%d, want 1 and 0 — a promoted lease is no longer a preview", answered, closes)
+	}
+
+	c.Release(lease)
+}
+
+func TestStreamCoordinatorPromotionDuringStartupRunsOnceTheSourceIsUp(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	source.startGate = make(chan struct{})
+	c := ringingCoordinator(source, &ringing)
+
+	acquired := make(chan error, 1)
+	go func() {
+		_, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		acquired <- err
+	}()
+
+	waitSignal(t, source.started, "Start")
+	c.PromoteRinging()
+
+	if _, answered, _, _ := source.counts(); answered != 0 {
+		t.Fatalf("answered = %d before the source is up, want 0", answered)
+	}
+
+	close(source.startGate)
+
+	if err := <-acquired; err != nil {
+		t.Fatal(err)
+	}
+
+	waitSignal(t, source.answeredCh, "Answered after startup")
+}
+
+func TestStreamCoordinatorPromotionFailureStopsTheLeaseWithoutEndingTheCall(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	source.answerErr = errors.New("audio nack")
+	c := ringingCoordinator(source, &ringing)
+
+	failed := make(chan error, 1)
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(err error) { failed <- err },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.PromoteRinging()
+
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("consumer told nil, want the promotion error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer was never told the promotion failed")
+	}
+
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0 — the answered call must survive", closes, endCalls)
+	}
+}
+
+func TestStreamCoordinatorBlocksTheBackchannelWhileRinging(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.WriteBackchannelRTP(lease, testRTPPacket(1)); !errors.Is(err, ErrBackchannelUnavailable) {
+		t.Fatalf("WriteBackchannelRTP() while ringing error = %v, want ErrBackchannelUnavailable", err)
+	}
+
+	ringing = false
+	c.PromoteRinging()
+	waitSignal(t, source.answeredCh, "Answered")
+
+	if err := c.WriteBackchannelRTP(lease, testRTPPacket(2)); err != nil {
+		t.Fatalf("WriteBackchannelRTP() after the answer error = %v", err)
+	}
+
+	c.Release(lease)
 }

@@ -16,11 +16,18 @@ var (
 	ErrStreamBusy             = errors.New("media: intercom stream is busy")
 	ErrExternalStream         = errors.New("media: intercom stream is active externally")
 	ErrBackchannelUnavailable = errors.New("media: backchannel is unavailable")
+	ErrRingingCall            = errors.New("media: intercom call is ringing")
+	ErrRingingEnded           = errors.New("media: ringing call ended")
 )
 
 const (
 	trackFlowTimeout = 5 * time.Second
 	watchInterval    = time.Second
+
+	// promotionTimeout bounds the audio request that turns a ringing preview
+	// into the answered call: three AV attempts of up to 2 s reply plus 1.2 s
+	// flow wait each, with margin.
+	promotionTimeout = 15 * time.Second
 )
 
 // stopCause says why a lease is being torn down, and whether that teardown may
@@ -50,6 +57,7 @@ var (
 	causeSourceCreation   = stopCause{reason: "source creation failed"}
 	causeStartupFailed    = stopCause{reason: "source startup failed"}
 	causeStartupTimedOut  = stopCause{reason: "source startup timed out"}
+	causeRingingEnded     = stopCause{reason: "ringing call ended"}
 )
 
 // ManagedSourceCallEnder is an optional capability of a managed source that
@@ -58,6 +66,16 @@ var (
 // a teardown a consumer asked for.
 type ManagedSourceCallEnder interface {
 	EndCallOnClose()
+}
+
+// ManagedSourceRingingPreview is the capability a source needs to serve a lease
+// taken while the inbound call still rings. PrepareRingingPreview runs before
+// Start and makes the source borrow the call and start video only; Answered
+// adds audio once the call is answered. See
+// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
+type ManagedSourceRingingPreview interface {
+	PrepareRingingPreview()
+	Answered(context.Context) error
 }
 
 type StreamOwner string
@@ -150,6 +168,22 @@ type StreamCoordinator struct {
 	// signaling in, and a nil probe keeps the original behaviour of refusing
 	// every externally owned stream.
 	answeredCallProbe func() bool
+
+	// ringingCallProbe reports whether an inbound call is ringing and not yet
+	// answered. While it is, only a ringing preview may take a lease.
+	ringingCallProbe func() bool
+
+	// previewRinging marks the current lease as a ringing preview not yet
+	// promoted: backchannel blocked, StopRinging applies. promotePending records
+	// a CallAnswered that arrived while that lease was still starting.
+	previewRinging bool
+	promotePending bool
+
+	// leaseEvents are the current lease's events as wrapped by sourceEvents, and
+	// consumerEvents the consumer's own. Promotion failure goes through the
+	// first, the end of the ring through the second.
+	leaseEvents    SourceEvents
+	consumerEvents SourceEvents
 }
 
 // SetStateObserver receives source transitions after their coordinator state is committed.
@@ -190,6 +224,25 @@ func (c *StreamCoordinator) answeredCall() bool {
 	return probe != nil && probe()
 }
 
+// SetRingingCallProbe supplies the predicate that tells the coordinator whether
+// an inbound call is ringing. While it is, only AcquireRingingPreview may take a
+// lease: RTSP and HomeKit wait for the answer.
+func (c *StreamCoordinator) SetRingingCallProbe(probe func() bool) {
+	c.mu.Lock()
+	c.ringingCallProbe = probe
+	c.mu.Unlock()
+}
+
+// ringingCall runs the probe with c.mu released, for the reason given on
+// answeredCall.
+func (c *StreamCoordinator) ringingCall() bool {
+	c.mu.Lock()
+	probe := c.ringingCallProbe
+	c.mu.Unlock()
+
+	return probe != nil && probe()
+}
+
 func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *StreamCoordinator {
 	if logger == nil {
 		logger = slog.Default()
@@ -199,22 +252,33 @@ func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *St
 }
 
 func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(ctx, ctx, entrypoint, events)
+	return c.acquire(ctx, ctx, entrypoint, events, false)
 }
 
 // AcquireWithStartup bounds source initialization without tying the live lease
 // to the caller's short-lived startup deadline.
 func (c *StreamCoordinator) AcquireWithStartup(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events)
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, false)
 }
 
-func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	lease, err := c.reserve(lifecycleCtx, entrypoint)
+// AcquireRingingPreview is AcquireWithStartup for the one consumer that may
+// also take the stream while the inbound call rings: a WebRTC viewer, which can
+// then answer on the same session. The lease starts video only and is promoted
+// by PromoteRinging or stopped by StopRinging. Outside a ring it is an ordinary
+// lease.
+func (c *StreamCoordinator) AcquireRingingPreview(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, true)
+}
+
+func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents, allowRinging bool) (*StreamLease, error) {
+	lease, preview, err := c.reserve(lifecycleCtx, entrypoint, allowRinging)
 	if err != nil {
 		return nil, err
 	}
 
-	source, cleanup, err := c.factory(entrypoint, c.sourceEvents(lease, events))
+	wrapped := c.sourceEvents(lease, events)
+
+	source, cleanup, err := c.factory(entrypoint, wrapped)
 	if err != nil || source == nil {
 		c.finishStop(lease, nil, cleanup, causeSourceCreation)
 
@@ -228,7 +292,19 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 		return nil, ErrStreamBusy
 	}
 
-	if !c.attachSource(lease, source, cleanup) {
+	if preview {
+		ringingSource, ok := source.(ManagedSourceRingingPreview)
+		if !ok {
+			c.finishStop(lease, source, cleanup, causeSourceCreation)
+			c.logger.ErrorContext(lifecycleCtx, "media source creation failed", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "error", "source cannot serve a ringing preview")
+
+			return nil, ErrStreamBusy
+		}
+
+		ringingSource.PrepareRingingPreview()
+	}
+
+	if !c.attachSource(lease, source, cleanup, wrapped, events) {
 		return nil, ErrStreamBusy
 	}
 
@@ -242,36 +318,50 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 	return lease, nil
 }
 
-func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint) (*StreamLease, error) {
+// reserve decides who may take the stream. While the inbound call rings only a
+// ringing preview may, whatever the stream owner is: a card that closes and
+// reopens its preview mid-ring finds the owner idle, and RTSP must still wait.
+// The second result says the lease is a ringing preview.
+func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint, allowRinging bool) (*StreamLease, bool, error) {
+	ringing := c.ringingCall()
 	answered := c.answeredCall()
 
 	c.mu.Lock()
+	if ringing && !allowRinging {
+		c.mu.Unlock()
+		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "inbound_call_ringing")
+
+		return nil, false, ErrRingingCall
+	}
+
 	adopted := c.snapshot.Owner == StreamOwnerExternal
 
-	if adopted && !answered {
+	if adopted && !answered && !ringing {
 		c.mu.Unlock()
 		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 
-		return nil, ErrExternalStream
+		return nil, false, ErrExternalStream
 	}
 
 	if c.leaseID != 0 || c.factory == nil {
 		c.mu.Unlock()
 		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
 
-		return nil, ErrStreamBusy
+		return nil, false, ErrStreamBusy
 	}
 
 	c.nextID++
 	c.leaseID = c.nextID
 	c.controlLeaseID = 0
 	c.starting = true
+	c.previewRinging = ringing
+	c.promotePending = false
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
 	lease := &StreamLease{id: c.leaseID}
 	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "adopted_external", adopted)
+	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "adopted_external", adopted, "ringing_preview", ringing)
 
-	return lease, nil
+	return lease, ringing, nil
 }
 
 func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents) SourceEvents {
@@ -308,7 +398,7 @@ func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents
 	}
 }
 
-func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSource, cleanup func()) bool {
+func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSource, cleanup func(), wrapped, consumer SourceEvents) bool {
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
@@ -323,6 +413,7 @@ func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSourc
 	}
 
 	c.source, c.cleanup = source, cleanup
+	c.leaseEvents, c.consumerEvents = wrapped, consumer
 	c.mu.Unlock()
 
 	return true
@@ -358,17 +449,30 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 	var (
 		snapshot StreamSnapshot
 		observer StreamStateObserver
+		promote  bool
+		pSource  ManagedSourceRingingPreview
+		pFailed  func(error)
 	)
 
 	if c.leaseID == lease.id {
 		c.starting = false
 		snapshot = c.snapshot
 		observer = c.observer
+
+		// The call was answered while this preview was starting.
+		if c.promotePending && c.previewRinging && !c.stopping {
+			pSource, pFailed = c.takePromotionLocked()
+			promote = true
+		}
 	}
 	c.mu.Unlock()
 
 	if observer != nil {
 		observer(snapshot)
+	}
+
+	if promote {
+		go c.promote(lease, pSource, pFailed)
 	}
 }
 
@@ -423,6 +527,93 @@ func (c *StreamCoordinator) Release(lease *StreamLease) bool {
 	return c.stop(lease, causeConsumerReleased)
 }
 
+// PromoteRinging turns the ringing preview into the answered call: the
+// backchannel opens and the source asks the intercom for audio, while video,
+// sockets and the consumer's session carry on. It returns at once — the audio
+// request can take seconds and the caller is the SIP event drain. A lease still
+// starting is promoted as soon as its source is up. A no-op on any other lease.
+func (c *StreamCoordinator) PromoteRinging() {
+	c.mu.Lock()
+	if c.leaseID == 0 || !c.previewRinging || c.stopping {
+		c.mu.Unlock()
+
+		return
+	}
+
+	if c.starting {
+		c.promotePending = true
+		c.mu.Unlock()
+
+		return
+	}
+
+	lease := &StreamLease{id: c.leaseID}
+	source, failed := c.takePromotionLocked()
+	c.mu.Unlock()
+
+	go c.promote(lease, source, failed)
+}
+
+// takePromotionLocked ends the preview phase and returns what promote needs.
+// c.mu must be held.
+func (c *StreamCoordinator) takePromotionLocked() (ManagedSourceRingingPreview, func(error)) {
+	c.previewRinging = false
+	c.promotePending = false
+
+	source, _ := c.source.(ManagedSourceRingingPreview)
+
+	return source, c.leaseEvents.Failed
+}
+
+// promote asks the source for audio. A failure stops the lease as a source
+// failure, which does not end the call: the consumer sees its session close and
+// can open a normal one, which adopts the answered call.
+func (c *StreamCoordinator) promote(lease *StreamLease, source ManagedSourceRingingPreview, failed func(error)) {
+	if source == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), promotionTimeout)
+	defer cancel()
+
+	if err := source.Answered(ctx); err != nil {
+		c.logger.Warn("ringing preview could not join the answered call; the call stays up", "lease_id", lease.id, "error", err)
+
+		if failed != nil {
+			failed(fmt.Errorf("promote ringing preview: %w", err))
+		}
+
+		return
+	}
+
+	c.logger.Info("ringing preview joined the answered call", "lease_id", lease.id)
+}
+
+// StopRinging ends a ringing preview because the ring is over without this
+// companion answering: cancelled, timed out, answered elsewhere or rejected. It
+// never ends the call, and tells the consumer so it can close its session. A
+// no-op on any other lease.
+func (c *StreamCoordinator) StopRinging() {
+	c.mu.Lock()
+	if c.leaseID == 0 || !c.previewRinging {
+		c.mu.Unlock()
+
+		return
+	}
+
+	lease := &StreamLease{id: c.leaseID}
+	consumerFailed := c.consumerEvents.Failed
+	c.mu.Unlock()
+
+	if !c.stop(lease, causeRingingEnded) {
+		return
+	}
+
+	if consumerFailed != nil {
+		consumerFailed(ErrRingingEnded)
+	}
+}
+
 // WriteBackchannelRTP forwards uplink RTP only to the current live source lease.
 func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.Packet) error {
 	if lease == nil {
@@ -430,7 +621,7 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 	}
 
 	c.mu.Lock()
-	if c.leaseID != lease.id || c.starting || c.stopping {
+	if c.leaseID != lease.id || c.starting || c.stopping || c.previewRinging {
 		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
@@ -504,6 +695,10 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.controlLeaseID = 0
 		c.starting = false
 		c.stopping = false
+		c.previewRinging = false
+		c.promotePending = false
+		c.leaseEvents = SourceEvents{}
+		c.consumerEvents = SourceEvents{}
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
 	}
 
