@@ -2,7 +2,9 @@ package signaling
 
 import (
 	"bticino-go-companion/internal/core"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -114,6 +116,17 @@ func TestWaitForDialogEnd(t *testing.T) {
 	})
 }
 
+// cancelRequest builds a CANCEL carrying the given Reason header, or none when
+// it is empty.
+func cancelRequest(reason string) *sip.Request {
+	req := sip.NewRequest(sip.CANCEL, sip.Uri{Scheme: "sip", User: "companion", Host: "127.0.0.1"})
+	if reason != "" {
+		req.AppendHeader(sip.NewHeader("Reason", reason))
+	}
+
+	return req
+}
+
 func TestCancelReasonDetectsAnsweredElsewhere(t *testing.T) {
 	t.Parallel()
 
@@ -131,12 +144,7 @@ func TestCancelReasonDetectsAnsweredElsewhere(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			req := sip.NewRequest(sip.CANCEL, sip.Uri{Scheme: "sip", User: "companion", Host: "127.0.0.1"})
-			if test.header != "" {
-				req.AppendHeader(sip.NewHeader("Reason", test.header))
-			}
-
-			if got := cancelReason(req); got != test.want {
+			if got := cancelReason(cancelRequest(test.header)); got != test.want {
 				t.Fatalf("cancelReason() = %q, want %q", got, test.want)
 			}
 		})
@@ -633,24 +641,60 @@ func TestStreamDialerEndPendingIncomingOnlyReportsTheRingingCall(t *testing.T) {
 		t.Fatalf("Respond() error = %v", err)
 	}
 
-	if dialer.endPendingIncoming(answered, core.CallEndReasonCancelled, "cancel") {
+	if dialer.endPendingIncoming(answered, cancelRequest(""), "cancel") {
 		t.Fatal("endPendingIncoming() reported an answered dialog")
 	}
 
-	if dialer.endPendingIncoming(busy, core.CallEndReasonCancelled, "cancel") {
+	if dialer.endPendingIncoming(busy, cancelRequest(""), "cancel") {
 		t.Fatal("endPendingIncoming() reported a rejected dialog")
 	}
 
-	if !dialer.endPendingIncoming(ringing, core.CallEndReasonElsewhere, "cancel") {
+	if !dialer.endPendingIncoming(ringing, cancelRequest(`SIP;cause=200;text="Call completed elsewhere"`), "cancel") {
 		t.Fatal("endPendingIncoming() did not report the ringing dialog")
 	}
 
-	if dialer.endPendingIncoming(ringing, core.CallEndReasonCancelled, "bye") {
+	if dialer.endPendingIncoming(ringing, cancelRequest(""), "bye") {
 		t.Fatal("endPendingIncoming() reported the same dialog twice")
 	}
 
 	if reasons := handler.collected(); len(reasons) != 1 || reasons[0] != core.CallEndReasonElsewhere {
 		t.Fatalf("EndIncoming reasons = %v, want [%q]", reasons, core.CallEndReasonElsewhere)
+	}
+}
+
+// TestStreamDialerEndPendingIncomingLogsTheRawReason pins what the log keeps of
+// the far end's own explanation. The mapped reason folds every CANCEL that is
+// not cause=200 into "cancelled", so without the raw header a call withdrawn by
+// the intercom cannot be told from one the visitor gave up on.
+func TestStreamDialerEndPendingIncomingLogsTheRawReason(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	dialer := testDialer(&fakeInboundHandler{})
+	dialer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	dialog := &incomingDialog{session: &fakeServerSession{}, id: "call-1"}
+	if err := dialog.Respond(context.Background(), 180, "Ringing", ""); err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	header := `SIP;cause=487;text="Request Terminated"`
+	if !dialer.endPendingIncoming(dialog, cancelRequest(header), "cancel") {
+		t.Fatal("endPendingIncoming() did not report the ringing dialog")
+	}
+
+	var record struct {
+		Msg          string `json:"msg"`
+		Reason       string `json:"reason"`
+		ReasonHeader string `json:"reason_header"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("log record %q: %v", logs.String(), err)
+	}
+
+	if record.Msg != "inbound sip call ended before answer" || record.Reason != string(core.CallEndReasonCancelled) || record.ReasonHeader != header {
+		t.Fatalf("log record = %+v, want reason %q and reason_header %q", record, core.CallEndReasonCancelled, header)
 	}
 }
 
@@ -664,7 +708,7 @@ func TestStreamDialerEndPendingIncomingWithoutHandler(t *testing.T) {
 		t.Fatalf("Respond() error = %v", err)
 	}
 
-	if dialer.endPendingIncoming(dialog, core.CallEndReasonCancelled, "cancel") {
+	if dialer.endPendingIncoming(dialog, cancelRequest(""), "cancel") {
 		t.Fatal("endPendingIncoming() reported a call with no inbound handler")
 	}
 }
