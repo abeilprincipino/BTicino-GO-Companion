@@ -9,7 +9,7 @@ INIT_SCRIPT="/etc/init.d/${SERVICE_NAME}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 LOCAL_INIT_TEMPLATE="${SCRIPT_DIR}/init.d/companion"
 
-DEFAULT_RELEASE_REPO="r0bb10/BTicino-GO-Companion"
+DEFAULT_RELEASE_REPO="abeilprincipino/BTicino-GO-Companion"
 REPO="${COMPANION_RELEASE_REPO:-${DEFAULT_RELEASE_REPO}}"
 RELEASE_TAG="${COMPANION_RELEASE_TAG:-}"
 BUNDLE_ASSET="${COMPANION_RELEASE_BUNDLE_ASSET:-companion.tar.gz}"

@@ -53,6 +53,6 @@ jobs:
             ## Install
 
             ```sh
-            wget -qO /tmp/install.sh "https://github.com/${{ github.repository }}/raw/v3/scripts/install.sh" && COMPANION_RELEASE_TAG=${{ github.ref_name }} sh /tmp/install.sh
+            wget -qO /tmp/install.sh "https://github.com/${{ github.repository }}/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=${{ github.ref_name }} sh /tmp/install.sh
             ```
           generate_release_notes: true

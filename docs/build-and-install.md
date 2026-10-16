@@ -124,7 +124,7 @@ Per abilitare gli update: `-X ...BuildReleaseRepo=abeilprincipino/BTicino-GO-Com
 
 - **con argomento** → usa il binario locale indicato;
 - **senza argomento** → scarica il bundle dall'ultima release di
-  `r0bb10/BTicino-GO-Companion` (`DEFAULT_RELEASE_REPO`) e verifica lo SHA256.
+  `abeilprincipino/BTicino-GO-Companion` (`DEFAULT_RELEASE_REPO`) e verifica lo SHA256.
 
 Per l'install locale serve quindi **sempre** passare il path del binario.
 
@@ -363,7 +363,7 @@ Rilevanti solo in modalità download (senza argomento), tranne le ultime due:
 
 | Variabile | Default | Uso |
 |---|---|---|
-| `COMPANION_RELEASE_REPO` | `r0bb10/BTicino-GO-Companion` | il fork `origin` è `abeilprincipino/…`: va impostata per installare dalle proprie release |
+| `COMPANION_RELEASE_REPO` | `abeilprincipino/BTicino-GO-Companion` | `r0bb10/BTicino-GO-Companion` per installare dalle release upstream |
 | `COMPANION_RELEASE_TAG` | *(vuota → latest)* | tag specifico |
 | `COMPANION_RELEASE_BUNDLE_ASSET` | `companion.tar.gz` | nome asset |
 | `COMPANION_RELEASE_BASE_URL` / `_API` | derivati da repo+tag | mirror o registry alternativo |
@@ -375,16 +375,12 @@ Rilevanti solo in modalità download (senza argomento), tranne le ultime due:
 
 ## 7. Note sul repo
 
-Due incongruenze rilevate leggendo la pipeline, non bloccanti per l'install locale:
+Un'incongruenza rilevata leggendo la pipeline, non bloccante per l'install locale:
 
 - **`dist/` non è in [.gitignore](../.gitignore)** (che copre solo `/companion`,
   `/coverage.out`, `/.dev/`), ma è la directory in cui scrivono sia il comando di §2 sia
   [release.yaml:32](../.github/workflows/release.yaml#L32). Gli artefatti di build finiscono
   in `git status`.
-- **Il testo della release punta a un ref inesistente sul fork.** La `body` della release
-  genera `.../raw/v3/scripts/install.sh` ([release.yaml:56](../.github/workflows/release.yaml#L56)),
-  ma `origin` ha solo `main` — il branch `v3` esiste solo su `upstream`. Una release
-  pubblicata da questo fork mostrerebbe un comando di install rotto.
 
 ---
 
