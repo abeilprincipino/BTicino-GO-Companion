@@ -1375,3 +1375,37 @@ func TestStreamCoordinatorOnlyOneConsumerTalks(t *testing.T) {
 		t.Fatal("backchannel did not receive the second consumer's packet")
 	}
 }
+
+func TestStreamCoordinatorReleasedConsumerCannotClaimTheUplink(t *testing.T) {
+	source := &backchannelManagedSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	first, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Release(first) {
+		t.Fatal("Release(first) = false")
+	}
+
+	if err := c.WriteBackchannelRTP(first, testRTPPacket(1)); !errors.Is(err, ErrBackchannelUnavailable) {
+		t.Fatalf("released consumer's write error = %v, want ErrBackchannelUnavailable", err)
+	}
+
+	packet := testRTPPacket(2)
+	if err := c.WriteBackchannelRTP(second, packet); err != nil {
+		t.Fatalf("second consumer's write after the first left error = %v", err)
+	}
+
+	if source.packet != packet {
+		t.Fatal("backchannel did not receive the second consumer's packet")
+	}
+}

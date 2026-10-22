@@ -178,6 +178,21 @@ func TestFanoutRemoveCountsWhoIsLeft(t *testing.T) {
 	}
 }
 
+func TestFanoutHasReportsWhoIsOnTheStream(t *testing.T) {
+	f := newFanout()
+	f.add(1, SourceEvents{})
+
+	if !f.has(1) {
+		t.Fatal("has(1) = false after add")
+	}
+
+	f.remove(1)
+
+	if f.has(1) {
+		t.Fatal("has(1) = true after remove")
+	}
+}
+
 func TestFanoutRefusesAJoinOnceClosedAndStillTellsEveryone(t *testing.T) {
 	f := newFanout()
 

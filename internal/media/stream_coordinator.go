@@ -865,7 +865,11 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 		return ErrBackchannelUnavailable
 	}
 
-	if c.talker == 0 {
+	// Only a consumer still on the stream may claim the uplink: a packet in
+	// flight from a consumer that already left must not. leave removes the
+	// consumer before it clears the talker, so every interleaving ends with no
+	// stale talker.
+	if c.talker == 0 && c.fanout != nil && c.fanout.has(lease.consumer) {
 		c.talker = lease.consumer
 	}
 

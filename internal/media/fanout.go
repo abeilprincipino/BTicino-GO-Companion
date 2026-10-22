@@ -120,6 +120,20 @@ func (f *fanout) remove(id uint64) (remaining int, found bool) {
 	return len(f.consumers), false
 }
 
+// has reports whether a consumer with that id is still on the stream.
+func (f *fanout) has(id uint64) bool {
+	f.listMu.Lock()
+	defer f.listMu.Unlock()
+
+	for _, consumer := range f.consumers {
+		if consumer.id == id {
+			return true
+		}
+	}
+
+	return false
+}
+
 // close stops further joins. The list is kept, so the end of the stream can
 // still be told to every consumer on it.
 func (f *fanout) close() {
