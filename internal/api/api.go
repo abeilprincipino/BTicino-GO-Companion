@@ -80,7 +80,9 @@ func (s *Server) Handler() http.Handler {
 	s.handle(mux, "GET", "/api/v3/auth/status", s.authStatus)
 	s.handle(mux, "POST", "/api/v3/pair/challenge", s.pairChallenge)
 	s.handle(mux, "POST", "/api/v3/pair/claim", s.pairClaim)
-	s.handle(mux, "POST", "/api/v3/pair/local", s.pairLocal)
+	// Registered for POST only: every other method falls through to the
+	// catch-all notFound, so the route is not discoverable from the network.
+	mux.HandleFunc("POST /api/v3/pair/local", s.pairLocal)
 	s.handleProtected(mux, "POST", "/api/v3/auth/rotate", s.rotateBearer)
 	s.handleProtected(mux, "POST", "/api/v3/auth/revoke", s.revokeBearer)
 	s.handle(mux, "POST", "/api/v3/auth/recover", s.recoverBearer)

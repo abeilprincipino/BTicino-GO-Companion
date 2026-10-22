@@ -290,6 +290,62 @@ func TestServer_PairLocal(t *testing.T) {
 			t.Fatalf("recover with the local repair code: %v", err)
 		}
 	})
+
+	t.Run("other methods look like an unknown route", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		for _, remoteAddr := range []string{"192.0.2.1:1234", "127.0.0.1:5555"} {
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/pair/local", nil)
+			request.RemoteAddr = remoteAddr
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"not_found"`) {
+				t.Fatalf("GET pair/local from %s = %d: %s", remoteAddr, response.Code, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("a pairing error is a conflict", func(t *testing.T) {
+		t.Parallel()
+
+		server, store := newTestServer(t)
+		if err := store.Update(func(cfg *config.Config) error {
+			cfg.Auth.PairingState = config.PairingStateError
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		response, body := pairLocal(t, server, "127.0.0.1:5555", `{}`)
+		if response.Code != http.StatusConflict || body.Error.Code != "pairing_error" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("an IPv4-mapped loopback peer is accepted", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		response, body := pairLocal(t, server, "[::ffff:127.0.0.1]:5555", `{}`)
+		if response.Code != http.StatusOK || body.PairingState != "claimable" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("a malformed peer address is hidden", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		response, body := pairLocal(t, server, "not-an-address", `{}`)
+		if response.Code != http.StatusNotFound || body.Error.Code != "not_found" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func pairLocal(t *testing.T, server *Server, remoteAddr, body string) (*httptest.ResponseRecorder, pairLocalResponse) {
