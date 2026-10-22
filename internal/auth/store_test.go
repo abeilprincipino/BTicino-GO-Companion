@@ -258,6 +258,25 @@ func TestStore_RejectsInvalidSourceIP(t *testing.T) {
 func newTestStore(t *testing.T) (*Store, *config.Store) {
 	t.Helper()
 
+	store, backend := newSetupRequiredStore(t)
+
+	if err := backend.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatalf("set session secret: %v", err)
+	}
+
+	if _, err := store.StartInitialClaim(); err != nil {
+		t.Fatalf("issue initial claim code: %v", err)
+	}
+
+	return store, backend
+}
+
+func newSetupRequiredStore(t *testing.T) (*Store, *config.Store) {
+	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if _, err := config.Create(path, config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"}); err != nil {
 		t.Fatalf("create config: %v", err)
@@ -270,17 +289,6 @@ func newTestStore(t *testing.T) (*Store, *config.Store) {
 
 	store := NewStore(backend)
 	store.now = func() time.Time { return testNow }
-
-	if err := backend.Update(func(cfg *config.Config) error {
-		cfg.WebUI.SessionSecret = "test-session-secret"
-		return nil
-	}); err != nil {
-		t.Fatalf("set session secret: %v", err)
-	}
-
-	if _, err := store.StartInitialClaim(); err != nil {
-		t.Fatalf("issue initial claim code: %v", err)
-	}
 
 	return store, backend
 }
