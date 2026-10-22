@@ -243,16 +243,19 @@ cp -f companion.previous companion.new
 
 ## Uninstall
 
+Connect to the intercom over SSH and run the uninstaller:
+
 ```sh
-/etc/init.d/companion stop
-mount -o remount,rw /
-rm -f /etc/init.d/companion /etc/rc?.d/S99zzcompanion /etc/rc?.d/K55companion
-mount -o remount,ro /
-rm -rf /home/bticino/cfg/extra/companion
+wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh
 ```
 
-The firewall entries added to `/etc/network/if-pre-up.d/iptables` are not removed. To undo the SIP
-provisioning, restore the `.companion.bak` copies in `/etc/flexisip/users/` and restart Flexisip.
+It stops the service, removes the init script and its boot links, removes the companion's firewall
+rules from `/etc/network/if-pre-up.d/iptables`, removes the `companion` SIP user from Flexisip, and
+deletes `/home/bticino/cfg/extra/companion`, configuration and pairing included. Only the TCP ports
+the installer added are closed: installations made before the installer recorded them keep their TCP
+ports, and the uninstaller says so with a `WARN:` line. It ends with
+`OK: Companion removed. Restart Flexisip or reboot the intercom.` and exits with code `1` if any step
+failed.
 
 ---
 

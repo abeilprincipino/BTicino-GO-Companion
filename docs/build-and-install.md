@@ -51,6 +51,12 @@ scp dist/companion root@<IP>:/home/bticino/cfg/extra/companion/companion.new && 
 ssh root@<IP> 'cd /home/bticino/cfg/extra/companion && cp -f companion.previous companion.new && /etc/init.d/companion restart && /etc/init.d/companion status'
 ```
 
+**Disinstallazione** (dettagli in §3.5):
+
+```sh
+ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+```
+
 **Riparare uno stage già copiato con CRLF** (da eseguire sul device, `<stage>` = dir che contiene `scripts/`):
 
 ```sh
@@ -230,6 +236,26 @@ ssh root@<IP> '/etc/init.d/companion status; tail -30 /tmp/companion.log'
   Non serve prepararlo: `config.Default` semina un entrypoint (`id: main`, `devaddr: 20`,
   stream/unlock/ring attivi) e genera `instance_id`; il PIN HomeKit viene generato al primo
   avvio del bridge.
+
+
+### 3.5 Disinstallazione
+
+```sh
+ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+```
+
+Ferma il servizio, rimuove init script e symlink di boot, le regole firewall del companion, l'utente
+SIP `companion` da Flexisip e la cartella `/home/bticino/cfg/extra/companion` (configurazione e
+pairing compresi). Delle porte TCP chiude solo quelle che l'installer ha aggiunto e annotato in
+`firewall-added`; sulle installazioni precedenti le lascia aperte con un `WARN:`. Non ripristina i
+`.companion.bak` di Flexisip: annullerebbero le modifiche fatte da BTicino dopo l'installazione.
+Usa lo stesso lock dell'installer. Poi va riavviato Flexisip, o il citofono.
+
+I test di logica di `install.sh` e `uninstall.sh` girano senza root su qualsiasi `sh` POSIX:
+
+```sh
+sh scripts/tests/run.sh
+```
 
 ---
 

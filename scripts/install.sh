@@ -27,6 +27,9 @@ BASE_URL="${COMPANION_RELEASE_BASE_URL:-${DEFAULT_BASE_URL}}"
 RELEASE_API="${COMPANION_RELEASE_API:-${DEFAULT_RELEASE_API}}"
 
 LOCK_DIR="/var/run/${SERVICE_NAME}-install.lock"
+# Ports such as 80 may be in the firewall list before the companion arrives,
+# so uninstall.sh removes only the ones listed here.
+FIREWALL_ADDED="${BASE_DIR}/firewall-added"
 
 ROOT=""
 ROOT_WAS_REMOUNTED=0
@@ -180,7 +183,7 @@ ensure_persistent_firewall_port_value() {
 		{ print }
 		END { if(!patched) exit 42 }
 	' "${hook}" > "${tmp}"; then
-		cp "${tmp}" "${hook}"; rm -f "${tmp}"; log "Persisted companion firewall port ${port} in ${hook}."; return
+		cp "${tmp}" "${hook}"; rm -f "${tmp}"; printf '%s\n' "${port}" >> "${FIREWALL_ADDED}"; log "Persisted companion firewall port ${port} in ${hook}."; return
 	fi
 	rc=$?; rm -f "${tmp}"
 	[ "${rc}" -eq 42 ] && warn "could not find SSH/SIP firewall block in ${hook}; no persistent patch applied." || warn "failed to patch ${hook} for companion port ${port}."
