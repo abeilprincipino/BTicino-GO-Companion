@@ -91,9 +91,15 @@ The coordinator still owns one intercom stream at a time, but a stream may have 
   - stream exists, born shareable, same entrypoint, not stopping, and the acquire is shareable →
     **join**: a new consumer handle on the existing stream;
   - anything else → `ErrStreamBusy`, as today.
+  - Known constraint, accepted: the join ignores the ringing state, so a ringing preview could in
+    principle join a stream born outside the ring and get none of the preview behaviour. It cannot
+    happen today: a stream born outside the ring is an outbound live view, whose active dialog
+    makes `Manager.OnInvite` answer `486 Busy Here`, so no ring ever reaches the card or the ring
+    holder while it runs. Revisit if that 486 is ever removed.
 - **Joining a starting stream** waits for its startup to finish, bounded by the joiner's
-  `startupCtx`. If startup fails, the joiner gets the same error. A `started` channel per stream
-  carries this.
+  `startupCtx`. If startup fails, or the stream stops before the joiner is in, the joiner gets
+  `ErrStreamStopped`. A `streamStart` per stream carries this; a fan-out whose last consumer
+  leaves closes itself, so a late joiner cannot attach to a stream being torn down.
 - **Fan-out.** The wrapped `SourceEvents` copy each video and audio RTP packet to every consumer.
   The consumer list is copied under `c.mu` and invoked outside it, in the order consumers joined.
 - **Stream-level events** — remote BYE, source failure, stall, OpenWebNet stop, end of ring,
@@ -156,9 +162,9 @@ A small component driven by the call events that already reach the code calling
 
 ### 4.5 Doorbell snapshot
 
-- `SnapshotManager.Arm(entrypointID, ring bool)`. `bridgeSource` passes `ring = true` when
-  `PrepareRingingPreview` was called before `Start`, so the attempt is armed in
-  `bridgeSource.Start` rather than at construction.
+- `SnapshotManager.Arm(entrypointID)` is unchanged; the attempt gains `MarkRing()`.
+  `bridgeSource.PrepareRingingPreview` calls it, which runs before `Start`, so the mark is set
+  before any packet can produce a frame.
 - `publish` always writes `snapshots/<id>.jpg`. A ring attempt also writes
   `snapshots/ring/<id>.jpg` (same atomic temp-file + rename). A directory of its own, so an
   entrypoint named "x-ring" cannot collide with the ring file of "x".
