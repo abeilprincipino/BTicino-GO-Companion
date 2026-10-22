@@ -95,7 +95,11 @@ The coordinator still owns one intercom stream at a time, but a stream may have 
     principle join a stream born outside the ring and get none of the preview behaviour. It cannot
     happen today: a stream born outside the ring is an outbound live view, whose active dialog
     makes `Manager.OnInvite` answer `486 Busy Here`, so no ring ever reaches the card or the ring
-    holder while it runs. Revisit if that 486 is ever removed.
+    holder while it runs. One narrow window remains: after the hangup of an answered call, a
+    consumer still attached (a Home Assistant native-camera viewer, or a session the integration
+    no longer tracks) keeps the stream up until the bus stop frame or the stall watchdog, about
+    5 s; a new ring inside that window joins the dead stream and gets no picture and no preview.
+    Accepted as rare. Revisit if that 486 is ever removed or the window shows up on the device.
 - **Joining a starting stream** waits for its startup to finish, bounded by the joiner's
   `startupCtx`. If startup fails, or the stream stops before the joiner is in, the joiner gets
   `ErrStreamStopped`. A `streamStart` per stream carries this; a fan-out whose last consumer
