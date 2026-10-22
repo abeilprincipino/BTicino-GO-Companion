@@ -57,7 +57,7 @@ wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companio
 This installs the latest release. To pin a specific release, set `COMPANION_RELEASE_TAG`:
 
 ```sh
-wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v3.0.0 sh /tmp/install.sh
+wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v0.7.0 sh /tmp/install.sh
 ```
 
 The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines and ends with
@@ -146,7 +146,7 @@ Environment variables read by `install.sh`:
 Example:
 
 ```sh
-COMPANION_SIP_INBOUND=0 COMPANION_RELEASE_TAG=v3.0.0 sh /tmp/install.sh
+COMPANION_SIP_INBOUND=0 COMPANION_RELEASE_TAG=v0.7.0 sh /tmp/install.sh
 ```
 
 ## After Installation
