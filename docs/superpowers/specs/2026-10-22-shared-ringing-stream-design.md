@@ -59,7 +59,13 @@ frame arrives the state is `ringing` again, the state is pushed, and Home Assist
 - **The companion opens the stream itself on every SIP ring** (the "ring holder") to take the
   doorbell picture. This reverses the 2026-10-15 rule "the companion does not start the video on
   its own at every ring"; the ringing preview already does exactly this whenever a card is open, so
-  the indoor unit is known to tolerate it.
+  the indoor unit is known to tolerate it. The reason: the companion receives video only when it
+  requests it — the AV the intercom starts on its own while ringing goes to the indoor unit and is
+  seen only as an "external stream" — so with no card open there is no frame to take a picture
+  from. The holder keeps the stream until the answer or the end of the ring rather than closing it
+  after the picture: closing a ringing preview sends no BYE and no AV stop, and a card opening
+  afterwards would have to ask the intercom for video on a new port mid-ring, the case suspected
+  in 2.2 of not working. Joining the running stream avoids that request altogether.
 - When one device answers, **the other cards close their view** and show "In a call on another
   device". Only the answering device gets audio and microphone.
 - Home Assistant gets an **image entity "Last doorbell ring"** per entrypoint, updated only by a
