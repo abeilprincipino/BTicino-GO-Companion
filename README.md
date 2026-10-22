@@ -60,9 +60,15 @@ This installs the latest release. To pin a specific release, set `COMPANION_RELE
 wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v3.0.0 sh /tmp/install.sh
 ```
 
-The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines and ends with
-`Installation complete.` It exits with code `1` if any post-install check fails; the `FAIL:` lines
-say which one.
+The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines. A successful run ends with
+`INFO: Installed version: <version>` followed by `Installation complete.` It exits with code `1` if
+any post-install check fails, or if it stops early; in both cases the `FAIL:` lines say why. An
+early stop that has no specific message is reported as
+`FAIL: Installation aborted while <step> (exit <code>).`
+
+Only one installation can run at a time; a second one stops with `FAIL: Another installation is
+already running`. Closing the SSH session does not interrupt a running installation: it carries on
+to the end and restores `/` read-only.
 
 The same command is used to upgrade an existing installation.
 
@@ -75,7 +81,8 @@ In order:
 2. Downloads the `companion.tar.gz` release bundle and verifies its SHA256 against the GitHub
    release asset digest.
 3. Installs the binary to `/home/bticino/cfg/extra/companion/companion`, keeping the previous one as
-   `companion.previous`.
+   `companion.previous`. An update the companion had staged as `companion.new` is discarded, so it
+   cannot replace the installed binary on the next start.
 4. Installs the bundled GStreamer runtime to `/home/bticino/cfg/extra/companion/gst`, keeping the
    previous one as `gst.previous`.
 5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S99zzcompanion` in runlevels

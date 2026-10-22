@@ -201,7 +201,21 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
 7. post-install check, incluso l'health su `http://127.0.0.1:8080/api/v3/health` con timeout
    45 s (`COMPANION_HEALTHCHECK_TIMEOUT_SEC`).
 
-Exit code `1` se almeno un check fallisce; il dettaglio è nelle righe `FAIL:`.
+Exit code `1` se almeno un check fallisce o se l'installer si ferma prima; il dettaglio è nelle
+righe `FAIL:` (un'uscita senza messaggio specifico diventa
+`FAIL: Installation aborted while <step> (exit <code>).`). Se va a buon fine, prima di
+`Installation complete.` stampa `INFO: Installed version: <versione>`, letta da `companion -version`.
+
+Altri comportamenti:
+
+- un `companion.new` lasciato da un update già scaricato viene scartato, altrimenti il `restart`
+  lo promuoverebbe al posto del binario appena installato;
+- un lock in `/var/run/companion-install.lock` impedisce due installazioni contemporanee;
+- `HUP` e `PIPE` sono ignorati: se la sessione SSH cade, l'installazione arriva comunque in fondo
+  e rimonta `/` in sola lettura.
+
+`/etc/init.d/companion` esce con il codice reale dell'azione: `status` restituisce `3` se il
+servizio è fermo e `1` se gira ma non è sano o il watchdog è fermo.
 
 ### 3.4 Verifica
 

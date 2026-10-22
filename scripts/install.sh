@@ -26,18 +26,37 @@ fi
 BASE_URL="${COMPANION_RELEASE_BASE_URL:-${DEFAULT_BASE_URL}}"
 RELEASE_API="${COMPANION_RELEASE_API:-${DEFAULT_RELEASE_API}}"
 
+LOCK_DIR="/var/run/${SERVICE_NAME}-install.lock"
+
 ROOT=""
 ROOT_WAS_REMOUNTED=0
+LOCK_HELD=0
 FAILURES=0
 POST_CHECK_FAILURES=0
 SELECTED_BINARY_PATH=""
 SELECTED_INIT_TEMPLATE=""
 SELECTED_GST_DIR=""
+INSTALLED_VERSION="unknown"
+CURRENT_STEP="starting"
+ABORT_REPORTED=0
+RUN_FINISHED=0
 
-log() { printf 'INFO: %s\n' "$*"; }
-ok() { printf 'OK: %s\n' "$*"; }
-warn() { printf 'WARN: %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
+# The installer is often driven over a remote session that can vanish mid-run,
+# when the network drops or Home Assistant restarts. Stopping there would leave
+# / read-write and the service half-replaced, so writes are best-effort and the
+# run carries on to the end whether or not anyone is still reading.
+log() { printf 'INFO: %s\n' "$*" 2>/dev/null || true; }
+ok() { printf 'OK: %s\n' "$*" 2>/dev/null || true; }
+warn() { printf 'WARN: %s\n' "$*" 2>/dev/null || true; }
+fail() { printf 'FAIL: %s\n' "$*" 2>/dev/null || true; FAILURES=$((FAILURES + 1)); }
+
+# die goes to stderr so that it is still seen when it fires inside a command
+# substitution, where stdout is the caller's variable.
+die() {
+	printf 'FAIL: %s\n' "$*" >&2 2>/dev/null || true
+	ABORT_REPORTED=1
+	exit 1
+}
 
 cleanup_download_dir() {
 	[ -z "${ROOT}" ] || [ ! -d "${ROOT}" ] || rm -rf "${ROOT}" || true
@@ -51,14 +70,44 @@ restore_root_ro() {
 	fi
 }
 
-on_exit() { cleanup_download_dir; restore_root_ro; }
-trap on_exit EXIT INT TERM
+acquire_install_lock() {
+	if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+		holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+		if [ -n "${holder}" ] && [ -d "/proc/${holder}" ]; then
+			die "Another installation is already running (pid ${holder})."
+		fi
+		rm -rf "${LOCK_DIR}"
+		mkdir "${LOCK_DIR}" || die "Could not create the installation lock ${LOCK_DIR}."
+	fi
+	echo "$$" > "${LOCK_DIR}/pid"
+	LOCK_HELD=1
+}
+
+release_install_lock() {
+	[ "${LOCK_HELD}" -eq 1 ] || return 0
+	rm -rf "${LOCK_DIR}"
+	LOCK_HELD=0
+}
+
+# An exit that nothing announced (a failed command under set -e, a signal)
+# would otherwise end the output on whatever INFO line came before it.
+on_exit() {
+	rc=$?
+	set +e
+	cleanup_download_dir
+	restore_root_ro
+	release_install_lock
+	if [ "${rc}" -ne 0 ] && [ "${RUN_FINISHED}" -eq 0 ] && [ "${ABORT_REPORTED}" -eq 0 ]; then
+		printf 'FAIL: Installation aborted while %s (exit %s).\n' "${CURRENT_STEP}" "${rc}" >&2 2>/dev/null
+	fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap '' HUP PIPE
 
 require_root() {
-	if [ "$(id -u)" -ne 0 ]; then
-		log "This script must run as root."
-		exit 1
-	fi
+	[ "$(id -u)" -eq 0 ] || die "This script must run as root."
 }
 
 remount_root_rw() {
@@ -74,8 +123,7 @@ fetch() {
 	dst="$2"
 	if command -v wget >/dev/null 2>&1; then wget -qO "${dst}" "${url}"; return; fi
 	if command -v curl >/dev/null 2>&1; then curl -fsSL -o "${dst}" "${url}"; return; fi
-	log "Neither wget nor curl is available."
-	exit 1
+	die "Neither wget nor curl is available."
 }
 
 sha256_file() {
@@ -83,8 +131,7 @@ sha256_file() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "${target}" | awk '{print $1}'; return; fi
 	if command -v busybox >/dev/null 2>&1; then busybox sha256sum "${target}" | awk '{print $1}'; return; fi
 	if command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "${target}" | awk '{print $NF}'; return; fi
-	log "No SHA256 tool found (sha256sum/busybox/openssl)."
-	exit 1
+	die "No SHA256 tool found (sha256sum/busybox/openssl)."
 }
 
 parse_release_asset_digest() {
@@ -162,13 +209,28 @@ ensure_persistent_firewall_ports() {
 	for port in $(companion_firewall_udp_ports); do ensure_persistent_firewall_udp_port_value "${port}"; done
 }
 
+# Prints the version a companion binary reports, or "unknown" for builds that
+# predate the -version flag.
+binary_version() {
+	version="$("$1" -version 2>/dev/null || true)"
+	printf '%s\n' "${version:-unknown}"
+}
+
 install_binary() {
 	mkdir -p "${BASE_DIR}"
 	candidate="${BASE_DIR}/companion.candidate.$$"
 	cp "$1" "${candidate}"; chmod 755 "${candidate}"
+	INSTALLED_VERSION="$(binary_version "${candidate}")"
 	if [ -f "${BIN_PATH}" ]; then cp -f "${BIN_PATH}" "${BASE_DIR}/companion.previous"; chmod 755 "${BASE_DIR}/companion.previous" || true; fi
 	mv -f "${candidate}" "${BIN_PATH}"
-	log "Installed binary to ${BIN_PATH}"
+	# The init script promotes companion.new over companion on its next start,
+	# so an update the companion staged earlier would replace this binary as
+	# soon as the service is restarted below.
+	if [ -e "${BASE_DIR}/companion.new" ]; then
+		rm -f "${BASE_DIR}/companion.new"
+		log "Discarded the staged update ${BASE_DIR}/companion.new."
+	fi
+	log "Installed binary ${INSTALLED_VERSION} to ${BIN_PATH}"
 }
 
 install_gst_runtime() {
@@ -392,34 +454,62 @@ post_install_checks() {
 }
 
 resolve_local_install_inputs() {
-	[ -n "$1" ] && [ -f "$1" ] || { log "Missing companion binary for install."; exit 1; }
-	[ -f "$2" ] || { log "Missing init template for install."; exit 1; }
+	[ -n "$1" ] && [ -f "$1" ] || die "Missing companion binary for install."
+	[ -f "$2" ] || die "Missing init template for install."
 	SELECTED_BINARY_PATH="$1"; SELECTED_INIT_TEMPLATE="$2"
 	[ ! -d "${SCRIPT_DIR}/../gst" ] || SELECTED_GST_DIR="${SCRIPT_DIR}/../gst"
 }
 
 download_latest_artifacts() {
-	[ -n "${REPO}" ] || { log "Set COMPANION_RELEASE_REPO to download a release."; exit 1; }
+	[ -n "${REPO}" ] || die "Set COMPANION_RELEASE_REPO to download a release."
 	ROOT="/tmp/companion-install.$$"; mkdir -p "${ROOT}"
 	log "Downloading latest release bundle..."
 	bundle="${ROOT}/${BUNDLE_ASSET}"
-	fetch "${BASE_URL}/${BUNDLE_ASSET}" "${bundle}"
-	expected_sha="$(resolve_bundle_sha)"
-	[ -n "${expected_sha}" ] || { log "Could not resolve expected SHA256 digest for ${BUNDLE_ASSET}."; exit 1; }
+	fetch "${BASE_URL}/${BUNDLE_ASSET}" "${bundle}" || die "Could not download ${BASE_URL}/${BUNDLE_ASSET}."
+	# Under set -e a failed command substitution in an assignment exits on the
+	# spot, so the lookup must not fail for the message below to be reached.
+	expected_sha="$(resolve_bundle_sha || true)"
+	[ -n "${expected_sha}" ] || die "Could not resolve the expected SHA256 digest for ${BUNDLE_ASSET} from ${RELEASE_API}."
 	actual_sha="$(sha256_file "${bundle}")"
-	if [ "${actual_sha}" != "${expected_sha}" ]; then log "SHA256 mismatch for ${BUNDLE_ASSET}. Expected: ${expected_sha}; Actual: ${actual_sha}"; exit 1; fi
-	tar -xzf "${bundle}" -C "${ROOT}"
+	[ "${actual_sha}" = "${expected_sha}" ] || die "SHA256 mismatch for ${BUNDLE_ASSET}. Expected: ${expected_sha}; Actual: ${actual_sha}"
+	tar -xzf "${bundle}" -C "${ROOT}" || die "Could not extract ${BUNDLE_ASSET}."
 	bundle_dir="${ROOT}/companion"
-	[ -f "${bundle_dir}/companion" ] && [ -f "${bundle_dir}/init.d/companion" ] && [ -d "${bundle_dir}/gst" ] || { log "Bundle asset ${BUNDLE_ASSET} not found or incomplete in latest release."; exit 1; }
+	[ -f "${bundle_dir}/companion" ] && [ -f "${bundle_dir}/init.d/companion" ] && [ -d "${bundle_dir}/gst" ] || die "Bundle asset ${BUNDLE_ASSET} not found or incomplete in latest release."
 	chmod 755 "${bundle_dir}/companion" "${bundle_dir}/init.d/companion"
 	SELECTED_BINARY_PATH="${bundle_dir}/companion"; SELECTED_INIT_TEMPLATE="${bundle_dir}/init.d/companion"; SELECTED_GST_DIR="${bundle_dir}/gst"
 }
 
 main() {
-	require_root; log "Starting companion installation"
-	if [ -n "${1:-}" ]; then log "Using local binary input: $1"; resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"; else download_latest_artifacts; fi
-	install_binary "${SELECTED_BINARY_PATH}"; install_gst_runtime "${SELECTED_GST_DIR}"; register_service "${SELECTED_INIT_TEMPLATE}"
-	start_service; setup_sip_inbound; restore_root_ro; post_install_checks
+	require_root
+	acquire_install_lock
+	log "Starting companion installation"
+
+	if [ -n "${1:-}" ]; then
+		CURRENT_STEP="checking the local install inputs"
+		log "Using local binary input: $1"
+		resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"
+	else
+		CURRENT_STEP="downloading the release"
+		download_latest_artifacts
+	fi
+
+	CURRENT_STEP="installing the binary"
+	install_binary "${SELECTED_BINARY_PATH}"
+	CURRENT_STEP="installing the GStreamer runtime"
+	install_gst_runtime "${SELECTED_GST_DIR}"
+	CURRENT_STEP="registering the init service"
+	register_service "${SELECTED_INIT_TEMPLATE}"
+
+	CURRENT_STEP="starting the service"
+	start_service || warn "${SERVICE_NAME} did not start cleanly; see /tmp/${SERVICE_NAME}.log."
+	CURRENT_STEP="provisioning SIP inbound"
+	setup_sip_inbound
+	restore_root_ro
+
+	CURRENT_STEP="running the post-install checks"
+	post_install_checks
+	RUN_FINISHED=1
+	log "Installed version: ${INSTALLED_VERSION}"
 	[ "${POST_CHECK_FAILURES}" -eq 0 ] || { log "Installation finished with ${POST_CHECK_FAILURES} failed check(s)."; exit 1; }
 	log "Installation complete."
 }
