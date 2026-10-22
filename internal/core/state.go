@@ -139,6 +139,15 @@ func apply(state *State, event Event) error {
 			return err
 		}
 
+		// The ring is over once the call is answered. The bus frame that would
+		// clear it comes only when the media stops, after the hangup, so without
+		// this the state reads "ringing" between the hangup and that frame and
+		// Home Assistant notifies a ring that never happened. See
+		// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+		if state.PhysicalRing != nil && state.PhysicalRing.EntrypointID == incoming.EntrypointID {
+			state.PhysicalRing = nil
+		}
+
 		state.LastIncomingCallEnd = nil
 		state.ActiveCall = &ActiveCall{DialogID: incoming.DialogID, EntrypointID: incoming.EntrypointID}
 		state.IncomingCall = nil

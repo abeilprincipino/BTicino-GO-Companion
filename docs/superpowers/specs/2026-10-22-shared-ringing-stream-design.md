@@ -178,9 +178,11 @@ A small component driven by the call events that already reach the code calling
 
 ### 4.7 Physical ring cleared by the SIP call (`internal/core`)
 
-In the reducer, `CallAnswered`, `CallDeclined`, `CallHungUp` and `IncomingCallEnded` also clear
-`PhysicalRing` when it belongs to the same entrypoint as the call. A later bus stop frame then
-finds no ring and its `RingCleared` is a no-op, as today. After a hangup the state goes straight
+In the reducer, `CallAnswered` also clears `PhysicalRing` when it belongs to the answered call's
+entrypoint. Decline, hangup and the end of an incoming call keep today's behaviour: the existing
+rule (`TestProjector_DeclineClearsOnlyIncomingDialog`) is that declining the companion's SIP leg
+does not end the indoor unit's ring, and the reported defect needs only the answer. A later bus
+stop frame finds no ring and its `RingCleared` is a no-op. After a hangup the state goes straight
 from `active` to `idle`.
 
 ## 5. Design — Home Assistant
