@@ -73,7 +73,10 @@ func (f *fanout) add(id uint64, events SourceEvents) bool {
 	return true
 }
 
-// remove detaches a consumer and reports how many are left.
+// remove detaches a consumer and reports how many are left. Removing the last
+// one closes the fan-out in the same step: the coordinator stops the stream only
+// after this returns, so a join in between would take a lease on a dying stream
+// and never be told. Closing here makes that join fail with ErrStreamStopped.
 func (f *fanout) remove(id uint64) (remaining int, found bool) {
 	f.listMu.Lock()
 	defer f.listMu.Unlock()
@@ -82,6 +85,10 @@ func (f *fanout) remove(id uint64) (remaining int, found bool) {
 		if consumer.id == id {
 			// A fresh backing array: a snapshot being iterated keeps its own.
 			f.consumers = append(f.consumers[:i:i], f.consumers[i+1:]...)
+
+			if len(f.consumers) == 0 {
+				f.closed = true
+			}
 
 			return len(f.consumers), true
 		}

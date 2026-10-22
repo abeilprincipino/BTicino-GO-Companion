@@ -208,3 +208,22 @@ func TestFanoutConsumerMayLeaveFromItsOwnCallback(t *testing.T) {
 		t.Fatalf("remaining = %d, want 0", remaining)
 	}
 }
+
+func TestFanoutClosesWhenTheLastConsumerLeaves(t *testing.T) {
+	f := newFanout()
+	f.add(1, SourceEvents{})
+	f.add(2, SourceEvents{})
+
+	f.remove(1)
+
+	if !f.add(3, SourceEvents{}) {
+		t.Fatal("add() with a consumer still on the stream = false, want true")
+	}
+
+	f.remove(2)
+	f.remove(3)
+
+	if f.add(4, SourceEvents{}) {
+		t.Fatal("add() after the last consumer left = true, want false — the stream is going away")
+	}
+}
