@@ -23,8 +23,8 @@ var (
 
 func TestStartsKeyframe(t *testing.T) {
 	stapA := []byte{0x78, 0x00, 0x02, 0x67, 0x01, 0x00, 0x02, 0x68, 0x01} // STAP-A: SPS, PPS
-	stapANoKey := []byte{0x78, 0x00, 0x02, 0x41, 0x01}                     // STAP-A: one slice
-	stapATruncated := []byte{0x78, 0x00, 0x09, 0x67}                       // size past the end
+	stapANoKey := []byte{0x78, 0x00, 0x02, 0x41, 0x01}                    // STAP-A: one slice
+	stapATruncated := []byte{0x78, 0x00, 0x09, 0x67}                      // size past the end
 
 	tests := []struct {
 		name    string
