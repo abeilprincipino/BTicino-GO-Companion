@@ -3,6 +3,7 @@ package main
 import (
 	"bticino-go-companion/internal/app"
 	"bticino-go-companion/internal/logging"
+	"bticino-go-companion/internal/system"
 	"context"
 	"flag"
 	"fmt"
@@ -18,8 +19,16 @@ func main() {
 
 func run() int {
 	var configPath string
+	var showVersion bool
 	flag.StringVar(&configPath, "config", "", "path to config.yaml")
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(system.BuildVersion)
+
+		return 0
+	}
 
 	runtime, err := logging.New("info")
 	if err != nil {
