@@ -35,7 +35,7 @@ func TestBootstrapRequiresPasswordChange(t *testing.T) {
 
 	server, _ := testServer(t, nil)
 
-	response := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	response := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: auth.DefaultOwnerUsername, Password: auth.DefaultOwnerPassword}, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("bootstrap login status = %d", response.Code)
 	}
@@ -81,7 +81,7 @@ func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
 	}
 
 	server := New(store, auth.NewStore(store), slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
-	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: auth.DefaultOwnerUsername, Password: auth.DefaultOwnerPassword}, nil)
 	response := request(t, server, http.MethodPost, "/webui/api/bootstrap/account", passwordRequest{
 		Username:        "admin",
 		Password:        "correct-horse",
@@ -95,6 +95,51 @@ func TestBootstrapRejectsMismatchedPasswordConfirmation(t *testing.T) {
 	if store.Snapshot().WebUI.AdminPasswordHash != "" || store.Snapshot().Auth.PairingState != config.PairingStateSetupRequired {
 		t.Fatalf("mismatched confirmation changed bootstrap state: %#v", store.Snapshot())
 	}
+}
+
+func TestBootstrapOwnerSetupOnClaimableCompanionKeepsItsClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := config.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authStore := auth.NewStore(store)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := authStore.StartInitialClaim(); err != nil {
+		t.Fatal(err)
+	}
+
+	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
+
+	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: auth.DefaultOwnerUsername, Password: auth.DefaultOwnerPassword}, nil)
+	setup := request(t, server, http.MethodPost, "/webui/api/bootstrap/account", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, sessionCookieFrom(t, login))
+
+	if setup.Code != http.StatusOK {
+		t.Fatalf("owner setup on a claimable companion = %d: %s", setup.Code, setup.Body.String())
+	}
+
+	if state := store.Snapshot().Auth.PairingState; state != config.PairingStateClaimable {
+		t.Fatalf("pairing state = %q, want claimable", state)
+	}
+
+	passwordSession(t, server, "correct-horse")
 }
 
 func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
@@ -117,7 +162,7 @@ func TestBootstrapOwnerSetupIssuesClaimCodeAndCanIssueRepairCode(t *testing.T) {
 	authStore := auth.NewStore(store)
 	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
 
-	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	login := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: auth.DefaultOwnerUsername, Password: auth.DefaultOwnerPassword}, nil)
 	setup := request(t, server, http.MethodPost, "/webui/api/bootstrap/account", passwordRequest{Username: "admin", Password: "correct-horse", PasswordConfirm: "correct-horse"}, sessionCookieFrom(t, login))
 
 	claimCode, err := authStore.InitialClaimCode()
@@ -496,7 +541,7 @@ func testServer(t *testing.T, restart RestartFunc) (*Server, *config.Store) {
 func configuredSession(t *testing.T, server *Server) *http.Cookie {
 	t.Helper()
 
-	bootstrap := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: defaultUsername, Password: defaultPassword}, nil)
+	bootstrap := request(t, server, http.MethodPost, "/webui/api/login", loginRequest{Username: auth.DefaultOwnerUsername, Password: auth.DefaultOwnerPassword}, nil)
 	if bootstrap.Code != http.StatusOK {
 		t.Fatalf("bootstrap login status = %d", bootstrap.Code)
 	}
