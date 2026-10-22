@@ -393,34 +393,6 @@ func TestStreamCoordinatorConsumerReleaseEndsTheCall(t *testing.T) {
 	}
 }
 
-func TestStreamCoordinatorHandoverDoesNotEndTheCall(t *testing.T) {
-	source := &callEndingSource{}
-	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
-		return source, nil, nil
-	})
-
-	lease, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !c.Handover(lease) {
-		t.Fatal("hand over source lease")
-	}
-
-	if source.closes != 1 {
-		t.Fatalf("source closes = %d, want 1", source.closes)
-	}
-
-	if source.endCallCalls != 0 {
-		t.Fatalf("EndCallOnClose calls = %d, want 0 — the successor adopts the call", source.endCallCalls)
-	}
-
-	if _, err := c.Acquire(context.Background(), config.Entrypoint{ID: "main", DevAddr: "20"}, SourceEvents{}); err != nil {
-		t.Fatalf("acquire after handover: %v", err)
-	}
-}
-
 func TestStreamCoordinatorOpenWebNetStopDoesNotEndTheCall(t *testing.T) {
 	source := &callEndingSource{}
 	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
@@ -992,5 +964,325 @@ func TestStreamCoordinatorControlStopDoesNotNotifyAnOrdinaryLeaseConsumer(t *tes
 
 	if failed != 0 {
 		t.Fatalf("consumer Failed called %d times, want 0 — only ringing previews are announced", failed)
+	}
+}
+
+// sharedFactory builds one source per stream and records the wrapped events the
+// coordinator hands it, so a test can push media into the stream.
+type sharedFactory struct {
+	mu      sync.Mutex
+	sources []ManagedSource
+	events  []SourceEvents
+	build   func() ManagedSource
+}
+
+func (f *sharedFactory) factory() ManagedSourceFactory {
+	return func(_ config.Entrypoint, events SourceEvents) (ManagedSource, func(), error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		source := f.build()
+		f.sources = append(f.sources, source)
+		f.events = append(f.events, events)
+
+		return source, nil, nil
+	}
+}
+
+func (f *sharedFactory) created() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.sources)
+}
+
+func (f *sharedFactory) streamEvents(i int) SourceEvents {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.events[i]
+}
+
+func TestStreamCoordinatorShareableAcquireJoinsTheRunningStream(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &callEndingSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	var first, second []uint16
+
+	firstLease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		VideoRTP: func(packet *rtp.Packet) { first = append(first, packet.SequenceNumber) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secondLease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		VideoRTP: func(packet *rtp.Packet) { second = append(second, packet.SequenceNumber) },
+	})
+	if err != nil {
+		t.Fatalf("second AcquireRingingPreview() error = %v, want a join", err)
+	}
+
+	if shared.created() != 1 {
+		t.Fatalf("sources created = %d, want 1", shared.created())
+	}
+
+	if firstLease.id != secondLease.id || firstLease.consumer == secondLease.consumer {
+		t.Fatalf("leases = %#v and %#v, want one stream and two consumers", firstLease, secondLease)
+	}
+
+	shared.streamEvents(0).VideoRTP(&rtp.Packet{Header: rtp.Header{SequenceNumber: 7}, Payload: []byte{0x41}})
+
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("deliveries first=%v second=%v, want one each", first, second)
+	}
+}
+
+func TestStreamCoordinatorExclusiveLeasesNeverShare(t *testing.T) {
+	c := NewStreamCoordinator(nil, testManagedSourceFactory())
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{}); !errors.Is(err, ErrStreamBusy) {
+		t.Fatalf("Acquire() on a shared stream error = %v, want ErrStreamBusy", err)
+	}
+
+	c.Release(lease)
+
+	exclusive, err := c.Acquire(context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{}); !errors.Is(err, ErrStreamBusy) {
+		t.Fatalf("AcquireRingingPreview() on an exclusive stream error = %v, want ErrStreamBusy", err)
+	}
+
+	c.Release(exclusive)
+}
+
+func TestStreamCoordinatorOnlyTheLastReleaseEndsTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	first, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Release(first) {
+		t.Fatal("Release(first) = false")
+	}
+
+	if source.closes != 0 || source.endCallCalls != 0 {
+		t.Fatalf("after a middle release closes=%d endCalls=%d, want 0 and 0", source.closes, source.endCallCalls)
+	}
+
+	if c.Release(first) {
+		t.Fatal("Release(first) twice = true, want a no-op")
+	}
+
+	if !c.Release(second) {
+		t.Fatal("Release(second) = false")
+	}
+
+	if source.closes != 1 || source.endCallCalls != 1 {
+		t.Fatalf("after the last release closes=%d endCalls=%d, want 1 and 1", source.closes, source.endCallCalls)
+	}
+}
+
+func TestStreamCoordinatorLeaveNeverEndsTheCall(t *testing.T) {
+	source := &callEndingSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !c.Leave(lease) {
+		t.Fatal("Leave() = false")
+	}
+
+	if source.closes != 1 || source.endCallCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0", source.closes, source.endCallCalls)
+	}
+
+	if c.Snapshot().Owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", c.Snapshot().Owner)
+	}
+}
+
+func TestStreamCoordinatorJoinWaitsForTheStartup(t *testing.T) {
+	source := newRingingPreviewSource()
+	source.startGate = make(chan struct{})
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	type result struct {
+		lease *StreamLease
+		err   error
+	}
+
+	firstDone, secondDone := make(chan result, 1), make(chan result, 1)
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		firstDone <- result{lease, err}
+	}()
+
+	waitSignal(t, source.started, "source Start")
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		secondDone <- result{lease, err}
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("the joiner returned before the stream had started")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(source.startGate)
+
+	first, second := <-firstDone, <-secondDone
+	if first.err != nil || second.err != nil {
+		t.Fatalf("errors first=%v second=%v", first.err, second.err)
+	}
+
+	if first.lease.id != second.lease.id {
+		t.Fatalf("leases on different streams: %#v and %#v", first.lease, second.lease)
+	}
+}
+
+type failingGatedSource struct {
+	started chan struct{}
+	gate    chan struct{}
+}
+
+func (s *failingGatedSource) Start(context.Context) error {
+	s.started <- struct{}{}
+	<-s.gate
+
+	return errors.New("intercom refused")
+}
+
+func (*failingGatedSource) Close(context.Context) error { return nil }
+
+func TestStreamCoordinatorJoinFailsWithTheStartup(t *testing.T) {
+	source := &failingGatedSource{started: make(chan struct{}, 1), gate: make(chan struct{})}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+
+	go func() {
+		_, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		firstDone <- err
+	}()
+
+	<-source.started
+
+	go func() {
+		_, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		secondDone <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(source.gate)
+
+	if err := <-firstDone; err == nil {
+		t.Fatal("creator error = nil, want the startup failure")
+	}
+
+	if err := <-secondDone; !errors.Is(err, ErrStreamStopped) {
+		t.Fatalf("joiner error = %v, want ErrStreamStopped", err)
+	}
+}
+
+func TestStreamCoordinatorStopRingingTellsEveryConsumer(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	var told [2]error
+
+	for i := range told {
+		if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+			Failed: func(err error) { told[i] = err },
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c.StopRinging()
+
+	for i, err := range told {
+		if !errors.Is(err, ErrRingingEnded) {
+			t.Fatalf("consumer %d told %v, want ErrRingingEnded", i, err)
+		}
+	}
+}
+
+func TestStreamCoordinatorRemoteBYEReachesEveryConsumer(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &fakeManagedSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	byes := 0
+
+	for range 2 {
+		if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+			RemoteBYE: func() { byes++ },
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	shared.streamEvents(0).RemoteBYE()
+
+	if byes != 2 {
+		t.Fatalf("RemoteBYE delivered %d times, want 2", byes)
+	}
+
+	if c.Snapshot().Owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", c.Snapshot().Owner)
+	}
+}
+
+func TestStreamCoordinatorJoinerGetsTheCachedKeyframe(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &fakeManagedSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{}); err != nil {
+		t.Fatal(err)
+	}
+
+	shared.streamEvents(0).VideoRTP(&rtp.Packet{Header: rtp.Header{SequenceNumber: 9, Timestamp: 100}, Payload: []byte{0x65, 1}})
+
+	var replayed []uint16
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		VideoRTP: func(packet *rtp.Packet) { replayed = append(replayed, packet.SequenceNumber) },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(replayed) != 1 || replayed[0] != 9 {
+		t.Fatalf("joiner got %v, want the cached IDR [9]", replayed)
 	}
 }

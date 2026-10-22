@@ -19,6 +19,7 @@ var (
 	ErrRingingCall            = errors.New("media: intercom call is ringing")
 	ErrRingingEnded           = errors.New("media: ringing call ended")
 	ErrRingingPreviewLost     = errors.New("media: ringing preview lost")
+	ErrStreamStopped          = errors.New("media: stream stopped")
 )
 
 const (
@@ -50,16 +51,16 @@ type stopCause struct {
 }
 
 var (
-	causeConsumerReleased   = stopCause{reason: "consumer released", endsCall: true}
-	causeConsumerSuperseded = stopCause{reason: "consumer superseded"}
-	causeRemoteBYE          = stopCause{reason: "remote sip bye"}
-	causeControlStop        = stopCause{reason: "openwebnet stream stop"}
-	causeTracksStalled      = stopCause{reason: "rtp tracks stalled"}
-	causeSourceFailure      = stopCause{reason: "managed source failure"}
-	causeSourceCreation     = stopCause{reason: "source creation failed"}
-	causeStartupFailed      = stopCause{reason: "source startup failed"}
-	causeStartupTimedOut    = stopCause{reason: "source startup timed out"}
-	causeRingingEnded       = stopCause{reason: "ringing call ended"}
+	causeConsumerReleased = stopCause{reason: "consumer released", endsCall: true}
+	causeConsumerLeft     = stopCause{reason: "consumer left"}
+	causeRemoteBYE        = stopCause{reason: "remote sip bye"}
+	causeControlStop      = stopCause{reason: "openwebnet stream stop"}
+	causeTracksStalled    = stopCause{reason: "rtp tracks stalled"}
+	causeSourceFailure    = stopCause{reason: "managed source failure"}
+	causeSourceCreation   = stopCause{reason: "source creation failed"}
+	causeStartupFailed    = stopCause{reason: "source startup failed"}
+	causeStartupTimedOut  = stopCause{reason: "source startup timed out"}
+	causeRingingEnded     = stopCause{reason: "ringing call ended"}
 )
 
 // ManagedSourceCallEnder is an optional capability of a managed source that
@@ -123,7 +124,47 @@ type StreamSnapshot struct {
 	Health       StreamHealth
 }
 
-type StreamLease struct{ id uint64 }
+// StreamLease is one consumer's hold on the stream: id names the stream and
+// consumer the holder. Stream-level paths build it with consumer 0, which never
+// names a consumer.
+type StreamLease struct{ id, consumer uint64 }
+
+// acquireMode says what an acquire may do. A shareable acquire joins a running
+// stream born from another shareable acquire instead of failing busy; see
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+type acquireMode struct {
+	allowRinging bool
+	shareable    bool
+}
+
+// streamStart tells consumers joining a stream that its startup is over, and
+// how it went.
+type streamStart struct {
+	done chan struct{}
+	once sync.Once
+	err  error
+}
+
+func newStreamStart() *streamStart {
+	return &streamStart{done: make(chan struct{})}
+}
+
+func (s *streamStart) finish(err error) {
+	s.once.Do(func() {
+		s.err = err
+		close(s.done)
+	})
+}
+
+// reservation is what reserve hands acquire: a new stream to start, or a
+// running one to join.
+type reservation struct {
+	lease   *StreamLease
+	preview bool
+	join    bool
+	fanout  *fanout
+	start   *streamStart
+}
 
 type SourceEvents struct {
 	VideoRTP  func(*rtp.Packet)
@@ -181,11 +222,18 @@ type StreamCoordinator struct {
 	previewRinging bool
 	promotePending bool
 
-	// leaseEvents are the current lease's events as wrapped by sourceEvents, and
-	// consumerEvents the consumer's own. Promotion failure goes through the
-	// first, the end of the ring through the second.
-	leaseEvents    SourceEvents
-	consumerEvents SourceEvents
+	// leaseEvents are the current stream's events as wrapped by sourceEvents.
+	// Promotion failure goes through them.
+	leaseEvents SourceEvents
+
+	// shared marks the current stream as one a shareable acquire may join;
+	// fanout delivers its media to every consumer; start tells joiners when its
+	// startup is over. See
+	// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+	shared       bool
+	fanout       *fanout
+	start        *streamStart
+	nextConsumer uint64
 
 	// promoteCancel cancels the promotion in flight, if any. stop takes it so a
 	// lease torn down mid-promotion does not keep retrying the audio request
@@ -259,31 +307,48 @@ func NewStreamCoordinator(logger *slog.Logger, factory ManagedSourceFactory) *St
 }
 
 func (c *StreamCoordinator) Acquire(ctx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(ctx, ctx, entrypoint, events, false)
+	return c.acquire(ctx, ctx, entrypoint, events, acquireMode{})
 }
 
 // AcquireWithStartup bounds source initialization without tying the live lease
 // to the caller's short-lived startup deadline.
 func (c *StreamCoordinator) AcquireWithStartup(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, false)
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, acquireMode{})
 }
 
-// AcquireRingingPreview is AcquireWithStartup for the one consumer that may
-// also take the stream while the inbound call rings: a WebRTC viewer, which can
-// then answer on the same session. The lease starts video only and is promoted
-// by PromoteRinging or stopped by StopRinging. Outside a ring it is an ordinary
-// lease.
+// AcquireRingingPreview is AcquireWithStartup for the consumers that may also
+// take the stream while the inbound call rings: a WebRTC viewer, which can then
+// answer on the same session, and the ring holder. The lease starts video only
+// and is promoted by PromoteRinging or stopped by StopRinging. Outside a ring it
+// is an ordinary lease.
+//
+// It is also the shareable acquire: it joins a stream another shareable
+// consumer of the same entrypoint already holds, so two devices watch together
+// instead of the second closing the first. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
 func (c *StreamCoordinator) AcquireRingingPreview(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, true)
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, acquireMode{allowRinging: true, shareable: true})
 }
 
-func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents, allowRinging bool) (*StreamLease, error) {
-	lease, preview, err := c.reserve(lifecycleCtx, entrypoint, allowRinging)
+func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents, mode acquireMode) (*StreamLease, error) {
+	r, err := c.reserve(lifecycleCtx, entrypoint, mode)
 	if err != nil {
 		return nil, err
 	}
 
-	wrapped := c.sourceEvents(lease, events)
+	if r.join {
+		return c.join(lifecycleCtx, startupCtx, r, entrypoint, events)
+	}
+
+	lease := r.lease
+
+	// The cache is empty and nothing flows before Start, so this replays
+	// nothing. It fails only if the ring ended while the stream was reserved.
+	if !r.fanout.add(lease.consumer, events) {
+		return nil, ErrStreamStopped
+	}
+
+	wrapped := c.sourceEvents(lease, r.fanout)
 
 	source, cleanup, err := c.factory(entrypoint, wrapped)
 	if err != nil || source == nil {
@@ -299,7 +364,7 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 		return nil, ErrStreamBusy
 	}
 
-	if preview {
+	if r.preview {
 		ringingSource, ok := source.(ManagedSourceRingingPreview)
 		if !ok {
 			c.finishStop(lease, source, cleanup, causeSourceCreation)
@@ -311,7 +376,7 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 		ringingSource.PrepareRingingPreview()
 	}
 
-	if !c.attachSource(lease, source, cleanup, wrapped, events) {
+	if !c.attachSource(lease, source, cleanup, wrapped) {
 		return nil, ErrStreamBusy
 	}
 
@@ -325,20 +390,43 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 	return lease, nil
 }
 
+// join waits for the stream's startup, within the joiner's own startup budget,
+// and adds the consumer to it. A failed startup, or a stream that stops before
+// the consumer is in, fails the join.
+func (c *StreamCoordinator) join(ctx, startupCtx context.Context, r reservation, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
+	select {
+	case <-r.start.done:
+	case <-startupCtx.Done():
+		return nil, startupCtx.Err()
+	}
+
+	if r.start.err != nil {
+		return nil, r.start.err
+	}
+
+	if !r.fanout.add(r.lease.consumer, events) {
+		return nil, ErrStreamStopped
+	}
+
+	c.logger.InfoContext(ctx, "stream consumer joined", "lease_id", r.lease.id, "consumer_id", r.lease.consumer, "entrypoint_id", entrypoint.ID)
+
+	return r.lease, nil
+}
+
 // reserve decides who may take the stream. While the inbound call rings only a
 // ringing preview may, whatever the stream owner is: a card that closes and
 // reopens its preview mid-ring finds the owner idle, and RTSP must still wait.
-// The second result says the lease is a ringing preview.
-func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint, allowRinging bool) (*StreamLease, bool, error) {
+// A shareable acquire finding a shareable stream of the same entrypoint joins it.
+func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entrypoint, mode acquireMode) (reservation, error) {
 	ringing := c.ringingCall()
 	answered := c.answeredCall()
 
 	c.mu.Lock()
-	if ringing && !allowRinging {
+	if ringing && !mode.allowRinging {
 		c.mu.Unlock()
 		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "inbound_call_ringing")
 
-		return nil, false, ErrRingingCall
+		return reservation{}, ErrRingingCall
 	}
 
 	adopted := c.snapshot.Owner == StreamOwnerExternal
@@ -347,65 +435,68 @@ func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entry
 		c.mu.Unlock()
 		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "external_stream_active")
 
-		return nil, false, ErrExternalStream
+		return reservation{}, ErrExternalStream
+	}
+
+	if c.leaseID != 0 && mode.shareable && c.shared && !c.stopping && c.snapshot.EntrypointID == entrypoint.ID {
+		c.nextConsumer++
+		r := reservation{lease: &StreamLease{id: c.leaseID, consumer: c.nextConsumer}, join: true, fanout: c.fanout, start: c.start}
+		c.mu.Unlock()
+		c.logger.DebugContext(ctx, "stream consumer joining", "lease_id", r.lease.id, "consumer_id", r.lease.consumer, "entrypoint_id", entrypoint.ID)
+
+		return r, nil
 	}
 
 	if c.leaseID != 0 || c.factory == nil {
 		c.mu.Unlock()
 		c.logger.DebugContext(ctx, "stream lease rejected", "entrypoint_id", entrypoint.ID, "reason", "source_unavailable", "owner", c.snapshot.Owner)
 
-		return nil, false, ErrStreamBusy
+		return reservation{}, ErrStreamBusy
 	}
 
 	c.nextID++
+	c.nextConsumer++
 	c.leaseID = c.nextID
 	c.controlLeaseID = 0
 	c.starting = true
 	c.previewRinging = ringing
 	c.promotePending = false
+	c.shared = mode.shareable
+	c.fanout = newFanout()
+	c.start = newStreamStart()
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
-	lease := &StreamLease{id: c.leaseID}
+	r := reservation{lease: &StreamLease{id: c.leaseID, consumer: c.nextConsumer}, preview: ringing, fanout: c.fanout, start: c.start}
 	c.mu.Unlock()
-	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", lease.id, "entrypoint_id", entrypoint.ID, "adopted_external", adopted, "ringing_preview", ringing)
+	c.logger.InfoContext(ctx, "stream lease acquired", "lease_id", r.lease.id, "entrypoint_id", entrypoint.ID, "adopted_external", adopted, "ringing_preview", ringing, "shared", mode.shareable)
 
-	return lease, ringing, nil
+	return r, nil
 }
 
-func (c *StreamCoordinator) sourceEvents(lease *StreamLease, events SourceEvents) SourceEvents {
+// sourceEvents wraps the stream's fan-out: every consumer gets the media, and a
+// remote BYE or a source failure stops the stream and is told to all of them.
+func (c *StreamCoordinator) sourceEvents(lease *StreamLease, f *fanout) SourceEvents {
 	return SourceEvents{
 		VideoRTP: func(packet *rtp.Packet) {
 			c.ObserveRTPPacket(lease, true, packet)
-
-			if events.VideoRTP != nil {
-				events.VideoRTP(packet)
-			}
+			f.video(packet)
 		},
 		AudioRTP: func(packet *rtp.Packet) {
 			c.ObserveRTPPacket(lease, false, packet)
-
-			if events.AudioRTP != nil {
-				events.AudioRTP(packet)
-			}
+			f.audio(packet)
 		},
 		RemoteBYE: func() {
 			c.stop(lease, causeRemoteBYE)
-
-			if events.RemoteBYE != nil {
-				events.RemoteBYE()
-			}
+			f.remoteBYE()
 		},
 		Failed: func(err error) {
 			c.logger.Error("media source failed", "lease_id", lease.id, "error", err)
 			c.stop(lease, causeSourceFailure)
-
-			if events.Failed != nil {
-				events.Failed(err)
-			}
+			f.failed(err)
 		},
 	}
 }
 
-func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSource, cleanup func(), wrapped, consumer SourceEvents) bool {
+func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSource, cleanup func(), wrapped SourceEvents) bool {
 	c.mu.Lock()
 	if c.leaseID != lease.id {
 		c.mu.Unlock()
@@ -420,7 +511,7 @@ func (c *StreamCoordinator) attachSource(lease *StreamLease, source ManagedSourc
 	}
 
 	c.source, c.cleanup = source, cleanup
-	c.leaseEvents, c.consumerEvents = wrapped, consumer
+	c.leaseEvents = wrapped
 	c.mu.Unlock()
 
 	return true
@@ -466,10 +557,12 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 		pSource  ManagedSourceRingingPreview
 		pFailed  func(error)
 		pCtx     context.Context
+		start    *streamStart
 	)
 
 	if c.leaseID == lease.id {
 		c.starting = false
+		start = c.start
 		snapshot = c.snapshot
 		observer = c.observer
 
@@ -481,6 +574,10 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 		}
 	}
 	c.mu.Unlock()
+
+	if start != nil {
+		start.finish(nil)
+	}
 
 	if observer != nil {
 		observer(snapshot)
@@ -536,19 +633,50 @@ func (c *StreamCoordinator) Reconcile(lease *StreamLease, now time.Time) bool {
 	return false
 }
 
-// Release ends the lease and, with it, the SIP call behind it. That is the
-// teardown a consumer that lets go of the stream asks for; a consumer replaced
-// by a successor uses Handover instead.
+// Release lets one consumer go. The last one out ends the stream and, with it,
+// the SIP call behind it: that is the teardown a consumer that lets go of the
+// stream asks for. A consumer that steps aside without ending the call uses
+// Leave instead.
 func (c *StreamCoordinator) Release(lease *StreamLease) bool {
-	return c.stop(lease, causeConsumerReleased)
+	return c.leave(lease, causeConsumerReleased)
 }
 
-// Handover ends the lease because another consumer of the same entrypoint is
-// replacing it. Unlike Release it never ends the call: the successor takes the
-// stream over and adopts the call. See
-// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
-func (c *StreamCoordinator) Handover(lease *StreamLease) bool {
-	return c.stop(lease, causeConsumerSuperseded)
+// Leave lets one consumer go without ever ending the call: the last one out
+// stops the stream with no BYE. The ring holder leaves this way, and so does a
+// card that closes because the call was answered on another device. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+func (c *StreamCoordinator) Leave(lease *StreamLease) bool {
+	return c.leave(lease, causeConsumerLeft)
+}
+
+func (c *StreamCoordinator) leave(lease *StreamLease, cause stopCause) bool {
+	if lease == nil {
+		return false
+	}
+
+	c.mu.Lock()
+	f := c.fanout
+
+	if c.leaseID != lease.id || f == nil {
+		c.mu.Unlock()
+		c.logger.Debug("stream consumer release ignored; lease is no longer active", "lease_id", lease.id, "consumer_id", lease.consumer, "reason", cause.reason)
+
+		return false
+	}
+	c.mu.Unlock()
+
+	remaining, found := f.remove(lease.consumer)
+	if !found {
+		return false
+	}
+
+	if remaining > 0 {
+		c.logger.Info("stream consumer left", "lease_id", lease.id, "consumer_id", lease.consumer, "reason", cause.reason, "remaining", remaining)
+
+		return true
+	}
+
+	return c.stop(lease, cause)
 }
 
 // PromoteRinging turns the ringing preview into the answered call: the
@@ -659,8 +787,8 @@ func (c *StreamCoordinator) releasePromotion(lease *StreamLease) {
 
 // StopRinging ends a ringing preview because the ring is over without this
 // companion answering: cancelled, timed out, answered elsewhere or rejected. It
-// never ends the call, and tells the consumer so it can close its session. A
-// no-op on any other lease.
+// never ends the call, and tells every consumer so each can close its session.
+// A no-op on any other lease.
 func (c *StreamCoordinator) StopRinging() {
 	c.mu.Lock()
 	if c.leaseID == 0 || !c.previewRinging {
@@ -670,15 +798,15 @@ func (c *StreamCoordinator) StopRinging() {
 	}
 
 	lease := &StreamLease{id: c.leaseID}
-	consumerFailed := c.consumerEvents.Failed
+	f := c.fanout
 	c.mu.Unlock()
 
 	if !c.stop(lease, causeRingingEnded) {
 		return
 	}
 
-	if consumerFailed != nil {
-		consumerFailed(ErrRingingEnded)
+	if f != nil {
+		f.failed(ErrRingingEnded)
 	}
 }
 
@@ -730,14 +858,19 @@ func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 	promoteCancel := c.promoteCancel
 	c.promoteCancel = nil
 
-	// A ringing preview lost to the media layer would otherwise leave the
-	// consumer holding a dead session that the user could still answer on. Told
-	// after the teardown so the consumer closes its session; the card then falls
-	// back to answering with a fresh offer, which adopts the answered call.
-	// StopRinging notifies for itself, and release or handover never do.
-	var previewLost func(error)
+	// A ringing preview lost to the media layer would otherwise leave its
+	// consumers holding dead sessions that the user could still answer on. Told
+	// after the teardown so they close their sessions; a card then falls back
+	// to answering with a fresh offer, which adopts the answered call.
+	// StopRinging notifies for itself, and release or leave never do.
+	var lost *fanout
 	if c.previewRinging && (cause == causeControlStop || cause == causeTracksStalled) {
-		previewLost = c.consumerEvents.Failed
+		lost = c.fanout
+	}
+
+	// No consumer may join a stream that is going away.
+	if c.fanout != nil {
+		c.fanout.close()
 	}
 	c.mu.Unlock()
 
@@ -750,8 +883,8 @@ func (c *StreamCoordinator) stop(lease *StreamLease, cause stopCause) bool {
 	c.logger.Info("stream teardown started", "lease_id", lease.id, "reason", cause.reason)
 	c.finishStop(lease, source, cleanup, cause)
 
-	if previewLost != nil {
-		previewLost(fmt.Errorf("%w: %s", ErrRingingPreviewLost, cause.reason))
+	if lost != nil {
+		lost.failed(fmt.Errorf("%w: %s", ErrRingingPreviewLost, cause.reason))
 	}
 
 	return true
@@ -781,7 +914,15 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 	}
 
 	c.mu.Lock()
+
+	var start *streamStart
+
 	if c.leaseID == lease.id {
+		if c.fanout != nil {
+			c.fanout.close()
+		}
+
+		start = c.start
 		c.leaseID = 0
 		c.controlLeaseID = 0
 		c.starting = false
@@ -790,13 +931,20 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.promotePending = false
 		c.promoteCancel = nil
 		c.leaseEvents = SourceEvents{}
-		c.consumerEvents = SourceEvents{}
+		c.shared = false
+		c.fanout = nil
+		c.start = nil
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}
 	}
 
 	snapshot := c.snapshot
 	observer := c.observer
 	c.mu.Unlock()
+
+	// A consumer still waiting to join learns the startup is over for good.
+	if start != nil {
+		start.finish(ErrStreamStopped)
+	}
 
 	if observer != nil {
 		observer(snapshot)
