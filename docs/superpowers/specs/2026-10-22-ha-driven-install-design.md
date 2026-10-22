@@ -59,7 +59,7 @@ Unprotected route, registered next to `pair/challenge` and `pair/claim`.
 answers exactly like an unknown route (`s.notFound`), so the endpoint is not discoverable from the
 LAN.
 
-**Request** (JSON body, optional):
+**Request** (JSON body, required like every JSON route; `{}` when there is no owner to send):
 
 ```json
 {"owner": {"username": "...", "password": "..."}}
@@ -94,9 +94,12 @@ neither equal to the defaults) and the owner write (bcrypt hash, new session sec
   `PairingState = claimable`, and returns the claim code. It fails with `ErrClaimNotAllowed` unless
   the state is `setup_required`.
 
-`handlePassword` calls `SetupOwner` on its bootstrap path instead of writing the config and then
-calling `StartInitialClaim`, which then has no caller and is removed. Its non-bootstrap path
-(password change) keeps its current code. The defaults `companion`/`companion` move with the rules. Bootstrap web UI sessions opened before a
+`handlePassword` calls `SetupOwner` on its bootstrap path when the companion is
+`setup_required`, instead of writing the config and then calling `StartInitialClaim`. A bootstrap
+on a companion that is already `claimable` or `claimed` (the web UI owner was never set, which the
+web UI tests rely on) and the non-bootstrap path (password change) keep writing the owner as today,
+without touching the pairing state. `StartInitialClaim` stays: the test helpers use it to reach
+`claimable` without setting an owner. The defaults `companion`/`companion` move with the rules. Bootstrap web UI sessions opened before a
 local setup become invalid on their own: they are only valid while `AdminPasswordHash` is empty.
 
 ### 4.3 `scripts/uninstall.sh`
