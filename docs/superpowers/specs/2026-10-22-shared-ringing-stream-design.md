@@ -160,7 +160,8 @@ A small component driven by the call events that already reach the code calling
   `PrepareRingingPreview` was called before `Start`, so the attempt is armed in
   `bridgeSource.Start` rather than at construction.
 - `publish` always writes `snapshots/<id>.jpg`. A ring attempt also writes
-  `snapshots/<id>-ring.jpg` (same atomic temp-file + rename).
+  `snapshots/ring/<id>.jpg` (same atomic temp-file + rename). A directory of its own, so an
+  entrypoint named "x-ring" cannot collide with the ring file of "x".
 - `Latest(id)` is unchanged. New `LatestRing(id)`.
 - Capture timeout stays 8 s. Expected latency from the ring: about 2–3 s (INVITE, video start,
   first IDR, decode).
