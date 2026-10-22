@@ -266,12 +266,21 @@ func (s *Server) systemUpdateInstall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) snapshotLatest(w http.ResponseWriter, r *http.Request) {
+	s.serveSnapshot(w, r, SnapshotControl.Latest)
+}
+
+// snapshotRing serves the picture taken at the last doorbell ring.
+func (s *Server) snapshotRing(w http.ResponseWriter, r *http.Request) {
+	s.serveSnapshot(w, r, SnapshotControl.LatestRing)
+}
+
+func (s *Server) serveSnapshot(w http.ResponseWriter, r *http.Request, read func(SnapshotControl, string) ([]byte, error)) {
 	if s.snapshot == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "snapshot is unavailable")
 		return
 	}
 
-	image, err := s.snapshot.Latest(r.PathValue("id"))
+	image, err := read(s.snapshot, r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, media.ErrSnapshotNotFound) {
 			writeError(w, http.StatusNotFound, "snapshot_not_found", "snapshot is not available yet")

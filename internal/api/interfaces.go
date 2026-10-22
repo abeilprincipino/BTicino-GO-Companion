@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/system"
 	"context"
+	"time"
 )
 
 type EntrypointControl interface {
@@ -40,10 +41,13 @@ type WebRTCControl interface {
 	Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, onLocalCandidate func(*media.ICECandidate)) (string, error)
 	AddICECandidate(sessionID string, candidate media.ICECandidate) error
 	Close(sessionID string) error
+	Leave(sessionID string) error
 }
 
 type SnapshotControl interface {
 	Latest(entrypointID string) ([]byte, error)
+	LatestRing(entrypointID string) ([]byte, error)
+	UpdatedAt(entrypointID string) (latest, ring time.Time)
 }
 
 type CallControl interface {

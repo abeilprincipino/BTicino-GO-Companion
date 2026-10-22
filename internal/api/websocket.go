@@ -257,6 +257,9 @@ type webrtcCandidatePayload struct {
 type webrtcClosePayload struct {
 	SessionID string `json:"session_id"`
 	Reason    string `json:"reason"`
+	// Leave closes the session without ending the call: the card steps aside
+	// because the call was answered on another device.
+	Leave bool `json:"leave"`
 }
 
 func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +431,12 @@ func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID 
 			break
 		}
 
-		_ = s.webrtc.Close(sessionID)
+		if payload.Leave {
+			_ = s.webrtc.Leave(sessionID)
+		} else {
+			_ = s.webrtc.Close(sessionID)
+		}
+
 		response = Message{Type: "ack", ID: message.ID}
 		sessionID = ""
 	default:
