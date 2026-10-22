@@ -1203,7 +1203,25 @@ func TestStreamCoordinatorJoinFailsWithTheStartup(t *testing.T) {
 		secondDone <- err
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	// The joiner holds its reservation once nextConsumer reaches 2.
+	deadline := time.Now().Add(2 * time.Second)
+
+	for {
+		c.mu.Lock()
+		reserved := c.nextConsumer >= 2
+		c.mu.Unlock()
+
+		if reserved {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("the joiner never reserved a place on the stream")
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
 	close(source.gate)
 
 	if err := <-firstDone; err == nil {
@@ -1284,5 +1302,76 @@ func TestStreamCoordinatorJoinerGetsTheCachedKeyframe(t *testing.T) {
 
 	if len(replayed) != 1 || replayed[0] != 9 {
 		t.Fatalf("joiner got %v, want the cached IDR [9]", replayed)
+	}
+}
+
+func TestStreamCoordinatorReplayKeyframeResendsToThatConsumer(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &fakeManagedSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	var first, second []uint16
+
+	firstLease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		VideoRTP: func(packet *rtp.Packet) { first = append(first, packet.SequenceNumber) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shared.streamEvents(0).VideoRTP(&rtp.Packet{Header: rtp.Header{SequenceNumber: 9, Timestamp: 100}, Payload: []byte{0x65, 1}})
+
+	secondLease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		VideoRTP: func(packet *rtp.Packet) { second = append(second, packet.SequenceNumber) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// first: the live 9. second: the replay at join.
+	c.ReplayKeyframe(secondLease)
+
+	assertSequences(t, "first consumer", first, 9)
+	assertSequences(t, "second consumer", second, 9, 9)
+
+	c.ReplayKeyframe(&StreamLease{id: firstLease.id + 1, consumer: secondLease.consumer})
+
+	assertSequences(t, "second consumer after a stale replay", second, 9, 9)
+}
+
+func TestStreamCoordinatorOnlyOneConsumerTalks(t *testing.T) {
+	source := &backchannelManagedSource{}
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	first, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.WriteBackchannelRTP(first, testRTPPacket(1)); err != nil {
+		t.Fatalf("first consumer's write error = %v", err)
+	}
+
+	if err := c.WriteBackchannelRTP(second, testRTPPacket(2)); !errors.Is(err, ErrBackchannelUnavailable) {
+		t.Fatalf("second consumer's write error = %v, want ErrBackchannelUnavailable", err)
+	}
+
+	if !c.Release(first) {
+		t.Fatal("Release(first) = false")
+	}
+
+	packet := testRTPPacket(3)
+	if err := c.WriteBackchannelRTP(second, packet); err != nil {
+		t.Fatalf("second consumer's write after the first left error = %v", err)
+	}
+
+	if source.packet != packet {
+		t.Fatal("backchannel did not receive the second consumer's packet")
 	}
 }

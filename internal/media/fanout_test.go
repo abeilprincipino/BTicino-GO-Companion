@@ -227,3 +227,29 @@ func TestFanoutClosesWhenTheLastConsumerLeaves(t *testing.T) {
 		t.Fatal("add() after the last consumer left = true, want false — the stream is going away")
 	}
 }
+
+func TestFanoutReplaySendsTheCacheToThatConsumerOnly(t *testing.T) {
+	f := newFanout()
+	first, second := &recordedVideo{}, &recordedVideo{}
+
+	f.add(1, first.events())
+	f.video(h264Packet(1, 100, idrSlice...))
+	f.add(2, second.events())
+
+	f.replay(2)
+
+	assertSequences(t, "first consumer", first.sequences, 1)
+	assertSequences(t, "second consumer", second.sequences, 1, 1)
+}
+
+func TestFanoutReplayOfAnUnknownConsumerDoesNothing(t *testing.T) {
+	f := newFanout()
+	only := &recordedVideo{}
+
+	f.add(1, only.events())
+	f.video(h264Packet(1, 100, idrSlice...))
+
+	f.replay(7)
+
+	assertSequences(t, "only consumer", only.sequences, 1)
+}

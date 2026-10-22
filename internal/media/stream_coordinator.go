@@ -235,6 +235,11 @@ type StreamCoordinator struct {
 	start        *streamStart
 	nextConsumer uint64
 
+	// talker is the consumer that owns the backchannel (0 = none): the intercom
+	// has one Opus decoder, so a second microphone would be mixed into the first.
+	// The first consumer to send audio owns it until it leaves.
+	talker uint64
+
 	// promoteCancel cancels the promotion in flight, if any. stop takes it so a
 	// lease torn down mid-promotion does not keep retrying the audio request
 	// against a closed session.
@@ -462,6 +467,7 @@ func (c *StreamCoordinator) reserve(ctx context.Context, entrypoint config.Entry
 	c.previewRinging = ringing
 	c.promotePending = false
 	c.shared = mode.shareable
+	c.talker = 0
 	c.fanout = newFanout()
 	c.start = newStreamStart()
 	c.snapshot = StreamSnapshot{LeaseID: c.leaseID, Owner: StreamOwnerCompanion, EntrypointID: entrypoint.ID, DevAddr: entrypoint.DevAddr, Health: StreamHealthStarting}
@@ -670,6 +676,14 @@ func (c *StreamCoordinator) leave(lease *StreamLease, cause stopCause) bool {
 		return false
 	}
 
+	// The uplink frees up for the next consumer that speaks. The last-Release
+	// rule below is untouched: only remaining decides whether the stream ends.
+	c.mu.Lock()
+	if c.leaseID == lease.id && c.talker == lease.consumer {
+		c.talker = 0
+	}
+	c.mu.Unlock()
+
 	if remaining > 0 {
 		c.logger.Info("stream consumer left", "lease_id", lease.id, "consumer_id", lease.consumer, "reason", cause.reason, "remaining", remaining)
 
@@ -810,7 +824,30 @@ func (c *StreamCoordinator) StopRinging() {
 	}
 }
 
-// WriteBackchannelRTP forwards uplink RTP only to the current live source lease.
+// ReplayKeyframe sends the cached keyframe again to one consumer. A WebRTC
+// joiner calls it once its peer connection is up, because the replay at join
+// time is dropped while SRTP is still being set up. A no-op on a stale lease.
+func (c *StreamCoordinator) ReplayKeyframe(lease *StreamLease) {
+	if lease == nil {
+		return
+	}
+
+	c.mu.Lock()
+
+	var f *fanout
+	if c.leaseID == lease.id && !c.stopping {
+		f = c.fanout
+	}
+	c.mu.Unlock()
+
+	// Outside c.mu: the replay runs consumer callbacks under deliveryMu.
+	if f != nil {
+		f.replay(lease.consumer)
+	}
+}
+
+// WriteBackchannelRTP forwards uplink RTP only to the current live source lease,
+// and only from the consumer that owns the uplink.
 func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.Packet) error {
 	if lease == nil {
 		return ErrBackchannelUnavailable
@@ -824,6 +861,15 @@ func (c *StreamCoordinator) WriteBackchannelRTP(lease *StreamLease, packet *rtp.
 
 	backchannel, ok := c.source.(ManagedSourceBackchannel)
 	if !ok || backchannel == nil {
+		c.mu.Unlock()
+		return ErrBackchannelUnavailable
+	}
+
+	if c.talker == 0 {
+		c.talker = lease.consumer
+	}
+
+	if c.talker != lease.consumer {
 		c.mu.Unlock()
 		return ErrBackchannelUnavailable
 	}
@@ -932,6 +978,7 @@ func (c *StreamCoordinator) finishStop(lease *StreamLease, source ManagedSource,
 		c.promoteCancel = nil
 		c.leaseEvents = SourceEvents{}
 		c.shared = false
+		c.talker = 0
 		c.fanout = nil
 		c.start = nil
 		c.snapshot = StreamSnapshot{Owner: StreamOwnerIdle}

@@ -73,6 +73,29 @@ func (f *fanout) add(id uint64, events SourceEvents) bool {
 	return true
 }
 
+// replay sends the cached keyframe again to one consumer. add replays while a
+// WebRTC session is still negotiating, and pion drops RTP written before SRTP is
+// ready, so a joiner calls this once its peer connection is up. It takes
+// deliveryMu like add, so the replay does not interleave with live video.
+func (f *fanout) replay(id uint64) {
+	f.deliveryMu.Lock()
+	defer f.deliveryMu.Unlock()
+
+	for _, consumer := range f.snapshot() {
+		if consumer.id != id {
+			continue
+		}
+
+		if consumer.events.VideoRTP != nil {
+			for _, packet := range f.cache {
+				consumer.events.VideoRTP(packet)
+			}
+		}
+
+		return
+	}
+}
+
 // remove detaches a consumer and reports how many are left. Removing the last
 // one closes the fan-out in the same step: the coordinator stops the stream only
 // after this returns, so a join in between would take a lease on a dying stream

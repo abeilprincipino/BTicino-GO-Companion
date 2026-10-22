@@ -271,6 +271,17 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 
+		if state == webrtc.PeerConnectionStateConnected {
+			// The replay at join time ran before SRTP was ready and was dropped.
+			session.mu.Lock()
+			lease := session.lease
+			session.mu.Unlock()
+
+			if lease != nil {
+				go s.coordinator.ReplayKeyframe(lease)
+			}
+		}
+
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			go s.closeSession(sessionID, "peer connection "+state.String())
 		}
