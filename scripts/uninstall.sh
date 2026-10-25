@@ -112,6 +112,10 @@ remove_firewall_tcp_ports() {
 	fi
 	ports="$(tr '\n' ' ' < "${FIREWALL_ADDED}")"
 	ports="${ports% }"
+	if [ -z "${ports}" ]; then
+		log "No TCP ports were recorded as added; nothing to remove from ${FIREWALL_HOOK}."
+		return 0
+	fi
 	tmp="${FIREWALL_HOOK}.tmp.$$"
 	rc=0
 	awk -v ports="${ports}" '
@@ -186,7 +190,9 @@ remove_sip_user() {
 
 	if grep -q "sip:${SIP_USER}@" "${FLEXISIP_ROUTE}"; then
 		tmp="${FLEXISIP_ROUTE}.companion.tmp"
-		sed "s|, <sip:${SIP_USER}@[^>]*>||g" "${FLEXISIP_ROUTE}" > "${tmp}"
+		# Besides the alluser contact, installers before the static record was dropped
+		# wrote a whole `<sip:USER@domain> <sip:127.0.0.1>` line; that line goes too.
+		sed -e "s|, <sip:${SIP_USER}@[^>]*>||g" -e "/^<sip:${SIP_USER}@[^>]*>[[:space:]]*<sip:127\.0\.0\.1>[[:space:]]*$/d" "${FLEXISIP_ROUTE}" > "${tmp}"
 		# route.conf must stay one line per group: a mangled file breaks every
 		# call on the intercom, so the result is checked before it is used.
 		groups_before="$(grep -c 'sip:alluser@' "${FLEXISIP_ROUTE}" || true)"

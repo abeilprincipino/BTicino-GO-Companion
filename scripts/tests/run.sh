@@ -43,6 +43,7 @@ run_script() {
 
 rc_is() { [ "$(cat "${R}/rc")" = "$1" ]; }
 out_has() { grep -qF -- "$1" "${R}/out"; }
+out_lacks() { ! grep -qF -- "$1" "${R}/out"; }
 # file_is <file> <printf format>: the file holds exactly what the format prints.
 file_is() { printf "$2" | cmp -s - "$1"; }
 
@@ -151,6 +152,26 @@ test_uninstall_requires_root() {
 	check "uninstall as non-root says why" out_has "FAIL: This script must run as root."
 }
 
+test_uninstall_removes_the_legacy_static_route() {
+	setup uninstall.sh
+	write_installed_companion
+	printf '<sip:alluser@example.local> <sip:user1@example.local>, <sip:companion@example.local>\n<sip:companion@example.local> <sip:127.0.0.1>\n' > "${R}/etc/flexisip/users/route.conf"
+	run_script
+	check "uninstall with a legacy static route exits 0" rc_is 0
+	check "uninstall with a legacy static route ends with the OK line" out_has "OK: Companion removed."
+	check "uninstall with a legacy static route does not fail validation" out_lacks "route.conf rewrite failed validation"
+	check "uninstall removes the legacy line and the alluser contact, nothing else" file_is "${R}/etc/flexisip/users/route.conf" '<sip:alluser@example.local> <sip:user1@example.local>\n'
+}
+
+test_uninstall_with_an_empty_port_record_prints_no_ports_message() {
+	setup uninstall.sh
+	write_installed_companion
+	: > "${B}/firewall-added"
+	run_script
+	check "uninstall with an empty port record exits 0" rc_is 0
+	check "uninstall with an empty port record does not print an empty port list" out_lacks "Removed TCP ports  from"
+}
+
 test_install_records_the_ports_it_adds
 test_uninstall_removes_the_companion
 test_uninstall_without_port_record_keeps_tcp_ports
@@ -158,6 +179,8 @@ test_uninstall_leaves_an_unexpected_hook_alone
 test_uninstall_with_nothing_installed
 test_uninstall_refuses_a_second_run
 test_uninstall_requires_root
+test_uninstall_removes_the_legacy_static_route
+test_uninstall_with_an_empty_port_record_prints_no_ports_message
 
 printf '%s passed, %s failed\n' "${PASSED}" "${FAILED}"
 [ "${FAILED}" -eq 0 ]
