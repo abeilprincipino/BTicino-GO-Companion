@@ -475,13 +475,15 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 
 	request.Username = strings.TrimSpace(request.Username)
 
-	invalid := request.Username == "" || len(request.Password) < 8
+	// bcrypt rejects passwords over 72 bytes, so they are refused here rather
+	// than failing as a hash error.
+	invalid := request.Username == "" || len(request.Password) < 8 || len(request.Password) > 72
 	if current.bootstrap {
 		invalid = auth.ValidateOwner(request.Username, request.Password) != nil
 	}
 
 	if invalid {
-		writeError(w, http.StatusBadRequest, "password must replace the default and contain at least 8 characters")
+		writeError(w, http.StatusBadRequest, "password must replace the default and be 8 to 72 bytes long")
 		return
 	}
 
@@ -497,6 +499,14 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 
 	if current.bootstrap && s.auth != nil && s.auth.PairingState() == config.PairingStateSetupRequired {
 		if _, err := s.auth.SetupOwner(request.Username, request.Password); err != nil {
+			// Only a concurrent pair/local can move pairing on in between, and it
+			// sets an owner of its own.
+			if errors.Is(err, auth.ErrClaimNotAllowed) {
+				writeError(w, http.StatusConflict, "an owner is already set; sign in with its credentials")
+
+				return
+			}
+
 			s.logger.Error("webui owner setup", "error", err)
 			writeError(w, http.StatusInternalServerError, "save password failed")
 
