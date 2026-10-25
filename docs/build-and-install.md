@@ -429,7 +429,10 @@ Un'incongruenza rilevata leggendo la pipeline, non bloccante per l'install local
 ## 8. Answering calls from Home Assistant
 
 The installer provisions a `companion@<domain>` SIP user in Flexisip so the
-intercom forks incoming calls to the companion. Run the installer with
+intercom forks incoming calls to the companion: the user in `users.db.txt`, and
+the contact in the `alluser` group of `route.conf` (the file Flexisip reads) and
+of `route_int.conf` (kept in step by the firmware). `route_ext.conf` is not
+touched. Run the installer with
 `COMPANION_SIP_INBOUND=0` to skip this and leave the BTicino files untouched.
 
 On the first start after an upgrade the companion adds the `companion.sip`

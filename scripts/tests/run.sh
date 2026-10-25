@@ -58,6 +58,35 @@ write_hook() {
 	printf "${STOCK_HOOK}" > "${R}/etc/network/if-pre-up.d/iptables"
 }
 
+# The Flexisip route files as the firmware ships them, shaped like a real
+# intercom: route.conf (the one flexisip reads) and route_int.conf carry the
+# alluser group, route_ext.conf carries it too plus the cloud routes.
+ALLUSER='<sip:alluser@example.local> <sip:u1@example.local>, <sip:u2@example.local>'
+CLOUD='<sip:u1@example.local> <sip:vdesip.example;transport=tls>
+<sip:u2@example.local> <sip:vdesip.example;transport=tls>
+'
+ROUTE_STOCK="${ALLUSER}
+${CLOUD}"
+ROUTE_INT_STOCK="${ALLUSER}
+"
+ROUTE_EXT_STOCK="${ALLUSER}
+${CLOUD}"
+WITH_COMPANION="${ALLUSER}, <sip:companion@example.local>"
+STATIC_RECORD='<sip:companion@example.local> <sip:127.0.0.1>
+'
+
+write_stock_flexisip() {
+	printf 'version:1
+u1@example.local md5:aaa ;
+c100x@example.local md5:bbb ;
+' > "${R}/etc/flexisip/users/users.db.txt"
+	printf "${ROUTE_STOCK}" > "${R}/etc/flexisip/users/route.conf"
+	printf "${ROUTE_INT_STOCK}" > "${R}/etc/flexisip/users/route_int.conf"
+	printf "${ROUTE_EXT_STOCK}" > "${R}/etc/flexisip/users/route_ext.conf"
+	printf 'example.local sips:vdesip.example
+' > "${R}/etc/flexisip/domain-registration.conf"
+}
+
 # A companion as install.sh leaves it, with 80 already open before it came.
 write_installed_companion() {
 	printf '#!/bin/sh\necho "init $1" >> "%s/init.log"\nexit 0\n' "${R}" > "${R}/etc/init.d/companion"
@@ -69,7 +98,12 @@ write_installed_companion() {
 	printf "${INSTALLED_HOOK}" > "${R}/etc/network/if-pre-up.d/iptables"
 	printf 'user1@example.local abc ;\ncompanion@example.local abc ;\n' > "${R}/etc/flexisip/users/users.db.txt"
 	printf '<sip:alluser@example.local> <sip:user1@example.local>, <sip:companion@example.local>\n' > "${R}/etc/flexisip/users/route.conf"
-	touch "${R}/etc/flexisip/users/users.db.txt.companion.bak" "${R}/etc/flexisip/users/route.conf.companion.bak"
+	# Older installers also wrote route_int.conf and the static record, here in
+	# route_ext.conf as on a real intercom provisioned by them.
+	printf "${WITH_COMPANION}
+" > "${R}/etc/flexisip/users/route_int.conf"
+	printf "${ROUTE_EXT_STOCK}${STATIC_RECORD}" > "${R}/etc/flexisip/users/route_ext.conf"
+	touch "${R}/etc/flexisip/users/users.db.txt.companion.bak" "${R}/etc/flexisip/users/route.conf.companion.bak" "${R}/etc/flexisip/users/route_int.conf.companion.bak"
 }
 
 test_install_records_the_ports_it_adds() {
@@ -85,6 +119,33 @@ test_install_records_the_ports_it_adds() {
 	check "install links S99zz, the second start at the end of boot" [ -e "${R}/etc/rc3.d/S99zzcompanion" ] && [ -e "${R}/etc/rc5.d/S99zzcompanion" ]
 }
 
+test_install_provisions_route_and_route_int() {
+	setup install.sh
+	mkdir -p "${R}/init.d"
+	printf '#!/bin/sh
+exit 0
+' > "${R}/init.d/companion"
+	printf '#!/bin/sh
+[ "${1:-}" = -version ] && echo v1.2.3
+exit 0
+' > "${R}/companion"
+	chmod +x "${R}/init.d/companion" "${R}/companion"
+	write_hook
+	write_stock_flexisip
+	COMPANION_SIP_INBOUND=1 run_script "${R}/companion"
+	check "install adds the companion to the alluser group of route.conf" file_is "${R}/etc/flexisip/users/route.conf" "${WITH_COMPANION}
+${CLOUD}"
+	check "install adds the companion to the alluser group of route_int.conf" file_is "${R}/etc/flexisip/users/route_int.conf" "${WITH_COMPANION}
+"
+	check "install leaves route_ext.conf untouched" file_is "${R}/etc/flexisip/users/route_ext.conf" "${ROUTE_EXT_STOCK}"
+	check "install backs up route_int.conf" file_is "${R}/etc/flexisip/users/route_int.conf.companion.bak" "${ROUTE_INT_STOCK}"
+	COMPANION_SIP_INBOUND=1 run_script "${R}/companion"
+	check "a second install adds nothing to route.conf" file_is "${R}/etc/flexisip/users/route.conf" "${WITH_COMPANION}
+${CLOUD}"
+	check "a second install adds nothing to route_int.conf" file_is "${R}/etc/flexisip/users/route_int.conf" "${WITH_COMPANION}
+"
+}
+
 test_uninstall_removes_the_companion() {
 	setup uninstall.sh
 	write_installed_companion
@@ -97,7 +158,9 @@ test_uninstall_removes_the_companion() {
 	check "uninstall removes only the recorded TCP ports and the UDP blocks" file_is "${R}/etc/network/if-pre-up.d/iptables" "${STOCK_HOOK}"
 	check "uninstall removes the SIP user" file_is "${R}/etc/flexisip/users/users.db.txt" 'user1@example.local abc ;\n'
 	check "uninstall removes the alluser contact" file_is "${R}/etc/flexisip/users/route.conf" '<sip:alluser@example.local> <sip:user1@example.local>\n'
-	check "uninstall deletes the backups" [ ! -e "${R}/etc/flexisip/users/route.conf.companion.bak" ]
+	check "uninstall removes the companion from route_int.conf" file_is "${R}/etc/flexisip/users/route_int.conf" "${ROUTE_INT_STOCK}"
+	check "uninstall removes the static record from route_ext.conf" file_is "${R}/etc/flexisip/users/route_ext.conf" "${ROUTE_EXT_STOCK}"
+	check "uninstall deletes the backups" [ ! -e "${R}/etc/flexisip/users/route.conf.companion.bak" ] && [ ! -e "${R}/etc/flexisip/users/route_int.conf.companion.bak" ]
 	check "uninstall deletes the companion directory" [ ! -e "${B}" ]
 	check "uninstall releases the lock" [ ! -e "${R}/var/run/companion-install.lock" ]
 }
@@ -175,6 +238,7 @@ test_uninstall_with_an_empty_port_record_prints_no_ports_message() {
 }
 
 test_install_records_the_ports_it_adds
+test_install_provisions_route_and_route_int
 test_uninstall_removes_the_companion
 test_uninstall_without_port_record_keeps_tcp_ports
 test_uninstall_leaves_an_unexpected_hook_alone

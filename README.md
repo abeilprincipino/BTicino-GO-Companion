@@ -186,8 +186,9 @@ Then:
 
 ## Answering Calls from Home Assistant
 
-The installer adds a `companion@<domain>` SIP user to Flexisip and to the `alluser` group, so the
-intercom forks incoming calls to the companion, and enables `companion.sip.inbound` in
+The installer adds a `companion@<domain>` SIP user to Flexisip and to the `alluser` group (in
+`route.conf`, which Flexisip reads, and in `route_int.conf`, which the firmware keeps in step with
+it), so the intercom forks incoming calls to the companion, and enables `companion.sip.inbound` in
 `config.yaml`. Backups of the modified files are kept next to them with a `.companion.bak` suffix.
 
 **Flexisip is not restarted by the installer.** It reads `/etc/flexisip/users/*` at startup, so

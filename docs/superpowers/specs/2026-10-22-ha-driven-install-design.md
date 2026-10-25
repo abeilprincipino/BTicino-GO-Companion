@@ -123,9 +123,11 @@ In order:
 
    Other ports and lines are left untouched; if the file does not have the expected shape it prints
    a `WARN:` and leaves it as is.
-4. Removes `companion@<domain>` from `users.db.txt` and `, <sip:companion@<domain>>` from the
-   `alluser` line of `route.conf`, with the same one-line-per-group validation as the installer
-   before replacing the file. The `.companion.bak` copies are not restored: they would undo
+4. Removes `companion@<domain>` from `users.db.txt`, `, <sip:companion@<domain>>` from the
+   `alluser` line of `route.conf` and `route_int.conf`, and the legacy static record
+   `<sip:companion@<domain>> <sip:127.0.0.1>` from any of `route.conf`, `route_int.conf` and
+   `route_ext.conf`, with the same one-line-per-group validation as the installer before replacing
+   each file. The `.companion.bak` copies are not restored: they would undo
    anything BTicino changed after the installation. They are deleted.
 5. Deletes `/home/bticino/cfg/extra/companion`, including `config.yaml`: the pairing is gone.
 6. Ends with `OK: Companion removed. Restart Flexisip or reboot the intercom.` and exits `0`.

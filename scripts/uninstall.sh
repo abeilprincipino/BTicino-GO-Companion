@@ -12,6 +12,8 @@ FIREWALL_ADDED="${BASE_DIR}/firewall-added"
 COMPANION_TCP_PORTS="8080 80 8554 51826"
 FLEXISIP_USERS_DB="/etc/flexisip/users/users.db.txt"
 FLEXISIP_ROUTE="/etc/flexisip/users/route.conf"
+FLEXISIP_ROUTE_INT="/etc/flexisip/users/route_int.conf"
+FLEXISIP_ROUTE_EXT="/etc/flexisip/users/route_ext.conf"
 SIP_USER="companion"
 # The installer's lock, so that a removal cannot run during an installation.
 LOCK_DIR="/var/run/${SERVICE_NAME}-install.lock"
@@ -176,6 +178,25 @@ remove_firewall_entries() {
 	remove_firewall_udp_blocks
 }
 
+remove_from_route() {
+	route_file="$1"
+	grep -q "sip:${SIP_USER}@" "${route_file}" || return 0
+	tmp="${route_file}.companion.tmp"
+	# Besides the alluser contact, installers before the static record was dropped
+	# wrote a whole `<sip:USER@domain> <sip:127.0.0.1>` line; that line goes too.
+	sed -e "s|, <sip:${SIP_USER}@[^>]*>||g" -e "/^<sip:${SIP_USER}@[^>]*>[[:space:]]*<sip:127\.0\.0\.1>[[:space:]]*$/d" "${route_file}" > "${tmp}"
+	# A route file must stay one line per group: a mangled file breaks every
+	# call on the intercom, so the result is checked before it is used.
+	groups_before="$(grep -c 'sip:alluser@' "${route_file}" || true)"
+	groups_after="$(grep -c 'sip:alluser@' "${tmp}" || true)"
+	if [ "${groups_before}" = "${groups_after}" ] && ! grep -q "sip:${SIP_USER}@" "${tmp}" && cp "${tmp}" "${route_file}"; then
+		log "Removed ${SIP_USER} from ${route_file}."
+	else
+		fail "${route_file} rewrite failed validation; original left untouched."
+	fi
+	rm -f "${tmp}"
+}
+
 remove_sip_user() {
 	if [ ! -f "${FLEXISIP_USERS_DB}" ] || [ ! -f "${FLEXISIP_ROUTE}" ]; then
 		log "Flexisip user files not found; no SIP user to remove."
@@ -193,26 +214,15 @@ remove_sip_user() {
 		rm -f "${tmp}"
 	fi
 
-	if grep -q "sip:${SIP_USER}@" "${FLEXISIP_ROUTE}"; then
-		tmp="${FLEXISIP_ROUTE}.companion.tmp"
-		# Besides the alluser contact, installers before the static record was dropped
-		# wrote a whole `<sip:USER@domain> <sip:127.0.0.1>` line; that line goes too.
-		sed -e "s|, <sip:${SIP_USER}@[^>]*>||g" -e "/^<sip:${SIP_USER}@[^>]*>[[:space:]]*<sip:127\.0\.0\.1>[[:space:]]*$/d" "${FLEXISIP_ROUTE}" > "${tmp}"
-		# route.conf must stay one line per group: a mangled file breaks every
-		# call on the intercom, so the result is checked before it is used.
-		groups_before="$(grep -c 'sip:alluser@' "${FLEXISIP_ROUTE}" || true)"
-		groups_after="$(grep -c 'sip:alluser@' "${tmp}" || true)"
-		if [ "${groups_before}" = "${groups_after}" ] && ! grep -q "sip:${SIP_USER}@" "${tmp}" && cp "${tmp}" "${FLEXISIP_ROUTE}"; then
-			log "Removed ${SIP_USER} from the alluser group."
-		else
-			fail "route.conf rewrite failed validation; original left untouched."
-		fi
-		rm -f "${tmp}"
-	fi
+	# install.sh writes route.conf and route_int.conf; older installers also left
+	# the static record, which on some intercoms sits in route_ext.conf.
+	for route_file in "${FLEXISIP_ROUTE}" "${FLEXISIP_ROUTE_INT}" "${FLEXISIP_ROUTE_EXT}"; do
+		[ ! -f "${route_file}" ] || remove_from_route "${route_file}"
+	done
 
 	# The backups predate anything BTicino changed since the installation, so
 	# restoring them could undo it; they are dropped instead.
-	rm -f "${FLEXISIP_USERS_DB}.companion.bak" "${FLEXISIP_ROUTE}.companion.bak"
+	rm -f "${FLEXISIP_USERS_DB}.companion.bak" "${FLEXISIP_ROUTE}.companion.bak" "${FLEXISIP_ROUTE_INT}.companion.bak"
 	[ "${FAILURES}" -ne "${before}" ] || ok "Removed the ${SIP_USER} SIP user."
 }
 
