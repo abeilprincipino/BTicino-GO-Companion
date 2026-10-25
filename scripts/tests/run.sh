@@ -163,6 +163,15 @@ test_uninstall_removes_the_legacy_static_route() {
 	check "uninstall removes the legacy line and the alluser contact, nothing else" file_is "${R}/etc/flexisip/users/route.conf" '<sip:alluser@example.local> <sip:user1@example.local>\n'
 }
 
+test_uninstall_removes_the_legacy_start_links() {
+	setup uninstall.sh
+	write_installed_companion
+	for n in 2 3 4 5; do ln -s ../init.d/companion "${R}/etc/rc${n}.d/S45companion"; done
+	run_script
+	check "uninstall with legacy S45 links exits 0" rc_is 0
+	check "uninstall removes the legacy S45 links" [ ! -e "${R}/etc/rc2.d/S45companion" ] && [ ! -e "${R}/etc/rc5.d/S45companion" ]
+}
+
 test_uninstall_with_an_empty_port_record_prints_no_ports_message() {
 	setup uninstall.sh
 	write_installed_companion
@@ -180,6 +189,7 @@ test_uninstall_with_nothing_installed
 test_uninstall_refuses_a_second_run
 test_uninstall_requires_root
 test_uninstall_removes_the_legacy_static_route
+test_uninstall_removes_the_legacy_start_links
 test_uninstall_with_an_empty_port_record_prints_no_ports_message
 
 printf '%s passed, %s failed\n' "${PASSED}" "${FAILED}"

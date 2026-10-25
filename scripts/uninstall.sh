@@ -99,7 +99,12 @@ stop_service() {
 
 remove_service_files() {
 	before="${FAILURES}"
-	for runlevel in 2 3 4 5; do rm -f "/etc/rc${runlevel}.d/S99zz${SERVICE_NAME}" || fail "Could not remove /etc/rc${runlevel}.d/S99zz${SERVICE_NAME}."; done
+	# S45 is the start link of installers before S99zz.
+	for runlevel in 2 3 4 5; do
+		for link in "/etc/rc${runlevel}.d/S99zz${SERVICE_NAME}" "/etc/rc${runlevel}.d/S45${SERVICE_NAME}"; do
+			rm -f "${link}" || fail "Could not remove ${link}."
+		done
+	done
 	for runlevel in 0 1 6; do rm -f "/etc/rc${runlevel}.d/K55${SERVICE_NAME}" || fail "Could not remove /etc/rc${runlevel}.d/K55${SERVICE_NAME}."; done
 	rm -f "${INIT_SCRIPT}" || fail "Could not remove ${INIT_SCRIPT}."
 	[ "${FAILURES}" -ne "${before}" ] || ok "Removed the init script and its boot links."
