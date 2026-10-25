@@ -252,10 +252,16 @@ install_init_script() { cp -f "$1" "${INIT_SCRIPT}"; chmod 755 "${INIT_SCRIPT}";
 register_service() {
 	remount_root_rw
 	install_init_script "$1"
+	# S45 starts the companion before S98-bt_daemon-apps.sh, so flexisip is up
+	# before the BTicino stack registers (see do_start in the init script).
+	# S99zz is a second start at the end of boot: a no-op when S45 succeeded, a
+	# retry when it ran before the companion partition was mounted.
 	for runlevel in 2 3 4 5; do
 		dir="/etc/rc${runlevel}.d"
-		link="${dir}/S99zz${SERVICE_NAME}"
-		[ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }
+		[ -d "${dir}" ] || continue
+		for link in "${dir}/S45${SERVICE_NAME}" "${dir}/S99zz${SERVICE_NAME}"; do
+			rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"
+		done
 	done
 	for runlevel in 0 1 6; do dir="/etc/rc${runlevel}.d"; link="${dir}/K55${SERVICE_NAME}"; [ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }; done
 	ensure_persistent_firewall_ports
@@ -441,7 +447,9 @@ post_install_checks() {
 	FAILURES=0; pidfile="/var/run/${SERVICE_NAME}.pid"
 	[ -x "${BIN_PATH}" ] && ok "Binary exists: ${BIN_PATH}" || fail "Binary missing or not executable: ${BIN_PATH}"
 	[ -x "${INIT_SCRIPT}" ] && ok "Init script present: ${INIT_SCRIPT}" || fail "Init script missing: ${INIT_SCRIPT}"
-	[ -L "/etc/rc5.d/S99zz${SERVICE_NAME}" ] && ok "Boot symlink present: /etc/rc5.d/S99zz${SERVICE_NAME}" || fail "Boot symlink missing: /etc/rc5.d/S99zz${SERVICE_NAME}"
+	for link in "/etc/rc5.d/S45${SERVICE_NAME}" "/etc/rc5.d/S99zz${SERVICE_NAME}"; do
+		[ -L "${link}" ] && ok "Boot symlink present: ${link}" || fail "Boot symlink missing: ${link}"
+	done
 	if [ -x "${INIT_SCRIPT}" ] && "${INIT_SCRIPT}" status >/dev/null 2>&1; then ok "Service is running"
 	elif [ -f "${pidfile}" ] && pid="$(cat "${pidfile}" 2>/dev/null || true)" && [ -n "${pid}" ] && [ -d "/proc/${pid}" ]; then ok "Service process exists via pidfile ${pidfile} (pid ${pid})"
 	else fail "Service not running"; fi

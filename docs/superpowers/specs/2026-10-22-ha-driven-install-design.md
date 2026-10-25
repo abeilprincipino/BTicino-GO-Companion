@@ -111,8 +111,8 @@ lock (the same lock directory, so an uninstall cannot run during an install), `H
 In order:
 
 1. Stops the service (`/etc/init.d/companion stop`) if the init script exists.
-2. Removes `/etc/init.d/companion`, `S99zzcompanion` from `rc{2,3,4,5}.d` and `K55companion` from
-   `rc{0,1,6}.d`.
+2. Removes `/etc/init.d/companion`, `S45companion` and `S99zzcompanion` from `rc{2,3,4,5}.d` and
+   `K55companion` from `rc{0,1,6}.d`.
 3. Removes the companion's ports from `/etc/network/if-pre-up.d/iptables`:
    - the `# companion udp service` blocks, which the installer marks;
    - from the `for i in ...; do` line of the `# ssh & sip enabled` block, only the TCP ports the

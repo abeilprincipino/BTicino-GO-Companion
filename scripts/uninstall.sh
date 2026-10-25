@@ -99,7 +99,7 @@ stop_service() {
 
 remove_service_files() {
 	before="${FAILURES}"
-	# S45 is the start link of installers before S99zz.
+	# install.sh links both S45 (before the BTicino stack) and S99zz.
 	for runlevel in 2 3 4 5; do
 		for link in "/etc/rc${runlevel}.d/S99zz${SERVICE_NAME}" "/etc/rc${runlevel}.d/S45${SERVICE_NAME}"; do
 			rm -f "${link}" || fail "Could not remove ${link}."

@@ -62,7 +62,7 @@ write_hook() {
 write_installed_companion() {
 	printf '#!/bin/sh\necho "init $1" >> "%s/init.log"\nexit 0\n' "${R}" > "${R}/etc/init.d/companion"
 	chmod +x "${R}/etc/init.d/companion"
-	for n in 2 3 4 5; do ln -s ../init.d/companion "${R}/etc/rc${n}.d/S99zzcompanion"; done
+	for n in 2 3 4 5; do ln -s ../init.d/companion "${R}/etc/rc${n}.d/S45companion"; ln -s ../init.d/companion "${R}/etc/rc${n}.d/S99zzcompanion"; done
 	for n in 0 1 6; do ln -s ../init.d/companion "${R}/etc/rc${n}.d/K55companion"; done
 	echo binary > "${B}/companion"
 	printf '8080\n8554\n51826\n' > "${B}/firewall-added"
@@ -81,6 +81,8 @@ test_install_records_the_ports_it_adds() {
 	write_hook
 	run_script "${R}/companion"
 	check "install records exactly the TCP ports it added" file_is "${B}/firewall-added" '8080\n8554\n51826\n'
+	check "install links S45, so the companion starts before bt_daemon" [ -e "${R}/etc/rc3.d/S45companion" ] && [ -e "${R}/etc/rc5.d/S45companion" ]
+	check "install links S99zz, the second start at the end of boot" [ -e "${R}/etc/rc3.d/S99zzcompanion" ] && [ -e "${R}/etc/rc5.d/S99zzcompanion" ]
 }
 
 test_uninstall_removes_the_companion() {
@@ -91,7 +93,7 @@ test_uninstall_removes_the_companion() {
 	check "uninstall ends with the OK line" out_has "OK: Companion removed. Restart Flexisip or reboot the intercom."
 	check "uninstall stops the service" grep -qx "init stop" "${R}/init.log"
 	check "uninstall removes the init script" [ ! -e "${R}/etc/init.d/companion" ]
-	check "uninstall removes the boot links" [ ! -e "${R}/etc/rc5.d/S99zzcompanion" ] && [ ! -e "${R}/etc/rc6.d/K55companion" ]
+	check "uninstall removes the boot links" [ ! -e "${R}/etc/rc5.d/S45companion" ] && [ ! -e "${R}/etc/rc5.d/S99zzcompanion" ] && [ ! -e "${R}/etc/rc6.d/K55companion" ]
 	check "uninstall removes only the recorded TCP ports and the UDP blocks" file_is "${R}/etc/network/if-pre-up.d/iptables" "${STOCK_HOOK}"
 	check "uninstall removes the SIP user" file_is "${R}/etc/flexisip/users/users.db.txt" 'user1@example.local abc ;\n'
 	check "uninstall removes the alluser contact" file_is "${R}/etc/flexisip/users/route.conf" '<sip:alluser@example.local> <sip:user1@example.local>\n'
@@ -163,15 +165,6 @@ test_uninstall_removes_the_legacy_static_route() {
 	check "uninstall removes the legacy line and the alluser contact, nothing else" file_is "${R}/etc/flexisip/users/route.conf" '<sip:alluser@example.local> <sip:user1@example.local>\n'
 }
 
-test_uninstall_removes_the_legacy_start_links() {
-	setup uninstall.sh
-	write_installed_companion
-	for n in 2 3 4 5; do ln -s ../init.d/companion "${R}/etc/rc${n}.d/S45companion"; done
-	run_script
-	check "uninstall with legacy S45 links exits 0" rc_is 0
-	check "uninstall removes the legacy S45 links" [ ! -e "${R}/etc/rc2.d/S45companion" ] && [ ! -e "${R}/etc/rc5.d/S45companion" ]
-}
-
 test_uninstall_with_an_empty_port_record_prints_no_ports_message() {
 	setup uninstall.sh
 	write_installed_companion
@@ -189,7 +182,6 @@ test_uninstall_with_nothing_installed
 test_uninstall_refuses_a_second_run
 test_uninstall_requires_root
 test_uninstall_removes_the_legacy_static_route
-test_uninstall_removes_the_legacy_start_links
 test_uninstall_with_an_empty_port_record_prints_no_ports_message
 
 printf '%s passed, %s failed\n' "${PASSED}" "${FAILED}"

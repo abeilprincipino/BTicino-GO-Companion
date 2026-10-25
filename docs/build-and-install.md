@@ -195,7 +195,9 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
    come `companion.previous`;
 3. installa `gst/` in `.../companion/gst`, salvando il precedente come `gst.previous`;
 4. copia l'init script in `/etc/init.d/companion` e crea i symlink di boot:
-   `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`;
+   `S45companion` e `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`.
+   `S45` parte prima di `S98-bt_daemon-apps.sh`, così flexisip è su prima che lo stack BTicino si
+   registri; `S99zz` è un secondo avvio a fine boot che riprova se il primo è fallito;
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);

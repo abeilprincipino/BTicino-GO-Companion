@@ -85,8 +85,10 @@ In order:
    cannot replace the installed binary on the next start.
 4. Installs the bundled GStreamer runtime to `/home/bticino/cfg/extra/companion/gst`, keeping the
    previous one as `gst.previous`.
-5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S99zzcompanion` in runlevels
-   `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
+5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S45companion` and
+   `S99zzcompanion` in runlevels `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
+   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`), so Flexisip is up
+   before it registers; `S99zz` is a second start at the end of boot that retries a failed one.
 6. Persists firewall access in `/etc/network/if-pre-up.d/iptables`:
 
    | Protocol | Port | Purpose |
