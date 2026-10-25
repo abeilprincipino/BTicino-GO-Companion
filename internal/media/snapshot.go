@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/rtp"
@@ -57,6 +58,9 @@ type snapshotAttempt struct {
 	cancel       context.CancelFunc
 	packets      chan []byte
 	closeOnce    sync.Once
+	// ring marks a capture from a stream born as a ringing preview: its picture
+	// is also the doorbell picture.
+	ring atomic.Bool
 }
 
 // NewSnapshotManager stores the latest valid JPEG for each entrypoint below dir.
@@ -114,11 +118,33 @@ func (s *SnapshotManager) Arm(entrypointID string) *snapshotAttempt {
 
 // Latest returns the last successful JPEG without triggering media activity.
 func (s *SnapshotManager) Latest(entrypointID string) ([]byte, error) {
+	return s.read(entrypointID, s.path)
+}
+
+// LatestRing returns the picture taken at the last doorbell ring. A live view
+// never writes it, so its time tells Home Assistant a new ring happened. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+func (s *SnapshotManager) LatestRing(entrypointID string) ([]byte, error) {
+	return s.read(entrypointID, s.ringPath)
+}
+
+// UpdatedAt returns when the latest and the latest doorbell snapshot were
+// taken, zero when there is none. It reads the files' modification times, so it
+// survives a restart.
+func (s *SnapshotManager) UpdatedAt(entrypointID string) (latest, ring time.Time) {
+	if s == nil || s.dir == "" {
+		return time.Time{}, time.Time{}
+	}
+
+	return modTime(s.path(entrypointID)), modTime(s.ringPath(entrypointID))
+}
+
+func (s *SnapshotManager) read(entrypointID string, locate func(string) (string, bool)) ([]byte, error) {
 	if s == nil || s.dir == "" {
 		return nil, ErrSnapshotUnavailable
 	}
 
-	path, ok := s.path(entrypointID)
+	path, ok := locate(entrypointID)
 	if !ok {
 		return nil, ErrSnapshotUnavailable
 	}
@@ -137,6 +163,19 @@ func (s *SnapshotManager) Latest(entrypointID string) ([]byte, error) {
 	}
 
 	return image, nil
+}
+
+func modTime(path string, ok bool) time.Time {
+	if !ok {
+		return time.Time{}
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+
+	return info.ModTime()
 }
 
 // Consume queues a best-effort RTP copy without blocking source delivery.
@@ -159,6 +198,14 @@ func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
 func (a *snapshotAttempt) Close() {
 	if a != nil {
 		a.closeOnce.Do(a.cancel)
+	}
+}
+
+// MarkRing makes this capture the doorbell picture too. It is called before the
+// stream starts, so it is set before the first packet arrives.
+func (a *snapshotAttempt) MarkRing() {
+	if a != nil {
+		a.ring.Store(true)
 	}
 }
 
@@ -243,44 +290,21 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 		return false
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		s.mu.Unlock()
-		s.logger.Warn("create snapshot directory", "error", err)
-
-		return false
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".snapshot-*.jpg")
-	if err != nil {
-		s.mu.Unlock()
-		s.logger.Warn("create snapshot file", "error", err)
-
-		return false
-	}
-
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath) //nolint:errcheck // removed after successful rename too
-
-	if _, err := temporary.Write(image); err != nil {
-		_ = temporary.Close()
-		s.mu.Unlock()
-		s.logger.Warn("write snapshot", "error", err)
-
-		return false
-	}
-
-	if err := temporary.Close(); err != nil {
-		s.mu.Unlock()
-		s.logger.Warn("close snapshot", "error", err)
-
-		return false
-	}
-
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := writeSnapshot(path, image); err != nil {
 		s.mu.Unlock()
 		s.logger.Warn("publish snapshot", "error", err)
 
 		return false
+	}
+
+	// The doorbell picture has its own file, written only by a stream born as a
+	// ringing preview, so a live view never looks like a new ring.
+	if attempt.ring.Load() {
+		if ringPath, ok := s.ringPath(attempt.entrypointID); ok {
+			if err := writeSnapshot(ringPath, image); err != nil {
+				s.logger.Warn("publish ring snapshot", "error", err)
+			}
+		}
 	}
 
 	callback := s.onCaptured
@@ -293,6 +317,37 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	return true
 }
 
+// writeSnapshot publishes image at path atomically: a reader sees the old file
+// or the new one, never a partial JPEG.
+func writeSnapshot(path string, image []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create snapshot directory: %w", err)
+	}
+
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".snapshot-*.jpg")
+	if err != nil {
+		return fmt.Errorf("create snapshot file: %w", err)
+	}
+
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath) //nolint:errcheck // removed after successful rename too
+
+	if _, err := temporary.Write(image); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write snapshot: %w", err)
+	}
+
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close snapshot: %w", err)
+	}
+
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("rename snapshot: %w", err)
+	}
+
+	return nil
+}
+
 func (s *SnapshotManager) path(entrypointID string) (string, bool) {
 	entrypointID = strings.TrimSpace(entrypointID)
 	if entrypointID == "" || entrypointID == "." || entrypointID == ".." || filepath.Base(entrypointID) != entrypointID || strings.ContainsRune(entrypointID, filepath.Separator) {
@@ -300,6 +355,17 @@ func (s *SnapshotManager) path(entrypointID string) (string, bool) {
 	}
 
 	return filepath.Join(s.dir, "snapshots", entrypointID+".jpg"), true
+}
+
+// ringPath is the doorbell picture of an entrypoint. It lives in its own
+// directory so no entrypoint name can collide with another's ring file.
+func (s *SnapshotManager) ringPath(entrypointID string) (string, bool) {
+	path, ok := s.path(entrypointID)
+	if !ok {
+		return "", false
+	}
+
+	return filepath.Join(filepath.Dir(path), "ring", filepath.Base(path)), true
 }
 
 func firstJPEG(data []byte) ([]byte, bool) {

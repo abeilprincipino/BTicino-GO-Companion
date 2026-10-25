@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "GET", "/api/v3/ws", s.websocket)
 	s.handleProtected(mux, "GET", "/api/v3/webrtc/ws", s.webrtcWebsocket)
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/latest.jpg", s.snapshotLatest)
+	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/ring.jpg", s.snapshotRing)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
 	return logging.HTTP(s.logger, mux)
@@ -268,6 +269,33 @@ func (s *Server) currentDiagnostics() diagnostics.Snapshot {
 	return s.diagnostics.Snapshot()
 }
 
+// withSnapshotTimes adds when the entrypoint's pictures were taken. Home
+// Assistant's doorbell image entity changes state on ring_snapshot_updated_at.
+// See docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+func (s *Server) withSnapshotTimes(dto EntrypointDTO) EntrypointDTO {
+	if s.snapshot == nil {
+		return dto
+	}
+
+	latest, ring := s.snapshot.UpdatedAt(dto.ID)
+	dto.SnapshotUpdatedAt = optionalTime(latest)
+	dto.RingSnapshotUpdatedAt = optionalTime(ring)
+
+	return dto
+}
+
+// optionalTime drops sub-millisecond digits, which Python's parser before 3.11
+// rejects and nobody needs, and turns the zero time into an omitted field.
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+
+	value = value.UTC().Truncate(time.Millisecond)
+
+	return &value
+}
+
 func (s *Server) currentPayload() StateDTO {
 	diagnostic := s.currentDiagnostics()
 
@@ -278,7 +306,7 @@ func (s *Server) currentPayload() StateDTO {
 
 		dto.Entrypoints = make([]EntrypointDTO, 0, len(cfg.Companion.Entrypoints))
 		for _, entrypoint := range cfg.Companion.Entrypoints {
-			dto.Entrypoints = append(dto.Entrypoints, entrypointDTO(entrypoint, s.entrypoints != nil))
+			dto.Entrypoints = append(dto.Entrypoints, s.withSnapshotTimes(entrypointDTO(entrypoint, s.entrypoints != nil)))
 		}
 
 		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil && s.runtime.RebootAvailable()

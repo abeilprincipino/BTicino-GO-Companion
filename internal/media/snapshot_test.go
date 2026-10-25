@@ -112,3 +112,54 @@ func (p *fakeSnapshotProcess) Close() error {
 	p.once.Do(func() {})
 	return nil
 }
+
+func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string) []byte {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if image, err := manager.LatestRing(entrypointID); err == nil {
+			return image
+		}
+
+		time.Sleep(snapshotPollInterval)
+	}
+
+	t.Fatal("ring snapshot was not published")
+
+	return nil
+}
+
+func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
+	image := []byte{0xff, 0xd8, 7, 0xff, 0xd9}
+	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
+		return &fakeSnapshotProcess{}, os.WriteFile(output, image, 0o600)
+	}))
+
+	if latest, ring := manager.UpdatedAt("front-door"); !latest.IsZero() || !ring.IsZero() {
+		t.Fatalf("UpdatedAt() before any capture = %v, %v, want zero", latest, ring)
+	}
+
+	manager.Arm("front-door").Consume(testRTPPacket(1))
+	waitForSnapshot(t, manager, "front-door")
+
+	if _, err := manager.LatestRing("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Fatalf("LatestRing() after a live-view capture error = %v, want ErrSnapshotNotFound", err)
+	}
+
+	attempt := manager.Arm("front-door")
+	attempt.MarkRing()
+	attempt.Consume(testRTPPacket(2))
+
+	if got := waitForRingSnapshot(t, manager, "front-door"); string(got) != string(image) {
+		t.Fatalf("LatestRing() = %v, want %v", got, image)
+	}
+
+	if latest, ring := manager.UpdatedAt("front-door"); latest.IsZero() || ring.IsZero() {
+		t.Fatalf("UpdatedAt() after a ring capture = %v, %v, want both set", latest, ring)
+	}
+
+	if path, ok := manager.ringPath("front-door"); !ok || filepath.Base(filepath.Dir(path)) != "ring" {
+		t.Fatalf("ringPath() = %q, %v, want a file under snapshots/ring", path, ok)
+	}
+}

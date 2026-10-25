@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/core"
 	"bticino-go-companion/internal/diagnostics"
 	"bticino-go-companion/internal/system"
+	"time"
 )
 
 // StateDTO is the complete, versioned state contract sent to API clients.
@@ -28,6 +29,9 @@ type EntrypointDTO struct {
 	Label        string          `json:"label"`
 	Capabilities CapabilityDTO   `json:"capabilities"`
 	Availability AvailabilityDTO `json:"availability"`
+
+	SnapshotUpdatedAt     *time.Time `json:"snapshot_updated_at,omitempty"`
+	RingSnapshotUpdatedAt *time.Time `json:"ring_snapshot_updated_at,omitempty"`
 }
 
 type CapabilityDTO struct {

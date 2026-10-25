@@ -363,6 +363,16 @@ func TestServer_WebRTCContract(t *testing.T) {
 	if closeMessage["type"] != "ack" || control.closed != "session-1" {
 		t.Fatalf("close response = %#v, call = %#v", closeMessage, control)
 	}
+
+	offer = write(`{"type":"offer","id":"session-2","payload":{"session_id":"session-2","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
+	if offer["type"] != "answer" {
+		t.Fatalf("second offer response = %#v", offer)
+	}
+
+	leaveMessage := write(`{"type":"close","id":"session-2","payload":{"session_id":"session-2","reason":"answered_elsewhere","leave":true}}`)
+	if leaveMessage["type"] != "ack" || control.left != "session-2" || control.closed != "session-1" {
+		t.Fatalf("leave response = %#v, call = %#v", leaveMessage, control)
+	}
 }
 
 func TestServer_WebRTCDoesNotSendLocalCandidatesOutOfBand(t *testing.T) {
@@ -449,6 +459,61 @@ func TestServer_VoicemailRefresh(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || !body.OK || body.Available || !called {
 		t.Fatalf("refresh response = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestServer_SnapshotRing(t *testing.T) {
+	server, _ := newTestServer(t)
+	server.SetSnapshot(snapshotRecorder{ring: []byte{0xff, 0xd8, 2, 0xff, 0xd9}})
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v3/entrypoints/main/snapshot/ring.jpg", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/jpeg" || response.Body.String() != string([]byte{0xff, 0xd8, 2, 0xff, 0xd9}) {
+		t.Fatalf("ring snapshot response = %d, headers = %#v, body = %v", response.Code, response.Header(), response.Body.Bytes())
+	}
+}
+
+func TestServer_StateCarriesSnapshotTimes(t *testing.T) {
+	server, store := newTestServer(t)
+	ringAt := time.Date(2026, 10, 22, 9, 30, 0, 123456789, time.UTC)
+	server.SetSnapshot(snapshotRecorder{ringAt: ringAt})
+
+	token, err := auth.NewStore(store).RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/state", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	var body struct {
+		State struct {
+			Entrypoints []map[string]any `json:"entrypoints"`
+		} `json:"state"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || len(body.State.Entrypoints) != 1 {
+		t.Fatalf("state response = %s", response.Body.String())
+	}
+
+	entrypoint := body.State.Entrypoints[0]
+	if got := entrypoint["ring_snapshot_updated_at"]; got != "2026-10-22T09:30:00.123Z" {
+		t.Fatalf("ring_snapshot_updated_at = %#v, want 2026-10-22T09:30:00.123Z", got)
+	}
+
+	if _, present := entrypoint["snapshot_updated_at"]; present {
+		t.Fatalf("snapshot_updated_at = %#v, want it omitted when there is no snapshot", entrypoint["snapshot_updated_at"])
 	}
 }
 
@@ -799,18 +864,21 @@ type unlockRecorder struct {
 }
 
 type snapshotRecorder struct {
-	image []byte
-	err   error
+	image, ring      []byte
+	err              error
+	latestAt, ringAt time.Time
 }
 
-func (r snapshotRecorder) Latest(string) ([]byte, error) {
-	return r.image, r.err
+func (r snapshotRecorder) Latest(string) ([]byte, error)     { return r.image, r.err }
+func (r snapshotRecorder) LatestRing(string) ([]byte, error) { return r.ring, r.err }
+func (r snapshotRecorder) UpdatedAt(string) (time.Time, time.Time) {
+	return r.latestAt, r.ringAt
 }
 
 type webRTCRecorder struct {
 	answer                            string
 	sessionID, entrypointID, offerSDP string
-	closed                            string
+	closed, left                      string
 	candidateSessionID                string
 	candidate                         media.ICECandidate
 	localCandidates                   []*media.ICECandidate
@@ -836,6 +904,11 @@ func (r *webRTCRecorder) AddICECandidate(sessionID string, candidate media.ICECa
 
 func (r *webRTCRecorder) Close(sessionID string) error {
 	r.closed = sessionID
+	return nil
+}
+
+func (r *webRTCRecorder) Leave(sessionID string) error {
+	r.left = sessionID
 	return nil
 }
 

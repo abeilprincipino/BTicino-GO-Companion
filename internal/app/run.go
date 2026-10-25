@@ -134,7 +134,12 @@ func run(
 	// answers 503 Service Unavailable. Refusing the one call that can arrive in
 	// this startup window is honest and self-correcting; dropping its event is
 	// neither.
-	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), applyEvent)))
+	//
+	// The ring holder sits inside routeRingingPreview, so on the answer the
+	// preview is promoted before the holder leaves the stream. See
+	// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+	holder := newRingHolder(runtime.rtspServer.Coordinator(), func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
+	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
 
 	if runtime.inboundSIP {
 		runtime.dialer.SetInboundHandler(runtime.calls)
@@ -637,7 +642,11 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 
 	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, backchannel, logger, events.Failed)
 
-	return &bridgeSource{source: source, bridge: bridge}, func() {
+	return &bridgeSource{source: source, bridge: bridge, markRing: func() {
+		if attempt != nil {
+			attempt.MarkRing()
+		}
+	}}, func() {
 		if attempt != nil {
 			attempt.Close()
 		}
@@ -653,6 +662,8 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 type bridgeSource struct {
 	source *media.SourceSession
 	bridge *media.AudioBridge
+	// markRing makes the snapshot taken from this source the doorbell picture.
+	markRing func()
 }
 
 var (
@@ -681,6 +692,12 @@ func (s *bridgeSource) EndCallOnClose() {
 // by type assertion on the *bridgeSource, and a missing forwarder would make
 // every preview fail as a source that cannot serve one.
 func (s *bridgeSource) PrepareRingingPreview() {
+	// A stream born as a ringing preview is the doorbell's: its picture is the
+	// one Home Assistant notifies with.
+	if s.markRing != nil {
+		s.markRing()
+	}
+
 	s.source.PrepareRingingPreview()
 }
 
