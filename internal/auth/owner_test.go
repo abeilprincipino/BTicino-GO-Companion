@@ -3,6 +3,7 @@ package auth
 import (
 	"bticino-go-companion/internal/config"
 	"errors"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -21,6 +22,8 @@ func TestValidateOwner(t *testing.T) {
 		{name: "short password", username: "owner", password: "short"},
 		{name: "default username", username: DefaultOwnerUsername, password: "correct-horse"},
 		{name: "default password", username: "owner", password: DefaultOwnerPassword},
+		{name: "72 byte password", username: "owner", password: strings.Repeat("a", 72), valid: true},
+		{name: "73 byte password", username: "owner", password: strings.Repeat("a", 73)},
 	}
 
 	for _, tt := range tests {

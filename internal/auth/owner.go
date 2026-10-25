@@ -16,6 +16,8 @@ const (
 	DefaultOwnerPassword = "companion"
 
 	minOwnerPasswordLength = 8
+	// bcrypt rejects anything longer than 72 bytes with ErrPasswordTooLong.
+	maxOwnerPasswordBytes = 72
 )
 
 var ErrInvalidOwner = errors.New("invalid owner credentials")
@@ -30,6 +32,8 @@ func ValidateOwner(username, password string) error {
 		return fmt.Errorf("%w: username is required", ErrInvalidOwner)
 	case len(password) < minOwnerPasswordLength:
 		return fmt.Errorf("%w: password must contain at least %d characters", ErrInvalidOwner, minOwnerPasswordLength)
+	case len(password) > maxOwnerPasswordBytes:
+		return fmt.Errorf("%w: password must not exceed %d bytes", ErrInvalidOwner, maxOwnerPasswordBytes)
 	case username == DefaultOwnerUsername:
 		return fmt.Errorf("%w: username must replace the default", ErrInvalidOwner)
 	case password == DefaultOwnerPassword:
