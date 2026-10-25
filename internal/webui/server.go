@@ -502,7 +502,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 
 			return
 		}
-	} else if !s.savePassword(w, request) {
+	} else if !s.savePassword(w, request, current.bootstrap) {
 		return
 	}
 
@@ -518,10 +518,12 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+var errOwnerAlreadySet = errors.New("owner already set")
+
 // savePassword writes the owner credentials without touching the pairing
 // state: a password change, or a bootstrap on a companion whose pairing moved
 // on before an owner was ever set.
-func (s *Server) savePassword(w http.ResponseWriter, request passwordRequest) bool {
+func (s *Server) savePassword(w http.ResponseWriter, request passwordRequest, bootstrap bool) bool {
 	hash, err := bcrypt.GenerateFromPassword([]byte(request.Password), bcrypt.DefaultCost)
 	if err != nil {
 		s.logger.Error("hash webui password", "error", err)
@@ -539,12 +541,25 @@ func (s *Server) savePassword(w http.ResponseWriter, request passwordRequest) bo
 	}
 
 	if err := s.config.Update(func(cfg *config.Config) error {
+		// A bootstrap session can outlive the state it was opened on: if an owner
+		// was set meanwhile (pair/local), overwriting it would replace that owner
+		// and rotate the session secret its claim code is bound to.
+		if bootstrap && cfg.WebUI.AdminPasswordHash != "" {
+			return errOwnerAlreadySet
+		}
+
 		cfg.WebUI.AdminUsername = request.Username
 		cfg.WebUI.AdminPasswordHash = string(hash)
 		cfg.WebUI.SessionSecret = secret
 
 		return nil
 	}); err != nil {
+		if errors.Is(err, errOwnerAlreadySet) {
+			writeError(w, http.StatusConflict, "an owner is already set; sign in with its credentials")
+
+			return false
+		}
+
 		s.logger.Error("save webui password", "error", err)
 		writeError(w, http.StatusInternalServerError, "save password failed")
 

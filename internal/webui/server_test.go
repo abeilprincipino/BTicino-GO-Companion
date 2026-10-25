@@ -659,3 +659,46 @@ func (f fakeUpdateProvider) Install(ctx context.Context) (system.UpdateStatus, e
 
 	return f.install(ctx)
 }
+
+// A bootstrap session whose snapshot predates a concurrent pair/local owner
+// setup must not overwrite the owner that setup just stored, nor rotate the
+// session secret that the claim code it issued is bound to.
+func TestBootstrapSavePasswordRefusesWhenOwnerWasSetConcurrently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	cfg, err := config.Default(config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := config.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authStore := auth.NewStore(store)
+	server := New(store, authStore, slog.New(slog.DiscardHandler), nil, nil, func(string) error { return nil })
+
+	if _, err := authStore.SetupOwner("home-assistant", "ha-owner-password"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := store.Snapshot().WebUI
+
+	recorder := httptest.NewRecorder()
+	if server.savePassword(recorder, passwordRequest{Username: "admin", Password: "correct-horse"}, true) {
+		t.Fatal("savePassword on a bootstrap session succeeded over an existing owner")
+	}
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+
+	if after := store.Snapshot().WebUI; after.AdminUsername != before.AdminUsername || after.AdminPasswordHash != before.AdminPasswordHash || after.SessionSecret != before.SessionSecret {
+		t.Fatalf("owner or session secret changed: before %#v, after %#v", before, after)
+	}
+}
