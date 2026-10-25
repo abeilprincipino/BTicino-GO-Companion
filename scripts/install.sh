@@ -124,9 +124,10 @@ remount_root_rw() {
 fetch() {
 	url="$1"
 	dst="$2"
-	if command -v wget >/dev/null 2>&1; then wget -qO "${dst}" "${url}"; return; fi
+	# curl first: the intercom's BusyBox wget fails the TLS handshake with GitHub.
 	if command -v curl >/dev/null 2>&1; then curl -fsSL -o "${dst}" "${url}"; return; fi
-	die "Neither wget nor curl is available."
+	if command -v wget >/dev/null 2>&1; then wget -qO "${dst}" "${url}"; return; fi
+	die "Neither curl nor wget is available."
 }
 
 sha256_file() {

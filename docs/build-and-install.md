@@ -54,7 +54,7 @@ ssh root@<IP> 'cd /home/bticino/cfg/extra/companion && cp -f companion.previous 
 **Disinstallazione** (dettagli in §3.5):
 
 ```sh
-ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+ssh root@<IP> 'curl -fsSL -o /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
 ```
 
 **Riparare uno stage già copiato con CRLF** (da eseguire sul device, `<stage>` = dir che contiene `scripts/`):
@@ -243,7 +243,7 @@ ssh root@<IP> '/etc/init.d/companion status; tail -30 /tmp/companion.log'
 ### 3.5 Disinstallazione
 
 ```sh
-ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+ssh root@<IP> 'curl -fsSL -o /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
 ```
 
 Ferma il servizio, rimuove init script e symlink di boot, le regole firewall del companion, l'utente

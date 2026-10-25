@@ -119,6 +119,18 @@ test_install_records_the_ports_it_adds() {
 	check "install links S99zz, the second start at the end of boot" [ -e "${R}/etc/rc3.d/S99zzcompanion" ] && [ -e "${R}/etc/rc5.d/S99zzcompanion" ]
 }
 
+# The intercom's BusyBox wget fails the TLS handshake with GitHub; its curl
+# (GnuTLS) does not, so curl must be tried first.
+test_install_downloads_with_curl_first() {
+	setup install.sh
+	write_hook
+	printf '#!/bin/sh\necho curl >> "%s/fetch.log"\nexit 1\n' "${R}" > "${R}/shim/curl"
+	printf '#!/bin/sh\necho wget >> "%s/fetch.log"\nexit 1\n' "${R}" > "${R}/shim/wget"
+	chmod +x "${R}/shim/curl" "${R}/shim/wget"
+	run_script
+	check "install downloads the release with curl when curl is present" [ "$(head -n 1 "${R}/fetch.log" 2>/dev/null)" = curl ]
+}
+
 test_install_provisions_route_and_route_int() {
 	setup install.sh
 	mkdir -p "${R}/init.d"
@@ -238,6 +250,7 @@ test_uninstall_with_an_empty_port_record_prints_no_ports_message() {
 }
 
 test_install_records_the_ports_it_adds
+test_install_downloads_with_curl_first
 test_install_provisions_route_and_route_int
 test_uninstall_removes_the_companion
 test_uninstall_without_port_record_keeps_tcp_ports
