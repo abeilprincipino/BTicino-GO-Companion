@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -79,6 +80,9 @@ func (s *Server) Handler() http.Handler {
 	s.handle(mux, "GET", "/api/v3/auth/status", s.authStatus)
 	s.handle(mux, "POST", "/api/v3/pair/challenge", s.pairChallenge)
 	s.handle(mux, "POST", "/api/v3/pair/claim", s.pairClaim)
+	// Registered for POST only: every other method falls through to the
+	// catch-all notFound, so the route is not discoverable from the network.
+	mux.HandleFunc("POST /api/v3/pair/local", s.pairLocal)
 	s.handleProtected(mux, "POST", "/api/v3/auth/rotate", s.rotateBearer)
 	s.handleProtected(mux, "POST", "/api/v3/auth/revoke", s.revokeBearer)
 	s.handle(mux, "POST", "/api/v3/auth/recover", s.recoverBearer)
@@ -172,6 +176,81 @@ func (s *Server) pairClaim(w http.ResponseWriter, r *http.Request) {
 	s.logger.InfoContext(r.Context(), "pairing completed", "client_ip", sourceIP(r))
 
 	writeOK(w, http.StatusOK, map[string]any{"access_token": token})
+}
+
+// pairLocal hands a claim or repair code to a caller on the intercom itself,
+// which already proved it owns the device by logging in as root. From the
+// network the route does not exist.
+func (s *Server) pairLocal(w http.ResponseWriter, r *http.Request) {
+	if !fromLoopback(r) {
+		s.notFound(w, r)
+		return
+	}
+
+	var body struct {
+		Owner *struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"owner"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+
+	if s.auth == nil || s.config == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "authentication is unavailable")
+		return
+	}
+
+	cfg := s.config.Snapshot()
+	payload := map[string]any{"device_id": cfg.Companion.DeviceID, "instance_id": cfg.Auth.InstanceID}
+
+	switch s.auth.PairingState() {
+	case config.PairingStateSetupRequired:
+		if body.Owner == nil {
+			writeError(w, http.StatusBadRequest, "invalid_owner", "owner credentials are required")
+			return
+		}
+
+		code, err := s.auth.SetupOwner(body.Owner.Username, body.Owner.Password)
+		if errors.Is(err, auth.ErrInvalidOwner) {
+			writeError(w, http.StatusBadRequest, "invalid_owner", err.Error())
+			return
+		}
+
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+
+		payload["pairing_state"] = config.PairingStateClaimable
+		payload["claim_code"] = code
+	case config.PairingStateClaimable:
+		code, err := s.auth.InitialClaimCode()
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+
+		payload["pairing_state"] = config.PairingStateClaimable
+		payload["claim_code"] = code
+	case config.PairingStateClaimed:
+		code, expiresAt, err := s.auth.IssueRepairCode()
+		if err != nil {
+			writeAuthError(w, err)
+			return
+		}
+
+		payload["pairing_state"] = config.PairingStateClaimed
+		payload["repair_code"] = code
+		payload["repair_expires_at"] = expiresAt.Format(time.RFC3339)
+	default:
+		writeError(w, http.StatusConflict, "pairing_error", "pairing needs attention")
+		return
+	}
+
+	s.logger.InfoContext(r.Context(), "local pairing code issued", "pairing_state", payload["pairing_state"])
+	writeOK(w, http.StatusOK, payload)
 }
 
 func (s *Server) rotateBearer(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +431,12 @@ func sourceIP(r *http.Request) string {
 	}
 
 	return r.RemoteAddr
+}
+
+func fromLoopback(r *http.Request) bool {
+	address, err := netip.ParseAddr(sourceIP(r))
+
+	return err == nil && address.Unmap().IsLoopback()
 }
 
 func writeAuthError(w http.ResponseWriter, err error) {

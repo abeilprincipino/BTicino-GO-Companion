@@ -60,9 +60,15 @@ This installs the latest release. To pin a specific release, set `COMPANION_RELE
 wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v0.7.0 sh /tmp/install.sh
 ```
 
-The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines and ends with
-`Installation complete.` It exits with code `1` if any post-install check fails; the `FAIL:` lines
-say which one.
+The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines. A successful run ends with
+`INFO: Installed version: <version>` followed by `Installation complete.` It exits with code `1` if
+any post-install check fails, or if it stops early; in both cases the `FAIL:` lines say why. An
+early stop that has no specific message is reported as
+`FAIL: Installation aborted while <step> (exit <code>).`
+
+Only one installation can run at a time; a second one stops with `FAIL: Another installation is
+already running`. Closing the SSH session does not interrupt a running installation: it carries on
+to the end and restores `/` read-only.
 
 The same command is used to upgrade an existing installation.
 
@@ -75,11 +81,14 @@ In order:
 2. Downloads the `companion.tar.gz` release bundle and verifies its SHA256 against the GitHub
    release asset digest.
 3. Installs the binary to `/home/bticino/cfg/extra/companion/companion`, keeping the previous one as
-   `companion.previous`.
+   `companion.previous`. An update the companion had staged as `companion.new` is discarded, so it
+   cannot replace the installed binary on the next start.
 4. Installs the bundled GStreamer runtime to `/home/bticino/cfg/extra/companion/gst`, keeping the
    previous one as `gst.previous`.
-5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S99zzcompanion` in runlevels
-   `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
+5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S45companion` and
+   `S99zzcompanion` in runlevels `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
+   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`), so Flexisip is up
+   before it registers; `S99zz` is a second start at the end of boot that retries a failed one.
 6. Persists firewall access in `/etc/network/if-pre-up.d/iptables`:
 
    | Protocol | Port | Purpose |
@@ -177,8 +186,9 @@ Then:
 
 ## Answering Calls from Home Assistant
 
-The installer adds a `companion@<domain>` SIP user to Flexisip and to the `alluser` group, so the
-intercom forks incoming calls to the companion, and enables `companion.sip.inbound` in
+The installer adds a `companion@<domain>` SIP user to Flexisip and to the `alluser` group (in
+`route.conf`, which Flexisip reads, and in `route_int.conf`, which the firmware keeps in step with
+it), so the intercom forks incoming calls to the companion, and enables `companion.sip.inbound` in
 `config.yaml`. Backups of the modified files are kept next to them with a `.companion.bak` suffix.
 
 **Flexisip is not restarted by the installer.** It reads `/etc/flexisip/users/*` at startup, so
@@ -236,16 +246,19 @@ cp -f companion.previous companion.new
 
 ## Uninstall
 
+Connect to the intercom over SSH and run the uninstaller:
+
 ```sh
-/etc/init.d/companion stop
-mount -o remount,rw /
-rm -f /etc/init.d/companion /etc/rc?.d/S99zzcompanion /etc/rc?.d/K55companion
-mount -o remount,ro /
-rm -rf /home/bticino/cfg/extra/companion
+wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh
 ```
 
-The firewall entries added to `/etc/network/if-pre-up.d/iptables` are not removed. To undo the SIP
-provisioning, restore the `.companion.bak` copies in `/etc/flexisip/users/` and restart Flexisip.
+It stops the service, removes the init script and its boot links, removes the companion's firewall
+rules from `/etc/network/if-pre-up.d/iptables`, removes the `companion` SIP user from Flexisip, and
+deletes `/home/bticino/cfg/extra/companion`, configuration and pairing included. Only the TCP ports
+the installer added are closed: installations made before the installer recorded them keep their TCP
+ports, and the uninstaller says so with a `WARN:` line. It ends with
+`OK: Companion removed. Restart Flexisip or reboot the intercom.` and exits with code `1` if any step
+failed.
 
 ---
 

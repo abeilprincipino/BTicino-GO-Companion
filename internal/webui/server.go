@@ -26,8 +26,6 @@ import (
 )
 
 const (
-	defaultUsername = "companion"
-	defaultPassword = "companion"
 	sessionCookie   = "companion_web_session"
 	sessionIdle     = 30 * time.Minute
 	sessionLifetime = 12 * time.Hour
@@ -356,9 +354,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	bootstrap := strings.TrimSpace(cfg.WebUI.AdminPasswordHash) == ""
 
-	valid := request.Username == defaultUsername
+	valid := request.Username == auth.DefaultOwnerUsername
 	if bootstrap {
-		valid = valid && request.Password == defaultPassword
+		valid = valid && request.Password == auth.DefaultOwnerPassword
 	} else {
 		valid = request.Username == cfg.WebUI.AdminUsername && bcrypt.CompareHashAndPassword([]byte(cfg.WebUI.AdminPasswordHash), []byte(request.Password)) == nil
 	}
@@ -476,8 +474,16 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	refreshSessionCookie(w, r)
 
 	request.Username = strings.TrimSpace(request.Username)
-	if request.Username == "" || len(request.Password) < 8 || (current.bootstrap && (request.Password == defaultPassword || request.Username == defaultUsername)) {
-		writeError(w, http.StatusBadRequest, "password must replace the default and contain at least 8 characters")
+
+	// bcrypt rejects passwords over 72 bytes, so they are refused here rather
+	// than failing as a hash error.
+	invalid := request.Username == "" || len(request.Password) < 8 || len(request.Password) > 72
+	if current.bootstrap {
+		invalid = auth.ValidateOwner(request.Username, request.Password) != nil
+	}
+
+	if invalid {
+		writeError(w, http.StatusBadRequest, "password must replace the default and be 8 to 72 bytes long")
 		return
 	}
 
@@ -491,32 +497,22 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(request.Password), bcrypt.DefaultCost)
-	if err != nil {
-		s.logger.Error("hash webui password", "error", err)
-		writeError(w, http.StatusInternalServerError, "save password failed")
+	if current.bootstrap && s.auth != nil && s.auth.PairingState() == config.PairingStateSetupRequired {
+		if _, err := s.auth.SetupOwner(request.Username, request.Password); err != nil {
+			// Only a concurrent pair/local can move pairing on in between, and it
+			// sets an owner of its own.
+			if errors.Is(err, auth.ErrClaimNotAllowed) {
+				writeError(w, http.StatusConflict, "an owner is already set; sign in with its credentials")
 
-		return
-	}
+				return
+			}
 
-	secret, err := config.RandomHex(32)
-	if err != nil {
-		s.logger.Error("create webui session secret", "error", err)
-		writeError(w, http.StatusInternalServerError, "save password failed")
+			s.logger.Error("webui owner setup", "error", err)
+			writeError(w, http.StatusInternalServerError, "save password failed")
 
-		return
-	}
-
-	if err := s.config.Update(func(cfg *config.Config) error {
-		cfg.WebUI.AdminUsername = request.Username
-		cfg.WebUI.AdminPasswordHash = string(hash)
-		cfg.WebUI.SessionSecret = secret
-
-		return nil
-	}); err != nil {
-		s.logger.Error("save webui password", "error", err)
-		writeError(w, http.StatusInternalServerError, "save password failed")
-
+			return
+		}
+	} else if !s.savePassword(w, request, current.bootstrap) {
 		return
 	}
 
@@ -525,19 +521,62 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	clearSessionCookie(w)
 
-	if current.bootstrap && s.auth != nil {
-		_, err := s.auth.StartInitialClaim()
-		if err != nil && !errors.Is(err, auth.ErrAlreadyClaimed) {
-			s.logger.Error("issue initial claim code", "error", err)
-			writeError(w, http.StatusInternalServerError, "save password failed")
-
-			return
-		}
-
+	if current.bootstrap {
 		s.logger.Info("webui owner setup completed")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+var errOwnerAlreadySet = errors.New("owner already set")
+
+// savePassword writes the owner credentials without touching the pairing
+// state: a password change, or a bootstrap on a companion whose pairing moved
+// on before an owner was ever set.
+func (s *Server) savePassword(w http.ResponseWriter, request passwordRequest, bootstrap bool) bool {
+	hash, err := bcrypt.GenerateFromPassword([]byte(request.Password), bcrypt.DefaultCost)
+	if err != nil {
+		s.logger.Error("hash webui password", "error", err)
+		writeError(w, http.StatusInternalServerError, "save password failed")
+
+		return false
+	}
+
+	secret, err := config.RandomHex(32)
+	if err != nil {
+		s.logger.Error("create webui session secret", "error", err)
+		writeError(w, http.StatusInternalServerError, "save password failed")
+
+		return false
+	}
+
+	if err := s.config.Update(func(cfg *config.Config) error {
+		// A bootstrap session can outlive the state it was opened on: if an owner
+		// was set meanwhile (pair/local), overwriting it would replace that owner
+		// and rotate the session secret its claim code is bound to.
+		if bootstrap && cfg.WebUI.AdminPasswordHash != "" {
+			return errOwnerAlreadySet
+		}
+
+		cfg.WebUI.AdminUsername = request.Username
+		cfg.WebUI.AdminPasswordHash = string(hash)
+		cfg.WebUI.SessionSecret = secret
+
+		return nil
+	}); err != nil {
+		if errors.Is(err, errOwnerAlreadySet) {
+			writeError(w, http.StatusConflict, "an owner is already set; sign in with its credentials")
+
+			return false
+		}
+
+		s.logger.Error("save webui password", "error", err)
+		writeError(w, http.StatusInternalServerError, "save password failed")
+
+		return false
+	}
+
+	return true
 }
 
 func (s *Server) handleEntrypointsConfig(w http.ResponseWriter, r *http.Request) {

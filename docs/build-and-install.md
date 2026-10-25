@@ -51,6 +51,12 @@ scp dist/companion root@<IP>:/home/bticino/cfg/extra/companion/companion.new && 
 ssh root@<IP> 'cd /home/bticino/cfg/extra/companion && cp -f companion.previous companion.new && /etc/init.d/companion restart && /etc/init.d/companion status'
 ```
 
+**Disinstallazione** (dettagli in §3.5):
+
+```sh
+ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+```
+
 **Riparare uno stage già copiato con CRLF** (da eseguire sul device, `<stage>` = dir che contiene `scripts/`):
 
 ```sh
@@ -189,7 +195,9 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
    come `companion.previous`;
 3. installa `gst/` in `.../companion/gst`, salvando il precedente come `gst.previous`;
 4. copia l'init script in `/etc/init.d/companion` e crea i symlink di boot:
-   `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`;
+   `S45companion` e `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`.
+   `S45` parte prima di `S98-bt_daemon-apps.sh`, così flexisip è su prima che lo stack BTicino si
+   registri; `S99zz` è un secondo avvio a fine boot che riprova se il primo è fallito;
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);
@@ -201,7 +209,21 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
 7. post-install check, incluso l'health su `http://127.0.0.1:8080/api/v3/health` con timeout
    45 s (`COMPANION_HEALTHCHECK_TIMEOUT_SEC`).
 
-Exit code `1` se almeno un check fallisce; il dettaglio è nelle righe `FAIL:`.
+Exit code `1` se almeno un check fallisce o se l'installer si ferma prima; il dettaglio è nelle
+righe `FAIL:` (un'uscita senza messaggio specifico diventa
+`FAIL: Installation aborted while <step> (exit <code>).`). Se va a buon fine, prima di
+`Installation complete.` stampa `INFO: Installed version: <versione>`, letta da `companion -version`.
+
+Altri comportamenti:
+
+- un `companion.new` lasciato da un update già scaricato viene scartato, altrimenti il `restart`
+  lo promuoverebbe al posto del binario appena installato;
+- un lock in `/var/run/companion-install.lock` impedisce due installazioni contemporanee;
+- `HUP` e `PIPE` sono ignorati: se la sessione SSH cade, l'installazione arriva comunque in fondo
+  e rimonta `/` in sola lettura.
+
+`/etc/init.d/companion` esce con il codice reale dell'azione: `status` restituisce `3` se il
+servizio è fermo e `1` se gira ma non è sano o il watchdog è fermo.
 
 ### 3.4 Verifica
 
@@ -216,6 +238,26 @@ ssh root@<IP> '/etc/init.d/companion status; tail -30 /tmp/companion.log'
   Non serve prepararlo: `config.Default` semina un entrypoint (`id: main`, `devaddr: 20`,
   stream/unlock/ring attivi) e genera `instance_id`; il PIN HomeKit viene generato al primo
   avvio del bridge.
+
+
+### 3.5 Disinstallazione
+
+```sh
+ssh root@<IP> 'wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh'
+```
+
+Ferma il servizio, rimuove init script e symlink di boot, le regole firewall del companion, l'utente
+SIP `companion` da Flexisip e la cartella `/home/bticino/cfg/extra/companion` (configurazione e
+pairing compresi). Delle porte TCP chiude solo quelle che l'installer ha aggiunto e annotato in
+`firewall-added`; sulle installazioni precedenti le lascia aperte con un `WARN:`. Non ripristina i
+`.companion.bak` di Flexisip: annullerebbero le modifiche fatte da BTicino dopo l'installazione.
+Usa lo stesso lock dell'installer. Poi va riavviato Flexisip, o il citofono.
+
+I test di logica di `install.sh` e `uninstall.sh` girano senza root su qualsiasi `sh` POSIX:
+
+```sh
+sh scripts/tests/run.sh
+```
 
 ---
 
@@ -387,7 +429,10 @@ Un'incongruenza rilevata leggendo la pipeline, non bloccante per l'install local
 ## 8. Answering calls from Home Assistant
 
 The installer provisions a `companion@<domain>` SIP user in Flexisip so the
-intercom forks incoming calls to the companion. Run the installer with
+intercom forks incoming calls to the companion: the user in `users.db.txt`, and
+the contact in the `alluser` group of `route.conf` (the file Flexisip reads) and
+of `route_int.conf` (kept in step by the firmware). `route_ext.conf` is not
+touched. Run the installer with
 `COMPANION_SIP_INBOUND=0` to skip this and leave the BTicino files untouched.
 
 On the first start after an upgrade the companion adds the `companion.sip`

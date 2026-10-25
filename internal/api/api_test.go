@@ -179,6 +179,191 @@ func TestServer_RepairRecovery(t *testing.T) {
 	}
 }
 
+type pairLocalResponse struct {
+	DeviceID        string `json:"device_id"`
+	InstanceID      string `json:"instance_id"`
+	PairingState    string `json:"pairing_state"`
+	ClaimCode       string `json:"claim_code"`
+	RepairCode      string `json:"repair_code"`
+	RepairExpiresAt string `json:"repair_expires_at"`
+	Error           struct {
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
+func TestServer_PairLocal(t *testing.T) {
+	t.Parallel()
+
+	owner := `{"owner":{"username":"owner","password":"correct-horse"}}`
+
+	t.Run("hidden from the network", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+		response, body := pairLocal(t, server, "192.0.2.1:1234", owner)
+
+		if response.Code != http.StatusNotFound || body.Error.Code != "not_found" {
+			t.Fatalf("remote pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("setup required sets the owner and opens the claim", func(t *testing.T) {
+		t.Parallel()
+
+		server, store := newSetupRequiredTestServer(t)
+		response, body := pairLocal(t, server, "127.0.0.1:5555", owner)
+
+		want, err := server.auth.InitialClaimCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := store.Snapshot()
+		if response.Code != http.StatusOK || body.PairingState != "claimable" || body.ClaimCode != want {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+
+		if body.DeviceID != cfg.Companion.DeviceID || body.InstanceID != cfg.Auth.InstanceID {
+			t.Fatalf("identity = %q/%q, want %q/%q", body.DeviceID, body.InstanceID, cfg.Companion.DeviceID, cfg.Auth.InstanceID)
+		}
+
+		if cfg.WebUI.AdminUsername != "owner" {
+			t.Fatalf("admin username = %q, want owner", cfg.WebUI.AdminUsername)
+		}
+	})
+
+	t.Run("setup required refuses a missing or invalid owner", func(t *testing.T) {
+		t.Parallel()
+
+		for _, request := range []string{`{}`, `{"owner":{"username":"owner","password":"companion"}}`} {
+			server, store := newSetupRequiredTestServer(t)
+			response, body := pairLocal(t, server, "127.0.0.1:5555", request)
+
+			if response.Code != http.StatusBadRequest || body.Error.Code != "invalid_owner" {
+				t.Fatalf("pair/local %s = %d: %s", request, response.Code, response.Body.String())
+			}
+
+			if state := store.Snapshot().Auth.PairingState; state != config.PairingStateSetupRequired {
+				t.Fatalf("pairing state after %s = %q, want setup_required", request, state)
+			}
+		}
+	})
+
+	t.Run("claimable returns the claim code and ignores the owner", func(t *testing.T) {
+		t.Parallel()
+
+		server, store := newTestServer(t)
+		response, body := pairLocal(t, server, "[::1]:5555", owner)
+
+		want, err := server.auth.InitialClaimCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if response.Code != http.StatusOK || body.PairingState != "claimable" || body.ClaimCode != want {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+
+		if store.Snapshot().WebUI.AdminUsername != "" {
+			t.Fatal("pair/local set an owner on a claimable companion")
+		}
+	})
+
+	t.Run("claimed issues a repair code that recovers the bearer", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+		if _, err := server.auth.RotateBearer(); err != nil {
+			t.Fatal(err)
+		}
+
+		response, body := pairLocal(t, server, "127.0.0.1:5555", `{}`)
+		if response.Code != http.StatusOK || body.PairingState != "claimed" || body.RepairCode == "" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+
+		if _, err := time.Parse(time.RFC3339, body.RepairExpiresAt); err != nil {
+			t.Fatalf("repair_expires_at = %q: %v", body.RepairExpiresAt, err)
+		}
+
+		if _, err := server.auth.RecoverBearer(body.RepairCode); err != nil {
+			t.Fatalf("recover with the local repair code: %v", err)
+		}
+	})
+
+	t.Run("other methods look like an unknown route", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		for _, remoteAddr := range []string{"192.0.2.1:1234", "127.0.0.1:5555"} {
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/pair/local", nil)
+			request.RemoteAddr = remoteAddr
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"not_found"`) {
+				t.Fatalf("GET pair/local from %s = %d: %s", remoteAddr, response.Code, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("a pairing error is a conflict", func(t *testing.T) {
+		t.Parallel()
+
+		server, store := newTestServer(t)
+		if err := store.Update(func(cfg *config.Config) error {
+			cfg.Auth.PairingState = config.PairingStateError
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		response, body := pairLocal(t, server, "127.0.0.1:5555", `{}`)
+		if response.Code != http.StatusConflict || body.Error.Code != "pairing_error" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("an IPv4-mapped loopback peer is accepted", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		response, body := pairLocal(t, server, "[::ffff:127.0.0.1]:5555", `{}`)
+		if response.Code != http.StatusOK || body.PairingState != "claimable" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("a malformed peer address is hidden", func(t *testing.T) {
+		t.Parallel()
+
+		server, _ := newTestServer(t)
+
+		response, body := pairLocal(t, server, "not-an-address", `{}`)
+		if response.Code != http.StatusNotFound || body.Error.Code != "not_found" {
+			t.Fatalf("pair/local = %d: %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func pairLocal(t *testing.T, server *Server, remoteAddr, body string) (*httptest.ResponseRecorder, pairLocalResponse) {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/pair/local", strings.NewReader(body))
+	request.RemoteAddr = remoteAddr
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	var decoded pairLocalResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode pair/local response %q: %v", response.Body.String(), err)
+	}
+
+	return response, decoded
+}
+
 func TestParseMessage(t *testing.T) {
 	t.Parallel()
 
@@ -832,6 +1017,24 @@ func assertMessage(t *testing.T, reader io.ReadWriter, expectedType, expectedID 
 func newTestServer(t *testing.T) (*Server, *config.Store) {
 	t.Helper()
 
+	server, store := newSetupRequiredTestServer(t)
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.WebUI.SessionSecret = "test-session-secret"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := server.auth.StartInitialClaim(); err != nil {
+		t.Fatal(err)
+	}
+
+	return server, store
+}
+
+func newSetupRequiredTestServer(t *testing.T) (*Server, *config.Store) {
+	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if _, err := config.Create(path, config.Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"}); err != nil {
 		t.Fatal(err)
@@ -842,19 +1045,7 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 		t.Fatal(err)
 	}
 
-	authStore := auth.NewStore(store)
-	if err := store.Update(func(cfg *config.Config) error {
-		cfg.WebUI.SessionSecret = "test-session-secret"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := authStore.StartInitialClaim(); err != nil {
-		t.Fatal(err)
-	}
-
-	return NewServer(authStore, store, core.NewProjector(), slog.New(slog.DiscardHandler)), store
+	return NewServer(auth.NewStore(store), store, core.NewProjector(), slog.New(slog.DiscardHandler)), store
 }
 
 type failingConn struct{}

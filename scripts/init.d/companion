@@ -349,5 +349,3 @@ status) do_status ;;
 _watchdog) do_watchdog ;;
 *) echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2; exit 1 ;;
 esac
-
-exit 0

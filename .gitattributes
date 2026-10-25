@@ -1,0 +1,6 @@
+# LF everywhere, in the repository and in every checkout, whatever core.autocrlf
+# says: the scripts run on the intercom's BusyBox sh, which fails on CRLF, and a
+# copy straight from a Windows working tree must be safe to run.
+* text=auto eol=lf
+*.sh text eol=lf
+scripts/init.d/* text eol=lf

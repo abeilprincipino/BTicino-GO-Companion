@@ -26,18 +26,40 @@ fi
 BASE_URL="${COMPANION_RELEASE_BASE_URL:-${DEFAULT_BASE_URL}}"
 RELEASE_API="${COMPANION_RELEASE_API:-${DEFAULT_RELEASE_API}}"
 
+LOCK_DIR="/var/run/${SERVICE_NAME}-install.lock"
+# Ports such as 80 may be in the firewall list before the companion arrives,
+# so uninstall.sh removes only the ones listed here.
+FIREWALL_ADDED="${BASE_DIR}/firewall-added"
+
 ROOT=""
 ROOT_WAS_REMOUNTED=0
+LOCK_HELD=0
 FAILURES=0
 POST_CHECK_FAILURES=0
 SELECTED_BINARY_PATH=""
 SELECTED_INIT_TEMPLATE=""
 SELECTED_GST_DIR=""
+INSTALLED_VERSION="unknown"
+CURRENT_STEP="starting"
+ABORT_REPORTED=0
+RUN_FINISHED=0
 
-log() { printf 'INFO: %s\n' "$*"; }
-ok() { printf 'OK: %s\n' "$*"; }
-warn() { printf 'WARN: %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
+# The installer is often driven over a remote session that can vanish mid-run,
+# when the network drops or Home Assistant restarts. Stopping there would leave
+# / read-write and the service half-replaced, so writes are best-effort and the
+# run carries on to the end whether or not anyone is still reading.
+log() { printf 'INFO: %s\n' "$*" 2>/dev/null || true; }
+ok() { printf 'OK: %s\n' "$*" 2>/dev/null || true; }
+warn() { printf 'WARN: %s\n' "$*" 2>/dev/null || true; }
+fail() { printf 'FAIL: %s\n' "$*" 2>/dev/null || true; FAILURES=$((FAILURES + 1)); }
+
+# die goes to stderr so that it is still seen when it fires inside a command
+# substitution, where stdout is the caller's variable.
+die() {
+	printf 'FAIL: %s\n' "$*" >&2 2>/dev/null || true
+	ABORT_REPORTED=1
+	exit 1
+}
 
 cleanup_download_dir() {
 	[ -z "${ROOT}" ] || [ ! -d "${ROOT}" ] || rm -rf "${ROOT}" || true
@@ -51,14 +73,44 @@ restore_root_ro() {
 	fi
 }
 
-on_exit() { cleanup_download_dir; restore_root_ro; }
-trap on_exit EXIT INT TERM
+acquire_install_lock() {
+	if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+		holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+		if [ -n "${holder}" ] && [ -d "/proc/${holder}" ]; then
+			die "Another installation is already running (pid ${holder})."
+		fi
+		rm -rf "${LOCK_DIR}"
+		mkdir "${LOCK_DIR}" || die "Could not create the installation lock ${LOCK_DIR}."
+	fi
+	echo "$$" > "${LOCK_DIR}/pid"
+	LOCK_HELD=1
+}
+
+release_install_lock() {
+	[ "${LOCK_HELD}" -eq 1 ] || return 0
+	rm -rf "${LOCK_DIR}"
+	LOCK_HELD=0
+}
+
+# An exit that nothing announced (a failed command under set -e, a signal)
+# would otherwise end the output on whatever INFO line came before it.
+on_exit() {
+	rc=$?
+	set +e
+	cleanup_download_dir
+	restore_root_ro
+	release_install_lock
+	if [ "${rc}" -ne 0 ] && [ "${RUN_FINISHED}" -eq 0 ] && [ "${ABORT_REPORTED}" -eq 0 ]; then
+		printf 'FAIL: Installation aborted while %s (exit %s).\n' "${CURRENT_STEP}" "${rc}" >&2 2>/dev/null
+	fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap '' HUP PIPE
 
 require_root() {
-	if [ "$(id -u)" -ne 0 ]; then
-		log "This script must run as root."
-		exit 1
-	fi
+	[ "$(id -u)" -eq 0 ] || die "This script must run as root."
 }
 
 remount_root_rw() {
@@ -74,8 +126,7 @@ fetch() {
 	dst="$2"
 	if command -v wget >/dev/null 2>&1; then wget -qO "${dst}" "${url}"; return; fi
 	if command -v curl >/dev/null 2>&1; then curl -fsSL -o "${dst}" "${url}"; return; fi
-	log "Neither wget nor curl is available."
-	exit 1
+	die "Neither wget nor curl is available."
 }
 
 sha256_file() {
@@ -83,8 +134,7 @@ sha256_file() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "${target}" | awk '{print $1}'; return; fi
 	if command -v busybox >/dev/null 2>&1; then busybox sha256sum "${target}" | awk '{print $1}'; return; fi
 	if command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "${target}" | awk '{print $NF}'; return; fi
-	log "No SHA256 tool found (sha256sum/busybox/openssl)."
-	exit 1
+	die "No SHA256 tool found (sha256sum/busybox/openssl)."
 }
 
 parse_release_asset_digest() {
@@ -133,7 +183,7 @@ ensure_persistent_firewall_port_value() {
 		{ print }
 		END { if(!patched) exit 42 }
 	' "${hook}" > "${tmp}"; then
-		cp "${tmp}" "${hook}"; rm -f "${tmp}"; log "Persisted companion firewall port ${port} in ${hook}."; return
+		cp "${tmp}" "${hook}"; rm -f "${tmp}"; printf '%s\n' "${port}" >> "${FIREWALL_ADDED}"; log "Persisted companion firewall port ${port} in ${hook}."; return
 	fi
 	rc=$?; rm -f "${tmp}"
 	[ "${rc}" -eq 42 ] && warn "could not find SSH/SIP firewall block in ${hook}; no persistent patch applied." || warn "failed to patch ${hook} for companion port ${port}."
@@ -162,13 +212,28 @@ ensure_persistent_firewall_ports() {
 	for port in $(companion_firewall_udp_ports); do ensure_persistent_firewall_udp_port_value "${port}"; done
 }
 
+# Prints the version a companion binary reports, or "unknown" for builds that
+# predate the -version flag.
+binary_version() {
+	version="$("$1" -version 2>/dev/null || true)"
+	printf '%s\n' "${version:-unknown}"
+}
+
 install_binary() {
 	mkdir -p "${BASE_DIR}"
 	candidate="${BASE_DIR}/companion.candidate.$$"
 	cp "$1" "${candidate}"; chmod 755 "${candidate}"
+	INSTALLED_VERSION="$(binary_version "${candidate}")"
 	if [ -f "${BIN_PATH}" ]; then cp -f "${BIN_PATH}" "${BASE_DIR}/companion.previous"; chmod 755 "${BASE_DIR}/companion.previous" || true; fi
 	mv -f "${candidate}" "${BIN_PATH}"
-	log "Installed binary to ${BIN_PATH}"
+	# The init script promotes companion.new over companion on its next start,
+	# so an update the companion staged earlier would replace this binary as
+	# soon as the service is restarted below.
+	if [ -e "${BASE_DIR}/companion.new" ]; then
+		rm -f "${BASE_DIR}/companion.new"
+		log "Discarded the staged update ${BASE_DIR}/companion.new."
+	fi
+	log "Installed binary ${INSTALLED_VERSION} to ${BIN_PATH}"
 }
 
 install_gst_runtime() {
@@ -187,10 +252,16 @@ install_init_script() { cp -f "$1" "${INIT_SCRIPT}"; chmod 755 "${INIT_SCRIPT}";
 register_service() {
 	remount_root_rw
 	install_init_script "$1"
+	# S45 starts the companion before S98-bt_daemon-apps.sh, so flexisip is up
+	# before the BTicino stack registers (see do_start in the init script).
+	# S99zz is a second start at the end of boot: a no-op when S45 succeeded, a
+	# retry when it ran before the companion partition was mounted.
 	for runlevel in 2 3 4 5; do
 		dir="/etc/rc${runlevel}.d"
-		link="${dir}/S99zz${SERVICE_NAME}"
-		[ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }
+		[ -d "${dir}" ] || continue
+		for link in "${dir}/S45${SERVICE_NAME}" "${dir}/S99zz${SERVICE_NAME}"; do
+			rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"
+		done
 	done
 	for runlevel in 0 1 6; do dir="/etc/rc${runlevel}.d"; link="${dir}/K55${SERVICE_NAME}"; [ ! -d "${dir}" ] || { rm -f "${link}"; ln -s "../init.d/${SERVICE_NAME}" "${link}"; }; done
 	ensure_persistent_firewall_ports
@@ -208,6 +279,7 @@ wait_for_health() { elapsed=0; while [ "${elapsed}" -lt "$2" ]; do health_endpoi
 
 FLEXISIP_USERS_DB="/etc/flexisip/users/users.db.txt"
 FLEXISIP_ROUTE="/etc/flexisip/users/route.conf"
+FLEXISIP_ROUTE_INT="/etc/flexisip/users/route_int.conf"
 FLEXISIP_DOMAIN_REG="/etc/flexisip/domain-registration.conf"
 SIP_USER="companion"
 SIP_CONFIG_CHANGED=0
@@ -248,10 +320,9 @@ route_has_companion() {
 
 provision_flexisip_user() {
 	domain="$1"
-	# route_int.conf is deliberately absent: flexisip reads
-	# static-records-file=/etc/flexisip/users/route.conf, so editing route_int.conf
-	# provisioned nothing. Requiring a file this installer no longer writes would
-	# fail an installation for no reason.
+	# route_int.conf is not required: flexisip reads
+	# static-records-file=/etc/flexisip/users/route.conf, and route_int.conf is
+	# only kept in step below when it exists.
 	for file in "${FLEXISIP_USERS_DB}" "${FLEXISIP_ROUTE}"; do
 		if ! backup_once "${file}"; then
 			warn "Missing ${file}; skipping SIP inbound provisioning."
@@ -277,15 +348,34 @@ provision_flexisip_user() {
 	# keep that line until it is removed by hand; see
 	# docs/superpowers/specs/2026-08-06-media-teardown-call-safety-design.md.
 
-	if route_has_companion "${domain}" "${FLEXISIP_ROUTE}"; then
-		ok "SIP inbound already provisioned."
+	add_to_alluser "${domain}" "${FLEXISIP_ROUTE}" || return 1
+
+	# flexisip reads only route.conf, but the firmware keeps the alluser group in
+	# route_int.conf as well and route.conf matches it; should the firmware ever
+	# rebuild route.conf from it, the companion must already be there. Best
+	# effort: route.conf alone is what makes calls arrive. route_ext.conf is left
+	# alone, as on intercoms where this setup is known to work.
+	if [ -f "${FLEXISIP_ROUTE_INT}" ]; then
+		backup_once "${FLEXISIP_ROUTE_INT}"
+		add_to_alluser "${domain}" "${FLEXISIP_ROUTE_INT}" || warn "Could not add ${SIP_USER} to ${FLEXISIP_ROUTE_INT}; calls still arrive through route.conf."
+	fi
+
+	return 0
+}
+
+# add_to_alluser appends the companion to the alluser group of route file $2.
+add_to_alluser() {
+	domain="$1"
+	route_file="$2"
+	if route_has_companion "${domain}" "${route_file}"; then
+		ok "${SIP_USER} already in the alluser group of ${route_file}."
 		return 0
 	fi
 
-	tmp="${FLEXISIP_ROUTE}.companion.tmp"
-	sed "s|\(<sip:alluser@${domain}>.*\)$|\1, <sip:${SIP_USER}@${domain}>|" "${FLEXISIP_ROUTE}" > "${tmp}"
+	tmp="${route_file}.companion.tmp"
+	sed "s|\(<sip:alluser@${domain}>.*\)$|\1, <sip:${SIP_USER}@${domain}>|" "${route_file}" > "${tmp}"
 
-	# route.conf must stay one line per group; a mangled file breaks the whole
+	# A route file must stay one line per group; a mangled file breaks the whole
 	# intercom, so validate before replacing the original. The count is compared
 	# as a string: grep -c prints 0 and exits 1 with no match, and an empty count
 	# must take the warn branch rather than make [ ] error out.
@@ -298,12 +388,12 @@ provision_flexisip_user() {
 	alluser_lines="$(grep -c "sip:alluser@${domain}" "${tmp}" || true)"
 	if [ "${alluser_lines}" != "1" ] || ! route_has_companion "${domain}" "${tmp}"; then
 		rm -f "${tmp}"
-		warn "route.conf rewrite failed validation; original left untouched."
+		warn "${route_file} rewrite failed validation; original left untouched."
 		return 1
 	fi
 
-	mv "${tmp}" "${FLEXISIP_ROUTE}"
-	log "Added ${SIP_USER}@${domain} to the alluser group"
+	mv "${tmp}" "${route_file}"
+	log "Added ${SIP_USER}@${domain} to the alluser group of ${route_file}"
 
 	return 0
 }
@@ -376,7 +466,9 @@ post_install_checks() {
 	FAILURES=0; pidfile="/var/run/${SERVICE_NAME}.pid"
 	[ -x "${BIN_PATH}" ] && ok "Binary exists: ${BIN_PATH}" || fail "Binary missing or not executable: ${BIN_PATH}"
 	[ -x "${INIT_SCRIPT}" ] && ok "Init script present: ${INIT_SCRIPT}" || fail "Init script missing: ${INIT_SCRIPT}"
-	[ -L "/etc/rc5.d/S99zz${SERVICE_NAME}" ] && ok "Boot symlink present: /etc/rc5.d/S99zz${SERVICE_NAME}" || fail "Boot symlink missing: /etc/rc5.d/S99zz${SERVICE_NAME}"
+	for link in "/etc/rc5.d/S45${SERVICE_NAME}" "/etc/rc5.d/S99zz${SERVICE_NAME}"; do
+		[ -L "${link}" ] && ok "Boot symlink present: ${link}" || fail "Boot symlink missing: ${link}"
+	done
 	if [ -x "${INIT_SCRIPT}" ] && "${INIT_SCRIPT}" status >/dev/null 2>&1; then ok "Service is running"
 	elif [ -f "${pidfile}" ] && pid="$(cat "${pidfile}" 2>/dev/null || true)" && [ -n "${pid}" ] && [ -d "/proc/${pid}" ]; then ok "Service process exists via pidfile ${pidfile} (pid ${pid})"
 	else fail "Service not running"; fi
@@ -392,34 +484,62 @@ post_install_checks() {
 }
 
 resolve_local_install_inputs() {
-	[ -n "$1" ] && [ -f "$1" ] || { log "Missing companion binary for install."; exit 1; }
-	[ -f "$2" ] || { log "Missing init template for install."; exit 1; }
+	[ -n "$1" ] && [ -f "$1" ] || die "Missing companion binary for install."
+	[ -f "$2" ] || die "Missing init template for install."
 	SELECTED_BINARY_PATH="$1"; SELECTED_INIT_TEMPLATE="$2"
 	[ ! -d "${SCRIPT_DIR}/../gst" ] || SELECTED_GST_DIR="${SCRIPT_DIR}/../gst"
 }
 
 download_latest_artifacts() {
-	[ -n "${REPO}" ] || { log "Set COMPANION_RELEASE_REPO to download a release."; exit 1; }
+	[ -n "${REPO}" ] || die "Set COMPANION_RELEASE_REPO to download a release."
 	ROOT="/tmp/companion-install.$$"; mkdir -p "${ROOT}"
 	log "Downloading latest release bundle..."
 	bundle="${ROOT}/${BUNDLE_ASSET}"
-	fetch "${BASE_URL}/${BUNDLE_ASSET}" "${bundle}"
-	expected_sha="$(resolve_bundle_sha)"
-	[ -n "${expected_sha}" ] || { log "Could not resolve expected SHA256 digest for ${BUNDLE_ASSET}."; exit 1; }
+	fetch "${BASE_URL}/${BUNDLE_ASSET}" "${bundle}" || die "Could not download ${BASE_URL}/${BUNDLE_ASSET}."
+	# Under set -e a failed command substitution in an assignment exits on the
+	# spot, so the lookup must not fail for the message below to be reached.
+	expected_sha="$(resolve_bundle_sha || true)"
+	[ -n "${expected_sha}" ] || die "Could not resolve the expected SHA256 digest for ${BUNDLE_ASSET} from ${RELEASE_API}."
 	actual_sha="$(sha256_file "${bundle}")"
-	if [ "${actual_sha}" != "${expected_sha}" ]; then log "SHA256 mismatch for ${BUNDLE_ASSET}. Expected: ${expected_sha}; Actual: ${actual_sha}"; exit 1; fi
-	tar -xzf "${bundle}" -C "${ROOT}"
+	[ "${actual_sha}" = "${expected_sha}" ] || die "SHA256 mismatch for ${BUNDLE_ASSET}. Expected: ${expected_sha}; Actual: ${actual_sha}"
+	tar -xzf "${bundle}" -C "${ROOT}" || die "Could not extract ${BUNDLE_ASSET}."
 	bundle_dir="${ROOT}/companion"
-	[ -f "${bundle_dir}/companion" ] && [ -f "${bundle_dir}/init.d/companion" ] && [ -d "${bundle_dir}/gst" ] || { log "Bundle asset ${BUNDLE_ASSET} not found or incomplete in latest release."; exit 1; }
+	[ -f "${bundle_dir}/companion" ] && [ -f "${bundle_dir}/init.d/companion" ] && [ -d "${bundle_dir}/gst" ] || die "Bundle asset ${BUNDLE_ASSET} not found or incomplete in latest release."
 	chmod 755 "${bundle_dir}/companion" "${bundle_dir}/init.d/companion"
 	SELECTED_BINARY_PATH="${bundle_dir}/companion"; SELECTED_INIT_TEMPLATE="${bundle_dir}/init.d/companion"; SELECTED_GST_DIR="${bundle_dir}/gst"
 }
 
 main() {
-	require_root; log "Starting companion installation"
-	if [ -n "${1:-}" ]; then log "Using local binary input: $1"; resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"; else download_latest_artifacts; fi
-	install_binary "${SELECTED_BINARY_PATH}"; install_gst_runtime "${SELECTED_GST_DIR}"; register_service "${SELECTED_INIT_TEMPLATE}"
-	start_service; setup_sip_inbound; restore_root_ro; post_install_checks
+	require_root
+	acquire_install_lock
+	log "Starting companion installation"
+
+	if [ -n "${1:-}" ]; then
+		CURRENT_STEP="checking the local install inputs"
+		log "Using local binary input: $1"
+		resolve_local_install_inputs "$1" "${LOCAL_INIT_TEMPLATE}"
+	else
+		CURRENT_STEP="downloading the release"
+		download_latest_artifacts
+	fi
+
+	CURRENT_STEP="installing the binary"
+	install_binary "${SELECTED_BINARY_PATH}"
+	CURRENT_STEP="installing the GStreamer runtime"
+	install_gst_runtime "${SELECTED_GST_DIR}"
+	CURRENT_STEP="registering the init service"
+	register_service "${SELECTED_INIT_TEMPLATE}"
+
+	CURRENT_STEP="starting the service"
+	start_service || warn "${SERVICE_NAME} did not start cleanly; see /tmp/${SERVICE_NAME}.log."
+	CURRENT_STEP="provisioning SIP inbound"
+	setup_sip_inbound
+	restore_root_ro
+
+	CURRENT_STEP="running the post-install checks"
+	post_install_checks
+	RUN_FINISHED=1
+	log "Installed version: ${INSTALLED_VERSION}"
 	[ "${POST_CHECK_FAILURES}" -eq 0 ] || { log "Installation finished with ${POST_CHECK_FAILURES} failed check(s)."; exit 1; }
 	log "Installation complete."
 }
