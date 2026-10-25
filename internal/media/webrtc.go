@@ -187,6 +187,9 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 }
 
 // Offer creates an answer that includes every gathered local ICE candidate.
+// A second session for the same entrypoint joins the stream the first one
+// holds: two devices watch together. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
 func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
@@ -199,13 +202,9 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 	s.offerMu.Lock()
 	defer s.offerMu.Unlock()
 
-	entrypoint, previousSessionIDs, err := s.prepareOffer(sessionID, entrypointID)
+	entrypoint, err := s.prepareOffer(sessionID, entrypointID)
 	if err != nil {
 		return "", err
-	}
-
-	for _, previousSessionID := range previousSessionIDs {
-		s.closeSessionWith(previousSessionID, "superseded by successor session", s.coordinator.Handover)
 	}
 
 	session, err := s.newOfferSession(sessionID, entrypointID, iceServers, onLocalCandidate)
@@ -222,7 +221,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		return "", err
 	}
 
-	return s.createOfferAnswer(ctx, session, sessionID, entrypointID, len(previousSessionIDs))
+	return s.createOfferAnswer(ctx, session, sessionID, entrypointID)
 }
 
 func validateOffer(sessionID, entrypointID, offerSDP string, coordinator *StreamCoordinator) error {
@@ -240,34 +239,26 @@ func validateOffer(sessionID, entrypointID, offerSDP string, coordinator *Stream
 	}
 }
 
-func (s *WebRTCService) prepareOffer(sessionID, entrypointID string) (config.Entrypoint, []string, error) {
+func (s *WebRTCService) prepareOffer(sessionID, entrypointID string) (config.Entrypoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return config.Entrypoint{}, nil, ErrWebRTCClosed
+		return config.Entrypoint{}, ErrWebRTCClosed
 	}
 
 	s.prunePendingCandidatesLocked(time.Now())
 
 	entrypoint, found := s.entrypoints[entrypointID]
 	if !found {
-		return config.Entrypoint{}, nil, ErrEntrypointNotFound
+		return config.Entrypoint{}, ErrEntrypointNotFound
 	}
 
 	if _, exists := s.sessions[sessionID]; exists {
-		return config.Entrypoint{}, nil, ErrSessionExists
-	}
-	// HA may create a successor player before its prior player has finished
-	// closing. One intercom source cannot serve both independent leases.
-	previousSessionIDs := make([]string, 0, len(s.sessions))
-	for id, session := range s.sessions {
-		if session.entrypointID == entrypointID {
-			previousSessionIDs = append(previousSessionIDs, id)
-		}
+		return config.Entrypoint{}, ErrSessionExists
 	}
 
-	return entrypoint, previousSessionIDs, nil
+	return entrypoint, nil
 }
 
 func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (*webRTCSession, error) {
@@ -279,6 +270,17 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now(), onLocalCandidate: onLocalCandidate}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
+
+		if state == webrtc.PeerConnectionStateConnected {
+			// The replay at join time ran before SRTP was ready and was dropped.
+			session.mu.Lock()
+			lease := session.lease
+			session.mu.Unlock()
+
+			if lease != nil {
+				go s.coordinator.ReplayKeyframe(lease)
+			}
+		}
 
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			go s.closeSession(sessionID, "peer connection "+state.String())
@@ -388,7 +390,7 @@ func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSes
 	return nil
 }
 
-func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSession, sessionID, entrypointID string, replacedSessions int) (string, error) {
+func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSession, sessionID, entrypointID string) (string, error) {
 	s.logger.DebugContext(ctx, "webrtc source started", "session_id", sessionID, "entrypoint_id", entrypointID)
 
 	answer, err := session.pc.CreateAnswer(nil)
@@ -417,7 +419,7 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 	}
 
 	s.logNegotiatedMedia(ctx, session)
-	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "replaced_sessions", replacedSessions, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
+	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 
 	return local.SDP, nil
 }
@@ -579,6 +581,20 @@ func (s *WebRTCService) Close(sessionID string) error {
 	return nil
 }
 
+// Leave closes a session whose card stepped aside because the call was answered
+// on another device: its consumer leaves the stream without ending the call. It
+// is idempotent like Close. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+func (s *WebRTCService) Leave(sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return ErrSessionIDRequired
+	}
+
+	s.closeSessionWith(sessionID, "client left", s.coordinator.Leave)
+
+	return nil
+}
+
 // AddICECandidate adds a trickled remote candidate to an active session.
 // Offer deliberately remains non-trickle and continues returning a fully
 // gathered answer for existing clients.
@@ -668,8 +684,8 @@ func (s *WebRTCService) closeSession(sessionID, reason string) {
 }
 
 // closeSessionWith is the one close implementation. dropLease says what happens
-// to the stream lease: Release for a consumer that lets go, Handover for one a
-// successor replaces, so that the call the successor adopts is not ended.
+// to the session's hold on the stream: Release for a consumer that lets go,
+// Leave for one that steps aside without ending the call.
 func (s *WebRTCService) closeSessionWith(sessionID, reason string, dropLease func(*StreamLease) bool) {
 	s.mu.Lock()
 

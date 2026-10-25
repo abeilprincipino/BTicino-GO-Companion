@@ -50,7 +50,6 @@ func TestProjector_CallAndPreviewStateMachine(t *testing.T) {
 	assertState(t, projector.Snapshot(), State{
 		Revision:      4,
 		CallState:     CallStateActive,
-		PhysicalRing:  &PhysicalRing{EntrypointID: testEntrypoint},
 		ActiveCall:    &ActiveCall{DialogID: testDialogID, EntrypointID: testEntrypoint},
 		PreviewStream: &PreviewStream{StreamID: testPreviewID, EntrypointID: testEntrypoint},
 	})
@@ -305,5 +304,46 @@ func assertState(t *testing.T, got, want State) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("state = %#v, want %#v", got, want)
+	}
+}
+
+func TestProjector_HangupAfterAnswerGoesIdleNotRinging(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, RingStarted{EntrypointID: testEntrypoint})
+	applyEvent(t, projector, IncomingCallStarted{DialogID: testDialogID, EntrypointID: testEntrypoint})
+	applyEvent(t, projector, CallAnswered{DialogID: testDialogID})
+
+	if ring := projector.Snapshot().PhysicalRing; ring != nil {
+		t.Fatalf("physical ring after the answer = %#v, want nil", ring)
+	}
+
+	// The bus stop frame arrives only after the media stops, so the hangup is
+	// applied while it is still pending.
+	applyEvent(t, projector, CallHungUp{DialogID: testDialogID})
+
+	if state := projector.Snapshot().CallState; state != CallStateIdle {
+		t.Fatalf("call state after hangup = %q, want %q", state, CallStateIdle)
+	}
+
+	// The late stop frame is a no-op.
+	applyEvent(t, projector, RingCleared{EntrypointID: testEntrypoint})
+
+	if state := projector.Snapshot().CallState; state != CallStateIdle {
+		t.Fatalf("call state after the stop frame = %q, want %q", state, CallStateIdle)
+	}
+}
+
+func TestProjector_AnswerKeepsAnotherEntrypointsRing(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, RingStarted{EntrypointID: "side"})
+	applyEvent(t, projector, IncomingCallStarted{DialogID: testDialogID, EntrypointID: testEntrypoint})
+	applyEvent(t, projector, CallAnswered{DialogID: testDialogID})
+
+	if ring := projector.Snapshot().PhysicalRing; ring == nil || ring.EntrypointID != "side" {
+		t.Fatalf("physical ring = %#v, want the side entrypoint's ring kept", ring)
 	}
 }
