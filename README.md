@@ -51,13 +51,13 @@ Connect to the intercom over SSH and run the installer:
 
 ```sh
 ssh root@<intercom-ip>
-wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && sh /tmp/install.sh
+curl -fsSL -o /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && sh /tmp/install.sh
 ```
 
 This installs the latest release. To pin a specific release, set `COMPANION_RELEASE_TAG`:
 
 ```sh
-wget -qO /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v0.7.0 sh /tmp/install.sh
+curl -fsSL -o /tmp/install.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=v0.7.0 sh /tmp/install.sh
 ```
 
 The installer prints `INFO:`, `OK:`, `WARN:` and `FAIL:` lines. A successful run ends with
@@ -249,7 +249,7 @@ cp -f companion.previous companion.new
 Connect to the intercom over SSH and run the uninstaller:
 
 ```sh
-wget -qO /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh
+curl -fsSL -o /tmp/uninstall.sh "https://github.com/abeilprincipino/BTicino-GO-Companion/raw/main/scripts/uninstall.sh" && sh /tmp/uninstall.sh
 ```
 
 It stops the service, removes the init script and its boot links, removes the companion's firewall
