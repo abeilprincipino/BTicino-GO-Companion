@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -154,10 +155,49 @@ func TestClipWriterDropsAnAccessUnitThatGoesBack(t *testing.T) {
 	startTestClip(t, writer, 9000)
 
 	writer.accessUnit(6000, [][]byte{testClipSlice})
+
+	if len(writer.samples) != 1 || writer.droppedAccessUnits != 1 {
+		t.Fatalf("samples = %d, dropped = %d; want 1 and 1", len(writer.samples), writer.droppedAccessUnits)
+	}
+}
+
+func TestClipWriterMergesAccessUnitsWithTheSameTimestamp(t *testing.T) {
+	writer := newTestClipWriter(t)
+	startTestClip(t, writer, 9000)
+
 	writer.accessUnit(9000, [][]byte{testClipSlice})
 
-	if len(writer.samples) != 1 {
-		t.Fatalf("samples = %d, want 1", len(writer.samples))
+	want := append([]byte{0, 0, 0, byte(len(testClipIDR))}, testClipIDR...)
+	want = append(want, 0, 0, 0, byte(len(testClipSlice)))
+	want = append(want, testClipSlice...)
+
+	if len(writer.samples) != 1 || !bytes.Equal(writer.samples[0].payload, want) || !writer.samples[0].idr {
+		t.Fatalf("samples = %+v, want one IDR sample holding both access units", writer.samples)
+	}
+
+	if writer.size != len(want) || writer.droppedAccessUnits != 0 {
+		t.Fatalf("size = %d, dropped = %d; want %d and 0", writer.size, writer.droppedAccessUnits, len(want))
+	}
+
+	// The size cap applies to the merged sample too.
+	big := make([]byte, ringClipMaxBytes)
+	big[0] = 0x41
+
+	if !writer.accessUnit(9000, [][]byte{big}) || len(writer.samples) != 1 || writer.size != len(want) {
+		t.Fatalf("a merge past the size cap was kept: size = %d", writer.size)
+	}
+}
+
+func TestClipWriterCountsRejectedPacketsAndDroppedAccessUnits(t *testing.T) {
+	writer := newTestClipWriter(t)
+
+	// A fragment without its start is rejected; an access unit before the
+	// parameter sets is dropped.
+	writer.push(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 1}, Payload: []byte{0x7c, 0x45, 0x01}})
+	writer.push(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 2, Marker: true}, Payload: testClipSlice})
+
+	if writer.rejectedPackets != 1 || writer.droppedAccessUnits != 1 {
+		t.Fatalf("rejected = %d, dropped = %d; want 1 and 1", writer.rejectedPackets, writer.droppedAccessUnits)
 	}
 }
 
@@ -209,13 +249,13 @@ func TestClipWriterMarshalsAPlayableMP4(t *testing.T) {
 		writer.accessUnit(uint32(i*testClipFrame), [][]byte{testClipSlice}) // #nosec G115 -- small test values.
 	}
 
-	data, err := writer.marshal()
-	if err != nil {
+	var data bytes.Buffer
+	if err := writer.marshalTo(&data); err != nil {
 		t.Fatal(err)
 	}
 
 	var presentation pmp4.Presentation
-	if err := presentation.Unmarshal(bytes.NewReader(data)); err != nil {
+	if err := presentation.Unmarshal(bytes.NewReader(data.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -347,6 +387,77 @@ func TestRingClipRecorderKeepsThePreviousClipWhenTooShort(t *testing.T) {
 	case <-saved:
 		t.Fatal("onSaved called for a discarded clip")
 	default:
+	}
+}
+
+func TestRingClipRecorderSkipsTheClipWhenTheFlashIsFull(t *testing.T) {
+	recorder := NewRingClipRecorder(t.TempDir(), nil)
+	recorder.freeSpace = func(string) (uint64, error) { return 1 << 20, nil }
+
+	saved := make(chan struct{}, 1)
+	recorder.SetOnSaved(func() { saved <- struct{}{} })
+
+	clip := recorder.Start("main")
+	feedTestClip(clip, 60, testClipFrame)
+	clip.Close()
+	waitClipDone(t, clip)
+
+	if _, _, err := recorder.Open("main"); !errors.Is(err, ErrRingClipNotFound) {
+		t.Fatalf("Open error = %v, want ErrRingClipNotFound: no clip is written without room", err)
+	}
+
+	select {
+	case <-saved:
+		t.Fatal("onSaved called for a clip that was not written")
+	default:
+	}
+}
+
+func TestRingClipRecorderWritesTheClipWhenTheFreeSpaceIsUnknown(t *testing.T) {
+	recorder := NewRingClipRecorder(t.TempDir(), nil)
+	recorder.freeSpace = func(string) (uint64, error) { return 0, errors.New("no statfs") }
+
+	clip := recorder.Start("main")
+	feedTestClip(clip, 60, testClipFrame)
+	clip.Close()
+	waitClipDone(t, clip)
+
+	file, _, err := recorder.Open("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = file.Close()
+}
+
+func TestWriteFileAtomicFuncDatesTheFileBeforePublishingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "file.bin")
+	mtime := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+
+	err := writeFileAtomicFunc(path, ".test-*.bin", mtime, func(w io.Writer) error {
+		_, err := w.Write([]byte("content"))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !info.ModTime().Equal(mtime) {
+		t.Fatalf("mtime = %v, want %v", info.ModTime(), mtime)
+	}
+
+	if data, err := os.ReadFile(path); err != nil || string(data) != "content" { // #nosec G304 -- test path.
+		t.Fatalf("content = %q, %v", data, err)
+	}
+
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".test-*.bin"))
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary files left: %v", leftovers)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -326,6 +327,16 @@ func writeSnapshot(path string, image []byte) error {
 // writeFileAtomic writes data to a temporary file named after pattern next to
 // path and renames it over path.
 func writeFileAtomic(path, pattern string, data []byte) error {
+	return writeFileAtomicFunc(path, pattern, time.Time{}, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// writeFileAtomicFunc streams write into a temporary file named after pattern
+// next to path and renames it over path. A non-zero mtime dates the temporary
+// file before the rename, which keeps it, so a reader never sees the write time.
+func writeFileAtomicFunc(path, pattern string, mtime time.Time, write func(io.Writer) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
@@ -338,13 +349,19 @@ func writeFileAtomic(path, pattern string, data []byte) error {
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath) //nolint:errcheck // removed after successful rename too
 
-	if _, err := temporary.Write(data); err != nil {
+	if err := write(temporary); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
 	}
 
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
+	}
+
+	if !mtime.IsZero() {
+		if err := os.Chtimes(temporaryPath, mtime, mtime); err != nil {
+			return fmt.Errorf("date %s: %w", filepath.Base(path), err)
+		}
 	}
 
 	if err := os.Rename(temporaryPath, path); err != nil {

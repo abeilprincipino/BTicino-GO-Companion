@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
@@ -30,6 +32,9 @@ const (
 	// sample of a one-sample clip.
 	ringClipDefaultSampleDuration = 3000
 	ringClipTemporaryPattern      = ".ringclip-*.mp4"
+	// ringClipFreeSpaceReserve is the flash a clip must leave free: the clip is
+	// not written when the directory has less than the clip plus this.
+	ringClipFreeSpaceReserve = 4 << 20
 )
 
 // RingClipRecorder records the first seconds of video of every doorbell ring
@@ -42,6 +47,8 @@ type RingClipRecorder struct {
 	logger  *slog.Logger
 	active  *RingClip
 	onSaved func()
+	// freeSpace reports the free bytes of the filesystem holding dir.
+	freeSpace func(dir string) (uint64, error)
 }
 
 // RingClip is the recording of one ring. Its methods are safe on a nil clip.
@@ -63,7 +70,7 @@ func NewRingClipRecorder(dir string, logger *slog.Logger) *RingClipRecorder {
 		logger = slog.Default()
 	}
 
-	recorder := &RingClipRecorder{dir: dir, logger: logger.With("component", "ring_clip")}
+	recorder := &RingClipRecorder{dir: dir, logger: logger.With("component", "ring_clip"), freeSpace: statfsFreeSpace}
 	recorder.removeLeftovers()
 
 	return recorder
@@ -247,27 +254,23 @@ func (c *RingClip) finish(writer *clipWriter) {
 
 	duration := writer.duration()
 	if duration < ringClipMinDuration {
-		recorder.logger.Debug("ring clip discarded; too short", "entrypoint_id", c.entrypointID, "duration", duration)
+		recorder.logger.Debug("ring clip discarded; too short", "entrypoint_id", c.entrypointID, "duration", duration,
+			"rejected_packets", writer.rejectedPackets, "dropped_access_units", writer.droppedAccessUnits)
+
 		return
 	}
 
-	data, err := writer.marshal()
-	if err != nil {
-		recorder.logger.Warn("encode ring clip", "entrypoint_id", c.entrypointID, "error", err)
+	if !recorder.hasRoomFor(c.path, writer.size) {
 		return
 	}
 
-	if err := writeFileAtomic(c.path, ringClipTemporaryPattern, data); err != nil {
+	if err := writeFileAtomicFunc(c.path, ringClipTemporaryPattern, writer.recordedAt, writer.marshalTo); err != nil {
 		recorder.logger.Warn("publish ring clip", "entrypoint_id", c.entrypointID, "error", err)
 		return
 	}
 
-	// The modification time is the start of the clip: RecordedAt reads it back.
-	if err := os.Chtimes(c.path, writer.recordedAt, writer.recordedAt); err != nil {
-		recorder.logger.Warn("date ring clip", "entrypoint_id", c.entrypointID, "error", err)
-	}
-
-	recorder.logger.Debug("ring clip saved", "entrypoint_id", c.entrypointID, "duration", duration, "bytes", len(data))
+	recorder.logger.Debug("ring clip saved", "entrypoint_id", c.entrypointID, "duration", duration, "bytes", writer.size,
+		"rejected_packets", writer.rejectedPackets, "dropped_access_units", writer.droppedAccessUnits)
 
 	recorder.mu.Lock()
 	callback := recorder.onSaved
@@ -276,6 +279,41 @@ func (c *RingClip) finish(writer *clipWriter) {
 	if callback != nil {
 		callback()
 	}
+}
+
+// hasRoomFor reports whether the flash below path can take a clip of size bytes
+// and still keep ringClipFreeSpaceReserve free. When the free space cannot be
+// read, the clip is written anyway.
+func (r *RingClipRecorder) hasRoomFor(path string, size int) bool {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		r.logger.Warn("create ring clip directory", "path", dir, "error", err)
+		return false
+	}
+
+	free, err := r.freeSpace(dir)
+	if err != nil {
+		r.logger.Debug("ring clip free space unknown", "path", dir, "error", err)
+		return true
+	}
+
+	needed := uint64(size) + ringClipFreeSpaceReserve // #nosec G115 -- size is never negative.
+	if free < needed {
+		r.logger.Warn("ring clip not saved; not enough free space", "path", dir, "free_bytes", free, "needed_bytes", needed)
+		return false
+	}
+
+	return true
+}
+
+// statfsFreeSpace is the free space available to an unprivileged writer.
+func statfsFreeSpace(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, fmt.Errorf("statfs %s: %w", dir, err)
+	}
+
+	return uint64(st.Bavail) * uint64(st.Bsize), nil // #nosec G115 -- both are non-negative block counts and sizes.
 }
 
 // clipWriter turns the intercom's H.264 RTP into the samples of one clip. One
@@ -288,6 +326,11 @@ type clipWriter struct {
 	recordedAt     time.Time
 	samples        []clipSample
 	size           int
+	// rejectedPackets counts packets the depacketizer refused with an error
+	// other than a request for more packets; droppedAccessUnits counts access
+	// units left out of the clip. Both help to bring up a new intercom.
+	rejectedPackets    int
+	droppedAccessUnits int
 }
 
 type clipSample struct {
@@ -311,6 +354,10 @@ func (w *clipWriter) push(packet *rtp.Packet) bool {
 	if err != nil {
 		// More packets needed, a fragment without its start, or a broken access
 		// unit: none ends the clip, the next access unit may be fine.
+		if !errors.Is(err, rtph264.ErrMorePacketsNeeded) {
+			w.rejectedPackets++
+		}
+
 		return false
 	}
 
@@ -354,6 +401,7 @@ func (w *clipWriter) accessUnit(timestamp uint32, accessUnit [][]byte) bool {
 		}
 
 		if !idr || w.sps == nil || w.pps == nil {
+			w.droppedAccessUnits++
 			return false
 		}
 
@@ -366,6 +414,7 @@ func (w *clipWriter) accessUnit(timestamp uint32, accessUnit [][]byte) bool {
 	}
 
 	if len(nalus) == 0 {
+		w.droppedAccessUnits++
 		return false
 	}
 
@@ -375,17 +424,31 @@ func (w *clipWriter) accessUnit(timestamp uint32, accessUnit [][]byte) bool {
 		return true
 	}
 
-	if n := len(w.samples); n > 0 && pts <= w.samples[n-1].pts {
+	n := len(w.samples)
+	if n > 0 && pts < w.samples[n-1].pts {
+		w.droppedAccessUnits++
 		return false
 	}
 
 	payload, err := h264.AVCC(nalus).Marshal()
 	if err != nil {
+		w.droppedAccessUnits++
 		return false
 	}
 
 	if w.size+len(payload) > ringClipMaxBytes {
 		return true
+	}
+
+	// Two access units with one timestamp are one frame split by the camera:
+	// they share a sample.
+	if n > 0 && pts == w.samples[n-1].pts {
+		last := &w.samples[n-1]
+		last.payload = append(last.payload, payload...)
+		last.idr = last.idr || idr
+		w.size += len(payload)
+
+		return false
 	}
 
 	w.samples = append(w.samples, clipSample{pts: pts, payload: payload, idr: idr})
@@ -415,7 +478,8 @@ func (w *clipWriter) duration() time.Duration {
 	return ticksToDuration(w.samples[n-1].pts + w.sampleDuration(n-1))
 }
 
-func (w *clipWriter) marshal() ([]byte, error) {
+// marshalTo writes the clip as an MP4 to dst.
+func (w *clipWriter) marshalTo(dst io.Writer) error {
 	samples := make([]*pmp4.Sample, len(w.samples))
 	for i, sample := range w.samples {
 		samples[i] = &pmp4.Sample{
@@ -433,12 +497,11 @@ func (w *clipWriter) marshal() ([]byte, error) {
 		Samples:   samples,
 	}}}
 
-	var buffer bytes.Buffer
-	if err := presentation.Marshal(&buffer); err != nil {
-		return nil, fmt.Errorf("marshal ring clip: %w", err)
+	if err := presentation.Marshal(dst); err != nil {
+		return fmt.Errorf("marshal ring clip: %w", err)
 	}
 
-	return buffer.Bytes(), nil
+	return nil
 }
 
 func ticksToDuration(ticks int64) time.Duration {
