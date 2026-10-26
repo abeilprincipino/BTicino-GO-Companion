@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -320,41 +321,74 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 // writeSnapshot publishes image at path atomically: a reader sees the old file
 // or the new one, never a partial JPEG.
 func writeSnapshot(path string, image []byte) error {
+	return writeFileAtomic(path, ".snapshot-*.jpg", image)
+}
+
+// writeFileAtomic writes data to a temporary file named after pattern next to
+// path and renames it over path.
+func writeFileAtomic(path, pattern string, data []byte) error {
+	return writeFileAtomicFunc(path, pattern, time.Time{}, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// writeFileAtomicFunc streams write into a temporary file named after pattern
+// next to path and renames it over path. A non-zero mtime dates the temporary
+// file before the rename, which keeps it, so a reader never sees the write time.
+func writeFileAtomicFunc(path, pattern string, mtime time.Time, write func(io.Writer) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create snapshot directory: %w", err)
+		return fmt.Errorf("create directory: %w", err)
 	}
 
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".snapshot-*.jpg")
+	temporary, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
-		return fmt.Errorf("create snapshot file: %w", err)
+		return fmt.Errorf("create temporary file: %w", err)
 	}
 
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath) //nolint:errcheck // removed after successful rename too
 
-	if _, err := temporary.Write(image); err != nil {
+	if err := write(temporary); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("write snapshot: %w", err)
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
 	}
 
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close snapshot: %w", err)
+		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
+	}
+
+	if !mtime.IsZero() {
+		if err := os.Chtimes(temporaryPath, mtime, mtime); err != nil {
+			return fmt.Errorf("date %s: %w", filepath.Base(path), err)
+		}
 	}
 
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("rename snapshot: %w", err)
+		return fmt.Errorf("rename %s: %w", filepath.Base(path), err)
 	}
 
 	return nil
 }
 
 func (s *SnapshotManager) path(entrypointID string) (string, bool) {
+	name, ok := entrypointFileName(entrypointID)
+	if !ok {
+		return "", false
+	}
+
+	return filepath.Join(s.dir, "snapshots", name+".jpg"), true
+}
+
+// entrypointFileName is the entrypoint id as a file name, refused when it could
+// leave its directory.
+func entrypointFileName(entrypointID string) (string, bool) {
 	entrypointID = strings.TrimSpace(entrypointID)
 	if entrypointID == "" || entrypointID == "." || entrypointID == ".." || filepath.Base(entrypointID) != entrypointID || strings.ContainsRune(entrypointID, filepath.Separator) {
 		return "", false
 	}
 
-	return filepath.Join(s.dir, "snapshots", entrypointID+".jpg"), true
+	return entrypointID, true
 }
 
 // ringPath is the doorbell picture of an entrypoint. It lives in its own

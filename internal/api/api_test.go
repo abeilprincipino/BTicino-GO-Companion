@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1170,3 +1171,104 @@ func (failingConn) RemoteAddr() net.Addr             { return nil }
 func (failingConn) SetDeadline(time.Time) error      { return nil }
 func (failingConn) SetReadDeadline(time.Time) error  { return nil }
 func (failingConn) SetWriteDeadline(time.Time) error { return nil }
+
+type ringClipRecorder struct {
+	path       string
+	recordedAt time.Time
+	err        error
+}
+
+func (r ringClipRecorder) Open(string) (*os.File, time.Time, error) {
+	if r.err != nil {
+		return nil, time.Time{}, r.err
+	}
+
+	file, err := os.Open(r.path) // #nosec G304 -- test path.
+
+	return file, r.recordedAt, err
+}
+
+func (r ringClipRecorder) RecordedAt(string) time.Time { return r.recordedAt }
+
+func TestServer_RingClip(t *testing.T) {
+	server, _ := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "main.mp4")
+
+	if err := os.WriteFile(path, []byte("mp4-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server.SetRingClips(ringClipRecorder{path: path, recordedAt: time.Date(2026, 10, 26, 9, 30, 0, 0, time.UTC)})
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v3/entrypoints/main/clip/ring.mp4", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "video/mp4" || response.Body.String() != "mp4-bytes" {
+		t.Fatalf("ring clip response = %d, headers = %#v, body = %q", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestServer_RingClipNotFoundAndUnauthorized(t *testing.T) {
+	server, _ := newTestServer(t)
+	server.SetRingClips(ringClipRecorder{err: media.ErrRingClipNotFound})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v3/entrypoints/main/clip/ring.mp4", nil)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated ring clip response = %d, want 401", response.Code)
+	}
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing ring clip response = %d, want 404", response.Code)
+	}
+}
+
+func TestServer_StateCarriesRingClipTime(t *testing.T) {
+	server, store := newTestServer(t)
+	server.SetRingClips(ringClipRecorder{recordedAt: time.Date(2026, 10, 26, 9, 30, 0, 123456789, time.UTC)})
+
+	token, err := auth.NewStore(store).RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v3/state", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	var body struct {
+		State struct {
+			Entrypoints []map[string]any `json:"entrypoints"`
+		} `json:"state"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || len(body.State.Entrypoints) != 1 {
+		t.Fatalf("state response = %s", response.Body.String())
+	}
+
+	if got := body.State.Entrypoints[0]["ring_clip_recorded_at"]; got != "2026-10-26T09:30:00.123Z" {
+		t.Fatalf("ring_clip_recorded_at = %#v, want 2026-10-26T09:30:00.123Z", got)
+	}
+}

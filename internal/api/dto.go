@@ -32,6 +32,7 @@ type EntrypointDTO struct {
 
 	SnapshotUpdatedAt     *time.Time `json:"snapshot_updated_at,omitempty"`
 	RingSnapshotUpdatedAt *time.Time `json:"ring_snapshot_updated_at,omitempty"`
+	RingClipRecordedAt    *time.Time `json:"ring_clip_recorded_at,omitempty"`
 }
 
 type CapabilityDTO struct {

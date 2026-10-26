@@ -301,3 +301,27 @@ func writeJPEG(w http.ResponseWriter, image []byte) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(image)
 }
+
+// ringClip serves the video recorded at the last doorbell ring.
+func (s *Server) ringClip(w http.ResponseWriter, r *http.Request) {
+	if s.ringClips == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "ring clip is unavailable")
+		return
+	}
+
+	file, recordedAt, err := s.ringClips.Open(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, media.ErrRingClipNotFound) {
+			writeError(w, http.StatusNotFound, "ring_clip_not_found", "ring clip is not available yet")
+			return
+		}
+
+		writeCommandError(w, err)
+
+		return
+	}
+	defer file.Close() //nolint:errcheck // read-only file
+
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, "ring.mp4", recordedAt, file)
+}

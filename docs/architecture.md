@@ -243,7 +243,7 @@ Unauthenticated: `GET health`, `GET auth/status`, `POST pair/challenge`, `POST p
 | State | `GET state`, `GET diagnostics` |
 | System | `GET system/update/status`, `POST system/update/{check,stage,install}`, `POST system/reboot`, `POST system/services/{name}/restart` |
 | Control | `POST entrypoints/{id}/unlock`, `POST audio/{mute,unmute}`, `POST voicemail/{enable,disable,refresh}` |
-| Streams | `GET ws`, `GET webrtc/ws`, `GET entrypoints/{id}/snapshot/latest.jpg` |
+| Streams | `GET ws`, `GET webrtc/ws`, `GET entrypoints/{id}/snapshot/{latest,ring}.jpg`, `GET entrypoints/{id}/clip/ring.mp4` |
 
 Unmatched `/api/v3/` paths hit an explicit `notFound` rather than falling through to static.
 

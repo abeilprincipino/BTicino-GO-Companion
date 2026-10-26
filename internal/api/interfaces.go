@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/system"
 	"context"
+	"os"
 	"time"
 )
 
@@ -48,6 +49,13 @@ type SnapshotControl interface {
 	Latest(entrypointID string) ([]byte, error)
 	LatestRing(entrypointID string) ([]byte, error)
 	UpdatedAt(entrypointID string) (latest, ring time.Time)
+}
+
+// RingClipControl serves the clip recorded at the last doorbell ring. See
+// docs/superpowers/specs/2026-10-26-ring-clip-design.md.
+type RingClipControl interface {
+	Open(entrypointID string) (*os.File, time.Time, error)
+	RecordedAt(entrypointID string) time.Time
 }
 
 type CallControl interface {
