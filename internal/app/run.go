@@ -138,7 +138,7 @@ func run(
 	// The ring holder sits inside routeRingingPreview, so on the answer the
 	// preview is promoted before the holder leaves the stream. See
 	// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(string) ringClip { return (*media.RingClip)(nil) }, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
+	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(entrypointID string) ringClip { return runtime.ringClips.Start(entrypointID) }, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
 	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
 
 	if runtime.inboundSIP {
@@ -276,6 +276,7 @@ type applicationRuntime struct {
 	mdns              *discovery.Service
 	homeKit           *homekit.Manager
 	server            *api.Server
+	ringClips         *media.RingClipRecorder
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
 	dialer            interface {
@@ -383,6 +384,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	trace := openwebnet.NewTrace(0)
 	control := openwebnet.NewControl(initialConfig.Companion.Entrypoints, trace)
 	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
+	ringClips := media.NewRingClipRecorder(system.CompanionDataDir, logger)
 
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
 		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots)
@@ -461,6 +463,8 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	server.SetWebRTC(webrtc)
 	server.SetSnapshot(snapshots)
 	snapshots.SetOnCaptured(server.BroadcastState)
+	server.SetRingClips(ringClips)
+	ringClips.SetOnSaved(server.BroadcastState)
 	server.SetRuntime(rt)
 	server.SetUpdate(updater)
 	diagnosticService := diagnostics.New(control, initialConfig.Companion.Model, server.BroadcastState)
@@ -475,6 +479,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 
 	return &applicationRuntime{
 		projector:         projector,
+		ringClips:         ringClips,
 		trace:             trace,
 		control:           control,
 		rtspServer:        rtspServer,

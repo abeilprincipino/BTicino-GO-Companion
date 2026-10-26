@@ -37,6 +37,7 @@ type Server struct {
 	webrtcClients    clientSet
 	webrtc           WebRTCControl
 	snapshot         SnapshotControl
+	ringClips        RingClipControl
 	runtime          RuntimeControl
 	update           UpdateControl
 	call             CallControl
@@ -61,11 +62,12 @@ func (s *Server) SetVoicemail(v VoicemailControl)    { s.voicemail = v }
 func (s *Server) SetVoicemailRefresh(refresh func(context.Context) (bool, error)) {
 	s.refreshVoicemail = refresh
 }
-func (s *Server) SetWebRTC(v WebRTCControl)     { s.webrtc = v }
-func (s *Server) SetSnapshot(v SnapshotControl) { s.snapshot = v }
-func (s *Server) SetRuntime(v RuntimeControl)   { s.runtime = v }
-func (s *Server) SetUpdate(v UpdateControl)     { s.update = v }
-func (s *Server) SetCall(v CallControl)         { s.call = v }
+func (s *Server) SetWebRTC(v WebRTCControl)      { s.webrtc = v }
+func (s *Server) SetSnapshot(v SnapshotControl)  { s.snapshot = v }
+func (s *Server) SetRingClips(v RingClipControl) { s.ringClips = v }
+func (s *Server) SetRuntime(v RuntimeControl)    { s.runtime = v }
+func (s *Server) SetUpdate(v UpdateControl)      { s.update = v }
+func (s *Server) SetCall(v CallControl)          { s.call = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
@@ -108,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	s.handleProtected(mux, "GET", "/api/v3/webrtc/ws", s.webrtcWebsocket)
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/latest.jpg", s.snapshotLatest)
 	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/snapshot/ring.jpg", s.snapshotRing)
+	s.handleProtected(mux, "GET", "/api/v3/entrypoints/{id}/clip/ring.mp4", s.ringClip)
 	mux.HandleFunc("/api/v3/", s.notFound)
 
 	return logging.HTTP(s.logger, mux)
@@ -363,6 +366,18 @@ func (s *Server) withSnapshotTimes(dto EntrypointDTO) EntrypointDTO {
 	return dto
 }
 
+// withRingClipTime adds when the last doorbell clip of the entrypoint was
+// recorded. Home Assistant archives a clip when this changes.
+func (s *Server) withRingClipTime(dto EntrypointDTO) EntrypointDTO {
+	if s.ringClips == nil {
+		return dto
+	}
+
+	dto.RingClipRecordedAt = optionalTime(s.ringClips.RecordedAt(dto.ID))
+
+	return dto
+}
+
 // optionalTime drops sub-millisecond digits, which Python's parser before 3.11
 // rejects and nobody needs, and turns the zero time into an omitted field.
 func optionalTime(value time.Time) *time.Time {
@@ -385,7 +400,7 @@ func (s *Server) currentPayload() StateDTO {
 
 		dto.Entrypoints = make([]EntrypointDTO, 0, len(cfg.Companion.Entrypoints))
 		for _, entrypoint := range cfg.Companion.Entrypoints {
-			dto.Entrypoints = append(dto.Entrypoints, s.withSnapshotTimes(entrypointDTO(entrypoint, s.entrypoints != nil)))
+			dto.Entrypoints = append(dto.Entrypoints, s.withRingClipTime(s.withSnapshotTimes(entrypointDTO(entrypoint, s.entrypoints != nil))))
 		}
 
 		dto.SystemControl.RebootEnabled = cfg.System.RebootEnabled && s.runtime != nil && s.runtime.RebootAvailable()
