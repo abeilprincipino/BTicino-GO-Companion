@@ -138,7 +138,7 @@ func run(
 	// The ring holder sits inside routeRingingPreview, so on the answer the
 	// preview is promoted before the holder leaves the stream. See
 	// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-	holder := newRingHolder(runtime.rtspServer.Coordinator(), func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
+	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(string) ringClip { return (*media.RingClip)(nil) }, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
 	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
 
 	if runtime.inboundSIP {
