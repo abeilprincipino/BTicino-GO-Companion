@@ -221,6 +221,120 @@ func TestStoreUpdateIsAtomicAndValidated(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateKeepsStreamAndRingExclusive(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	set := func(entrypoints ...Entrypoint) error {
+		return store.Update(func(cfg *Config) error {
+			cfg.Companion.Entrypoints = entrypoints
+			return nil
+		})
+	}
+
+	doorbell := Entrypoint{ID: "ingresso", Label: "Ingresso", DevAddr: "20", Capabilities: Capabilities{Stream: true, Unlock: true, Ring: true}}
+	lights := Entrypoint{ID: "luci", Label: "Luci", DevAddr: "21", Capabilities: Capabilities{Unlock: true}}
+
+	if err := set(doorbell, lights); err != nil {
+		t.Fatalf("one doorbell entrypoint rejected: %v", err)
+	}
+
+	second := lights
+	second.Capabilities = Capabilities{Stream: true, Ring: true}
+
+	if err := set(doorbell, second); !errors.Is(err, ErrExclusiveCapability) {
+		t.Fatalf("second doorbell: error = %v, want %v", err, ErrExclusiveCapability)
+	}
+
+	for _, capabilities := range []Capabilities{{Stream: true}, {Ring: true}} {
+		split := lights
+		split.Capabilities = capabilities
+
+		if err := set(split); !errors.Is(err, ErrSplitDoorbell) {
+			t.Fatalf("entrypoint with %+v: error = %v, want %v", capabilities, err, ErrSplitDoorbell)
+		}
+	}
+}
+
+func TestStoreUpdateMakesAddress20TheDoorbellWhenNoneStreams(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Companion.Entrypoints = []Entrypoint{
+			{ID: "luci", Label: "Luci", DevAddr: "21", Capabilities: Capabilities{Unlock: true}},
+			{ID: "pappagallo", Label: "Ingresso", DevAddr: "20", Capabilities: Capabilities{Unlock: true}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	entrypoints := store.Snapshot().Companion.Entrypoints
+	if got := entrypoints[1].Capabilities; !got.Stream || !got.Ring || !got.Unlock {
+		t.Fatalf("entrypoint at 20 capabilities = %+v, want stream, ring and unlock", got)
+	}
+
+	if got := entrypoints[0].Capabilities; got.Stream || got.Ring {
+		t.Fatalf("entrypoint at 21 capabilities = %+v, want unlock only", got)
+	}
+
+	// Without an entrypoint at 20 nothing is assigned.
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Companion.Entrypoints = []Entrypoint{{ID: "luci", Label: "Luci", DevAddr: "21", Capabilities: Capabilities{Unlock: true}}}
+		return nil
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	if got := store.Snapshot().Companion.Entrypoints[0].Capabilities; got.Stream || got.Ring {
+		t.Fatalf("capabilities = %+v, want unlock only", got)
+	}
+}
+
+func TestDoorbellEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	lock := Entrypoint{ID: "luci", DevAddr: "21", Capabilities: Capabilities{Unlock: true}}
+
+	tests := []struct {
+		name        string
+		entrypoints []Entrypoint
+		want        string
+	}{
+		{"streaming entrypoint, any name", []Entrypoint{lock, {ID: "pappagallo", Capabilities: Capabilities{Stream: true, Ring: true}}}, "pappagallo"},
+		{"stream wins over ring", []Entrypoint{{ID: "a", Capabilities: Capabilities{Ring: true}}, {ID: "b", Capabilities: Capabilities{Stream: true}}}, "b"},
+		{"ring when nothing streams", []Entrypoint{lock, {ID: "a", Capabilities: Capabilities{Ring: true}}}, "a"},
+		{"two streams are ambiguous", []Entrypoint{{ID: "a", Capabilities: Capabilities{Stream: true}}, {ID: "b", Capabilities: Capabilities{Stream: true}}}, ""},
+		{"locks only", []Entrypoint{lock}, ""},
+	}
+
+	for _, test := range tests {
+		got, ok := DoorbellEntrypoint(test.entrypoints)
+		if ok != (test.want != "") || got.ID != test.want {
+			t.Errorf("%s: DoorbellEntrypoint() = %q/%t, want %q", test.name, got.ID, ok, test.want)
+		}
+	}
+}
+
 func TestHomeKitPINGeneratedAndValidated(t *testing.T) {
 	t.Parallel()
 

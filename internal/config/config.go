@@ -10,6 +10,7 @@ import (
 	"maps"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -399,6 +400,16 @@ func (s *Store) Update(update func(*Config) error) error {
 		return err
 	}
 
+	// Only an edit of the entrypoints is held to the rule, so an older config
+	// that breaks it can still save pairing, HomeKit or any other section.
+	if !slices.Equal(s.cfg.Companion.Entrypoints, next.Companion.Entrypoints) {
+		assignDefaultDoorbell(next.Companion.Entrypoints)
+
+		if err := validateExclusiveCapabilities(next.Companion.Entrypoints); err != nil {
+			return err
+		}
+	}
+
 	if err := save(s.path, next, false); err != nil {
 		return err
 	}
@@ -414,6 +425,97 @@ func (s *Store) ApplyMetadata(metadata Metadata) error {
 	defer s.mu.Unlock()
 
 	return ApplyMetadata(&s.cfg, metadata)
+}
+
+// DoorbellEntrypoint returns the entrypoint every ring and inbound call belongs
+// to: the only one that can stream, since the call is only useful where its
+// picture is, or else the only one that can ring. It reports false when
+// neither is unique, and the caller must then fall back to the frame address.
+func DoorbellEntrypoint(entrypoints []Entrypoint) (Entrypoint, bool) {
+	for _, capable := range []func(Capabilities) bool{
+		func(c Capabilities) bool { return c.Stream },
+		func(c Capabilities) bool { return c.Ring },
+	} {
+		var (
+			found Entrypoint
+			count int
+		)
+
+		for _, entrypoint := range entrypoints {
+			if capable(entrypoint.Capabilities) {
+				found = entrypoint
+				count++
+			}
+		}
+
+		if count == 1 {
+			return found, true
+		}
+
+		if count > 1 {
+			return Entrypoint{}, false
+		}
+	}
+
+	return Entrypoint{}, false
+}
+
+var (
+	// ErrExclusiveCapability rejects a second doorbell entrypoint: the intercom
+	// has one camera and one doorbell call, so either would become ambiguous.
+	ErrExclusiveCapability = errors.New("only one entrypoint may be the doorbell")
+
+	// ErrSplitDoorbell rejects ring without stream or stream without ring: the
+	// ringing preview adopts the call of the entrypoint it streams, so the two
+	// only work together.
+	ErrSplitDoorbell = errors.New("stream and ring must be enabled together")
+)
+
+// DefaultDoorbellDevAddr is the address of the main external unit on a BTicino
+// installation, the one the seeded entrypoint uses.
+const DefaultDoorbellDevAddr = "20"
+
+// assignDefaultDoorbell makes the entrypoint at DefaultDoorbellDevAddr the
+// doorbell when an edit leaves no entrypoint able to stream, so a save never
+// drops the camera and the ring by accident. It changes nothing when no
+// entrypoint has that address.
+func assignDefaultDoorbell(entrypoints []Entrypoint) {
+	for _, entrypoint := range entrypoints {
+		if entrypoint.Capabilities.Stream {
+			return
+		}
+	}
+
+	for i := range entrypoints {
+		if strings.TrimSpace(entrypoints[i].DevAddr) == DefaultDoorbellDevAddr {
+			entrypoints[i].Capabilities.Stream = true
+			entrypoints[i].Capabilities.Ring = true
+
+			return
+		}
+	}
+}
+
+// validateExclusiveCapabilities runs on save only, not in Validate: a
+// config.yaml written before the rule existed must still load.
+func validateExclusiveCapabilities(entrypoints []Entrypoint) error {
+	doorbells := 0
+
+	for _, entrypoint := range entrypoints {
+		if entrypoint.Capabilities.Stream != entrypoint.Capabilities.Ring {
+			return fmt.Errorf("entrypoint %q: %w", entrypoint.ID, ErrSplitDoorbell)
+		}
+
+		if entrypoint.Capabilities.Ring {
+			doorbells++
+		}
+	}
+
+	if doorbells > 1 {
+		return ErrExclusiveCapability
+	}
+
+	return nil
 }
 
 func Validate(cfg Config) error {

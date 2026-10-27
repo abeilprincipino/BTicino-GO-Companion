@@ -295,9 +295,12 @@ type applicationRuntime struct {
 }
 
 // newInboundEntrypointResolver attributes an inbound SIP call to an entrypoint.
-// The in-flight physical ring is the strongest signal; a single configured
-// entrypoint is the safe fallback. Ambiguity is reported as "unattributable"
-// so the manager rejects the call rather than inventing state.
+// The doorbell entrypoint, when the configuration names exactly one, always
+// wins: the call is only useful where its picture is, and an entrypoint that is
+// only a lock or a light may share an address with the ring frame. Otherwise
+// the in-flight physical ring is the strongest signal and a single configured
+// entrypoint the safe fallback. Ambiguity is reported as "unattributable" so
+// the manager rejects the call rather than inventing state.
 //
 // It runs with the manager's state lock held, so it is a side-effect-free
 // lookup and nothing more: two snapshot reads, each taking a lock of its own
@@ -306,6 +309,10 @@ type applicationRuntime struct {
 func newInboundEntrypointResolver(entrypoints func() []config.Entrypoint, projector *core.Projector) signaling.EntrypointResolver {
 	return func() (core.EntrypointID, string) {
 		configured := entrypoints()
+
+		if doorbell, ok := config.DoorbellEntrypoint(configured); ok {
+			return core.EntrypointID(doorbell.ID), doorbell.DevAddr
+		}
 
 		if ring := projector.Snapshot().PhysicalRing; ring != nil {
 			for _, entrypoint := range configured {
