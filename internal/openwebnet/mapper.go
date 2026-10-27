@@ -14,12 +14,19 @@ type Mapper struct {
 	entrypoints      map[string]core.EntrypointID
 	recentFrames     map[string]time.Time
 	activeEntrypoint core.EntrypointID
+	// doorbell is config.DoorbellEntrypoint, if the configuration names one:
+	// every ring is its, whatever address the frame carries.
+	doorbell core.EntrypointID
 }
 
 func NewMapper(entrypoints []config.Entrypoint) *Mapper {
 	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time)}
 	for _, entrypoint := range entrypoints {
 		m.entrypoints[entrypoint.DevAddr] = core.EntrypointID(entrypoint.ID)
+	}
+
+	if doorbell, ok := config.DoorbellEntrypoint(entrypoints); ok {
+		m.doorbell = core.EntrypointID(doorbell.ID)
 	}
 
 	return m
@@ -105,8 +112,21 @@ func (m *Mapper) duplicate(raw string, now time.Time) bool {
 	return false
 }
 
+// resolveEntrypoint gives a ring frame to the doorbell entrypoint when the
+// configuration names one: an entrypoint that is only a lock or a light may
+// share its devaddr with an address in the frame. Otherwise the frame
+// *8*1#<mode>#4#<a>*<b>## is matched to a configured devaddr, trying <b>, then
+// <a>, which is where a view request carries the external unit.
 func (m *Mapper) resolveEntrypoint(frame string) core.EntrypointID {
+	if m.doorbell != "" {
+		return m.doorbell
+	}
+
 	if id := m.entrypoints[ExtractAddress(frame)]; id != "" {
+		return id
+	}
+
+	if id := m.entrypoints[extractViewRequestAddress(frame)]; id != "" {
 		return id
 	}
 

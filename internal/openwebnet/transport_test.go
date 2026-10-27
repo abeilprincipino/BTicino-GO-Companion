@@ -44,6 +44,41 @@ func TestMapperIgnoresUnknownEntrypoint(t *testing.T) {
 	}
 }
 
+func TestMapperResolvesExternalUnitAddressInEitherSlot(t *testing.T) {
+	entrypoints := []config.Entrypoint{{ID: "ingresso", DevAddr: "20"}, {ID: "luci", DevAddr: "21"}, {ID: "cancello", DevAddr: "22"}}
+
+	for _, frame := range []string{"*8*1#1#4#11*20##", "*8*1#1#4#20*11##"} {
+		events := NewMapper(entrypoints).Map(Message{System: "OPEN", Raw: frame})
+		if len(events) != 1 {
+			t.Fatalf("%s: events = %d, want 1", frame, len(events))
+		}
+
+		if ring, ok := events[0].(core.RingStarted); !ok || ring.EntrypointID != "ingresso" {
+			t.Fatalf("%s: event = %#v, want RingStarted for ingresso", frame, events[0])
+		}
+	}
+}
+
+func TestMapperGivesEveryRingToTheDoorbellEntrypoint(t *testing.T) {
+	entrypoints := []config.Entrypoint{
+		{ID: "main", DevAddr: "20", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "luci", DevAddr: "21", Capabilities: config.Capabilities{Unlock: true}},
+		{ID: "cancello", DevAddr: "22", Capabilities: config.Capabilities{Unlock: true}},
+	}
+
+	// 21 is luci's devaddr, but a light cannot be the doorbell.
+	for _, frame := range []string{"*8*1#1#4#20*21##", "*8*1#1#4#10*99##"} {
+		events := NewMapper(entrypoints).Map(Message{System: "OPEN", Raw: frame})
+		if len(events) != 1 {
+			t.Fatalf("%s: events = %d, want 1", frame, len(events))
+		}
+
+		if ring, ok := events[0].(core.RingStarted); !ok || ring.EntrypointID != "main" {
+			t.Fatalf("%s: event = %#v, want RingStarted for main", frame, events[0])
+		}
+	}
+}
+
 func TestMapperMapsAudioStateFrames(t *testing.T) {
 	mapper := NewMapper(nil)
 

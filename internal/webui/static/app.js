@@ -765,7 +765,31 @@ function renderEntrypointsConfig() {
   var html = '';
   for (var i = 0; i < list.length; i++) html += entrypointCardHTML(list[i], i);
   document.getElementById('entrypointsList').innerHTML = html || '<div class="card dummy-content"><h2>No Entrypoints</h2><p>Add one to expose a gate.</p></div>';
+  syncExclusiveCapabilities();
   setStatus('entrypointsStatus', '');
+}
+
+// Doorbell (ring and stream together) belongs to one entrypoint only: while one
+// card has it checked, the box is disabled elsewhere.
+var EXCLUSIVE_CAPABILITIES = ['ep-has-doorbell'];
+var DEFAULT_DOORBELL_DEVADDR = '20';
+
+function syncExclusiveCapabilities() {
+  EXCLUSIVE_CAPABILITIES.forEach(function(cls) {
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('.entrypoint-card .' + cls));
+    var holder = boxes.filter(function(box) { return box.checked; })[0];
+    boxes.forEach(function(box) {
+      var locked = !!holder && box !== holder && !box.checked;
+      box.disabled = locked;
+      box.title = locked ? 'Already assigned to another entrypoint' : '';
+    });
+  });
+}
+
+// isDoorbell also accepts a config saved before ring and stream were merged,
+// where only one of the two may be set; saving then sets both.
+function isDoorbell(ep) {
+  return !!(ep.capabilities && (ep.capabilities.ring || ep.capabilities.stream));
 }
 
 function entrypointCardHTML(ep, idx) {
@@ -780,21 +804,22 @@ function entrypointCardHTML(ep, idx) {
     + '</div>'
     + '<div class="form-group"><label class="form-label">Device Address</label><input class="form-input ep-devaddr" type="text" value="' + escapeHtml(ep.devaddr || ep.dev_addr || '') + '" required></div>'
     + '<div class="form-check-row">'
-      + checkboxHTML('ep-stream-' + idx, 'ep-has-stream', 'Stream', !!(ep.capabilities && ep.capabilities.stream))
+      + checkboxHTML('ep-doorbell-' + idx, 'ep-has-doorbell', 'Doorbell (ring + stream)', isDoorbell(ep))
       + checkboxHTML('ep-unlock-' + idx, 'ep-has-unlock', 'Unlock', !!(ep.capabilities && ep.capabilities.unlock))
-      + checkboxHTML('ep-ring-' + idx, 'ep-has-ring', 'Ring', !!(ep.capabilities && ep.capabilities.ring))
     + '</div>'
     + '</div>';
 }
 
 function checkboxHTML(id, cls, label, checked) {
-  return '<div class="form-check"><input type="checkbox" class="' + cls + '" id="' + id + '"' + (checked ? ' checked' : '') + '><label for="' + id + '">' + label + '</label></div>';
+  var sync = EXCLUSIVE_CAPABILITIES.indexOf(cls) >= 0 ? ' onchange="syncExclusiveCapabilities()"' : '';
+  return '<div class="form-check"><input type="checkbox" class="' + cls + '" id="' + id + '"' + (checked ? ' checked' : '') + sync + '><label for="' + id + '">' + label + '</label></div>';
 }
 
 function addEntrypointCard() {
   var cfg = ensureCompanionConfig();
   cfg.entrypoints = collectEntrypoints();
-  cfg.entrypoints.push({ id: 'gate' + (cfg.entrypoints.length + 1), label: 'Gate ' + (cfg.entrypoints.length + 1), devaddr: '', capabilities: { stream: true, unlock: true, ring: true } });
+  var doorbell = !cfg.entrypoints.some(isDoorbell);
+  cfg.entrypoints.push({ id: 'gate' + (cfg.entrypoints.length + 1), label: 'Gate ' + (cfg.entrypoints.length + 1), devaddr: '', capabilities: { stream: doorbell, unlock: true, ring: doorbell } });
   renderEntrypointsConfig();
 }
 
@@ -813,14 +838,15 @@ function collectEntrypoints() {
   var cards = document.querySelectorAll('.entrypoint-card');
   var out = [];
   cards.forEach(function(card) {
+    var doorbell = card.querySelector('.ep-has-doorbell').checked;
     out.push({
       id: card.querySelector('.ep-id').value.trim(),
       label: card.querySelector('.ep-label').value.trim(),
       devaddr: card.querySelector('.ep-devaddr').value.trim(),
       capabilities: {
-        stream: card.querySelector('.ep-has-stream').checked,
+        stream: doorbell,
         unlock: card.querySelector('.ep-has-unlock').checked,
-        ring: card.querySelector('.ep-has-ring').checked
+        ring: doorbell
       }
     });
   });
@@ -838,6 +864,19 @@ function saveEntrypointsConfig(saveBtn) {
     if (!cfg.entrypoints[i].id || !cfg.entrypoints[i].label || !cfg.entrypoints[i].devaddr) {
       setStatus('entrypointsStatus', 'ID, label, and device address are required.', 'var(--danger)');
       return;
+    }
+  }
+  if (cfg.entrypoints.filter(isDoorbell).length > 1) {
+    setStatus('entrypointsStatus', 'Only one entrypoint may be the doorbell.', 'var(--danger)');
+    return;
+  }
+  // Mirrors the server: with no doorbell, the entrypoint at address 20 becomes it.
+  if (!cfg.entrypoints.some(isDoorbell)) {
+    var main = cfg.entrypoints.filter(function(ep) { return ep.devaddr === DEFAULT_DOORBELL_DEVADDR; })[0];
+    if (main) {
+      main.capabilities.stream = true;
+      main.capabilities.ring = true;
+      renderEntrypointsConfig();
     }
   }
   saveConfig(document.getElementById('entrypointsStatus'), saveBtn).catch(function(err) { handleApiError(err); });
