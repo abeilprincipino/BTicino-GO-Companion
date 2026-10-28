@@ -45,6 +45,14 @@ func BuildUnlockClose(devAddr string) string {
 	return fmt.Sprintf("*8*20*%s##", strings.TrimSpace(devAddr))
 }
 
+func BuildAuxiliaryOpen(devAddr string) string {
+	return fmt.Sprintf("*8*21*%s##", strings.TrimSpace(devAddr))
+}
+
+func BuildAuxiliaryClose(devAddr string) string {
+	return fmt.Sprintf("*8*22*%s##", strings.TrimSpace(devAddr))
+}
+
 func BuildAVAddStreamVideo(ip string, port int, highRes bool) string {
 	quality := "1"
 	if highRes {

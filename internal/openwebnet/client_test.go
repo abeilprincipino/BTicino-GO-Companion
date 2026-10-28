@@ -5,6 +5,7 @@ import (
 	"bticino-go-companion/internal/core"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"testing"
@@ -215,3 +216,82 @@ func errUnexpectedFrame(frame string, err error) error {
 type unexpectedFrameError struct{ frame string }
 
 func (e *unexpectedFrameError) Error() string { return "unexpected frame: " + e.frame }
+
+func TestControlUnlockUsesEntrypointCommandsAndDuration(t *testing.T) {
+	for _, test := range []struct {
+		id       core.EntrypointID
+		open     string
+		close    string
+		duration time.Duration
+	}{
+		{"pedonale", "*8*19*20##", "*8*20*20##", 2 * time.Second},
+		{"carrabile", "*8*21*10##", "*8*22*10##", time.Second},
+	} {
+		t.Run(string(test.id), func(t *testing.T) {
+			t.Parallel()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer listener.Close()
+			done := make(chan error, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer conn.Close()
+				if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					done <- err
+					return
+				}
+				reader := &frameReader{conn: conn}
+				var openedAt time.Time
+				for index, want := range []string{FrameSessionStartCmd, test.open, test.close} {
+					frame, err := reader.read()
+					if err != nil {
+						done <- err
+						return
+					}
+					if frame != want {
+						done <- fmt.Errorf("frame %d = %q, want %q", index, frame, want)
+						return
+					}
+					if index == 1 {
+						openedAt = time.Now()
+					}
+					if index == 2 {
+						elapsed := time.Since(openedAt)
+						// send() also waits briefly for any follow-up response after
+						// ACK. Allow scheduler overhead without accepting a 2s pulse
+						// for the auxiliary entrypoint configured for 1s.
+						if elapsed < test.duration || elapsed >= test.duration+900*time.Millisecond {
+							done <- fmt.Errorf("pulse = %s, want at least %s and less than %s", elapsed, test.duration, test.duration+900*time.Millisecond)
+							return
+						}
+					}
+					if _, err := conn.Write([]byte(FrameACK)); err != nil {
+						done <- err
+						return
+					}
+				}
+				done <- nil
+			}()
+
+			host, portText, _ := net.SplitHostPort(listener.Addr().String())
+			port, _ := strconv.Atoi(portText)
+			control := NewControl([]config.Entrypoint{
+				{ID: "pedonale", DevAddr: "20"},
+				{ID: "carrabile", DevAddr: "10", UnlockMode: config.UnlockModeAuxiliary, UnlockDurationMS: 1000},
+			}, nil)
+			control.host, control.port = host, port
+			if err := control.Unlock(context.Background(), test.id); err != nil {
+				t.Errorf("Unlock(%q): %v", test.id, err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("server: %v", err)
+			}
+		})
+	}
+}

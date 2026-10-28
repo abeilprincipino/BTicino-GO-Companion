@@ -12,6 +12,8 @@ func TestFrameBuilders(t *testing.T) {
 	}{
 		{name: "unlock open trims address", got: BuildUnlockOpen(" 21 "), want: "*8*19*21##"},
 		{name: "unlock close", got: BuildUnlockClose("21"), want: "*8*20*21##"},
+		{name: "auxiliary open trims address", got: BuildAuxiliaryOpen(" 10 "), want: "*8*21*10##"},
+		{name: "auxiliary close trims address", got: BuildAuxiliaryClose(" 10 "), want: "*8*22*10##"},
 		{name: "high resolution video", got: BuildStreamStartVideo(5007), want: "*7*300#127#0#0#1#5007#0*##"},
 		{name: "low resolution video", got: BuildAVAddStreamVideo("192.168.1.5", 10002, false), want: "*7*300#192#168#1#5#10002#1*##"},
 		{name: "audio", got: BuildStreamStartAudio(5000), want: "*7*300#127#0#0#1#5000#2*##"},

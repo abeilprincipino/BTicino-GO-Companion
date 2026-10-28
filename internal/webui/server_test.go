@@ -239,6 +239,68 @@ func TestConfigIsRedactedAndSavedThroughStore(t *testing.T) {
 	}
 }
 
+func TestEntrypointAuxiliaryOptionsRoundTripAndRejectInvalidChanges(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServer(t, nil)
+	cookie := configuredSession(t, server)
+	before := store.Snapshot()
+
+	response := request(t, server, http.MethodGet, "/webui/api/config/entrypoints", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("read configuration = %d: %s", response.Code, response.Body.String())
+	}
+	var editable intercomConfig
+	decodeResponse(t, response, &editable)
+	editable.Entrypoints = append(editable.Entrypoints, config.Entrypoint{
+		ID: "carrabile", Label: "Carrabile", DevAddr: "10",
+		UnlockMode: "auxiliary", UnlockDurationMS: 1000,
+		Capabilities: config.Capabilities{Unlock: true},
+	})
+
+	response = request(t, server, http.MethodPut, "/webui/api/config/entrypoints", editable, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save auxiliary configuration = %d: %s", response.Code, response.Body.String())
+	}
+	response = request(t, server, http.MethodGet, "/webui/api/config/entrypoints", nil, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("read saved configuration = %d: %s", response.Code, response.Body.String())
+	}
+	var saved intercomConfig
+	decodeResponse(t, response, &saved)
+	if len(saved.Entrypoints) != 2 || saved.Entrypoints[0] != before.Companion.Entrypoints[0] || saved.Entrypoints[1] != editable.Entrypoints[1] {
+		t.Fatalf("saved entrypoints = %#v", saved.Entrypoints)
+	}
+
+	for _, test := range []struct {
+		name     string
+		mode     string
+		duration int
+	}{
+		{name: "unknown mode", mode: "other", duration: 1000},
+		{name: "negative duration", mode: "auxiliary", duration: -1},
+		{name: "duration above limit", mode: "auxiliary", duration: 2001},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := editable
+			invalid.Entrypoints = append([]config.Entrypoint(nil), editable.Entrypoints...)
+			invalid.Entrypoints[1].UnlockMode = test.mode
+			invalid.Entrypoints[1].UnlockDurationMS = test.duration
+			response := request(t, server, http.MethodPut, "/webui/api/config/entrypoints", invalid, cookie)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("invalid configuration = %d: %s", response.Code, response.Body.String())
+			}
+			after := store.Snapshot()
+			if after.Companion.Entrypoints[1] != editable.Entrypoints[1] {
+				t.Fatal("rejected change modified the saved auxiliary configuration")
+			}
+			if after.Auth.BearerTokenHash != before.Auth.BearerTokenHash || after.Auth.PairingState != before.Auth.PairingState || after.WebUI.SessionSecret != before.WebUI.SessionSecret {
+				t.Fatal("entrypoint update changed authentication or session settings")
+			}
+		})
+	}
+}
+
 func TestHomeKitConfigExposesPairingDetailsAndSavesBridgeSettings(t *testing.T) {
 	t.Parallel()
 
