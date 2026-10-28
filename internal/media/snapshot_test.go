@@ -70,8 +70,8 @@ func TestSnapshotManagerFeedsTheDecoderFromTheFirstKeyframeAsAnnexB(t *testing.T
 	}
 }
 
-// The VPU gives no picture of a keyframe alone: the decoder keeps getting the
-// frames after it until the JPEG comes out.
+// The decoder keeps getting the frames after the keyframe until the JPEG comes
+// out.
 func TestSnapshotManagerKeepsFeedingFramesUntilTheDecoderMakesAPicture(t *testing.T) {
 	image := []byte{0xff, 0xd8, 5, 0xff, 0xd9}
 	runner := &fakeSnapshotRunner{output: image, pictureAfter: 3}

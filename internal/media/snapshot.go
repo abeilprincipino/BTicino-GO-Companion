@@ -50,8 +50,8 @@ var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 // the first keyframe on, as Annex-B access units on stdin, then takes the first
 // JPEG from stdout: no frame before the keyframe is decoded, nothing is lost to
 // a decoder not yet listening, and the picture is read the moment it is
-// written. The decoder keeps getting frames after the keyframe because the VPU
-// gives no picture of a keyframe followed by the end of the stream.
+// written. The decoder keeps getting frames after the keyframe, so one that
+// holds a picture back until more input arrives still gives it.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -541,7 +541,10 @@ type gstreamerSnapshotRunner struct{}
 
 func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, error) {
 	command := exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", // #nosec G204 -- fixed executable and pipeline.
-		"fdsrc", "fd=0", "!", "video/x-h264,stream-format=byte-stream", "!", "h264parse", "!", "imxvpudec", "!",
+		// No caps filter after fdsrc: GStreamer 1.12 on the intercom refuses
+		// partial caps there ("Filter caps do not completely specify the
+		// output format"), and h264parse detects the byte-stream itself.
+		"fdsrc", "fd=0", "!", "h264parse", "!", "imxvpudec", "!",
 		"jpegenc", "quality=90", "!", "fdsink", "fd=1",
 	)
 
