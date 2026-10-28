@@ -156,6 +156,12 @@ func run(
 			logger.Debug("openwebnet av frame", "frame", frame)
 		}
 
+		// Whether the indoor unit streams to its own display before it accepts
+		// the companion's request: the loopback traffic says it.
+		if openwebnet.IsRingStart(frame) {
+			media.ProbeLoopbackStreams(ctx, logger, 6*time.Second)
+		}
+
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
 			rtspServer.ObserveControlTrack(true)
