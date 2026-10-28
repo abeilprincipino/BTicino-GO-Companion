@@ -12,12 +12,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-var ErrUpdateUnavailable = errors.New("system: update control is unavailable")
+var (
+	ErrUpdateUnavailable       = errors.New("system: update control is unavailable")
+	ErrReleaseNotFound         = errors.New("system: release is not a published pre-release")
+	ErrReleaseAlreadyInstalled = errors.New("system: release is already installed")
+)
+
+const (
+	UpdateChannelStable = "stable"
+	UpdateChannelBeta   = "beta"
+)
 
 const (
 	companionAssetName  = "companion.tar.gz"
@@ -51,12 +62,22 @@ type RestartFunc func(context.Context) error
 type UpdatePolicy struct {
 	Enabled bool
 	Exposed bool
+	Channel string
 	DataDir string
+}
+
+func (p UpdatePolicy) channel() string {
+	if p.Channel == UpdateChannelBeta {
+		return UpdateChannelBeta
+	}
+
+	return UpdateChannelStable
 }
 
 type UpdateStatus struct {
 	Enabled         bool   `json:"enabled"`
 	Exposed         bool   `json:"exposed"`
+	Channel         string `json:"channel"`
 	CurrentVersion  string `json:"current_version"`
 	LatestVersion   string `json:"latest_version,omitempty"`
 	UpdateAvailable bool   `json:"update_available"`
@@ -66,8 +87,16 @@ type UpdateStatus struct {
 	Error           string `json:"error,omitempty"`
 }
 
+// Prerelease is one entry of the Beta channel listing.
+type Prerelease struct {
+	Version     string    `json:"version"`
+	PublishedAt time.Time `json:"published_at"`
+	Installed   bool      `json:"installed"`
+}
+
 type ReleaseSource interface {
 	Latest(context.Context) (ReleaseManifest, error)
+	List(context.Context) ([]ReleaseManifest, error)
 	Download(context.Context, ReleaseAsset) (io.ReadCloser, error)
 }
 
@@ -95,7 +124,7 @@ func (u *Updater) Status(_ context.Context) (UpdateStatus, error) {
 
 	policy := u.currentPolicy()
 
-	status := UpdateStatus{Enabled: policy.Enabled, Exposed: policy.Exposed, CurrentVersion: u.build.Version}
+	status := UpdateStatus{Enabled: policy.Enabled, Exposed: policy.Exposed, Channel: policy.channel(), CurrentVersion: u.build.Version}
 	if strings.TrimSpace(u.build.ReleaseRepo) == "" {
 		status.Exposed = false
 		status.Stage = "unavailable"
@@ -185,41 +214,15 @@ func (u *Updater) Stage(ctx context.Context) (UpdateStatus, error) {
 		return u.Status(ctx)
 	}
 
-	asset, err := manifest.Asset(companionAssetName)
-	if err != nil {
-		u.setError(err)
-		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
-
-		return UpdateStatus{}, err
-	}
-
-	body, err := u.source.Download(ctx, asset)
-	if err != nil {
-		u.setError(err)
-		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
-
-		return UpdateStatus{}, err
-	}
-	defer body.Close() //nolint:errcheck // read error is returned below
-
-	policy := u.currentPolicy()
-	if err := stageArchive(ctx, body, asset.Digest, policy.DataDir); err != nil {
-		u.setError(err)
-		u.logger.ErrorContext(ctx, "update staging failed", "target_version", manifest.TagName, "error", err)
-
+	if err := u.stageManifest(ctx, manifest); err != nil {
 		return UpdateStatus{}, err
 	}
 
 	u.mu.Lock()
-	u.latest, u.staged, u.err = manifest.TagName, manifest.TagName, nil
+	u.latest = manifest.TagName
 	u.mu.Unlock()
 
-	status, err := u.Status(ctx)
-	if err == nil {
-		u.logger.InfoContext(ctx, "update staged", "target_version", manifest.TagName)
-	}
-
-	return status, err
+	return u.Status(ctx)
 }
 
 // Install stages the newest release and restarts after the caller receives its response.
@@ -237,6 +240,124 @@ func (u *Updater) Install(ctx context.Context) (UpdateStatus, error) {
 		return status, nil
 	}
 
+	u.restartLater(ctx, status.StagedVersion)
+
+	return status, nil
+}
+
+// Prereleases lists the published pre-releases newest first, marking the running one.
+func (u *Updater) Prereleases(ctx context.Context) ([]Prerelease, error) {
+	if err := u.available(); err != nil {
+		return nil, err
+	}
+
+	manifests, err := u.prereleaseManifests(ctx)
+	if err != nil {
+		u.logger.WarnContext(ctx, "pre-release list failed", "error", err)
+		return nil, err
+	}
+
+	prereleases := make([]Prerelease, 0, len(manifests))
+	for _, manifest := range manifests {
+		prereleases = append(prereleases, Prerelease{Version: manifest.TagName, PublishedAt: manifest.PublishedAt, Installed: manifest.TagName == u.build.Version})
+	}
+
+	return prereleases, nil
+}
+
+// InstallVersion stages the named pre-release, older ones included, and
+// restarts after the caller receives its response.
+func (u *Updater) InstallVersion(ctx context.Context, version string) (UpdateStatus, error) {
+	if u == nil || u.restart == nil {
+		return UpdateStatus{}, ErrUpdateUnavailable
+	}
+
+	if err := u.available(); err != nil {
+		return UpdateStatus{}, err
+	}
+
+	if version == u.build.Version {
+		return UpdateStatus{}, ErrReleaseAlreadyInstalled
+	}
+
+	manifests, err := u.prereleaseManifests(ctx)
+	if err != nil {
+		return UpdateStatus{}, u.stageFailed(ctx, version, err)
+	}
+
+	index := slices.IndexFunc(manifests, func(manifest ReleaseManifest) bool { return manifest.TagName == version })
+	if index < 0 {
+		return UpdateStatus{}, ErrReleaseNotFound
+	}
+
+	u.logger.InfoContext(ctx, "pre-release staging started", "current_version", u.build.Version, "target_version", version)
+
+	if err := u.stageManifest(ctx, manifests[index]); err != nil {
+		return UpdateStatus{}, err
+	}
+
+	status, err := u.Status(ctx)
+	if err != nil {
+		return UpdateStatus{}, err
+	}
+
+	u.restartLater(ctx, status.StagedVersion)
+
+	return status, nil
+}
+
+func (u *Updater) prereleaseManifests(ctx context.Context) ([]ReleaseManifest, error) {
+	manifests, err := u.source.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	prereleases := make([]ReleaseManifest, 0, len(manifests))
+	for _, manifest := range manifests {
+		if manifest.Prerelease && semverPattern.MatchString(manifest.TagName) {
+			prereleases = append(prereleases, manifest)
+		}
+	}
+
+	sort.SliceStable(prereleases, func(i, j int) bool { return newerVersion(prereleases[i].TagName, prereleases[j].TagName) })
+
+	return prereleases, nil
+}
+
+// stageManifest downloads, verifies and stages the companion binary of manifest.
+func (u *Updater) stageManifest(ctx context.Context, manifest ReleaseManifest) error {
+	asset, err := manifest.Asset(companionAssetName)
+	if err != nil {
+		return u.stageFailed(ctx, manifest.TagName, err)
+	}
+
+	body, err := u.source.Download(ctx, asset)
+	if err != nil {
+		return u.stageFailed(ctx, manifest.TagName, err)
+	}
+	defer body.Close() //nolint:errcheck // read error is returned below
+
+	if err := stageArchive(ctx, body, asset.Digest, u.currentPolicy().DataDir); err != nil {
+		return u.stageFailed(ctx, manifest.TagName, err)
+	}
+
+	u.mu.Lock()
+	u.staged, u.err = manifest.TagName, nil
+	u.mu.Unlock()
+
+	u.logger.InfoContext(ctx, "update staged", "target_version", manifest.TagName)
+
+	return nil
+}
+
+func (u *Updater) stageFailed(ctx context.Context, version string, err error) error {
+	u.setError(err)
+	u.logger.ErrorContext(ctx, "update staging failed", "target_version", version, "error", err)
+
+	return err
+}
+
+func (u *Updater) restartLater(ctx context.Context, version string) {
 	go func() {
 		time.Sleep(restartDelay)
 
@@ -245,15 +366,13 @@ func (u *Updater) Install(ctx context.Context) (UpdateStatus, error) {
 
 		if err := u.restart(restartCtx); err != nil {
 			u.setError(fmt.Errorf("restart companion: %w", err))
-			u.logger.Error("update restart failed", "staged_version", status.StagedVersion, "error", err)
+			u.logger.Error("update restart failed", "staged_version", version, "error", err)
 
 			return
 		}
 
-		u.logger.Info("update restart dispatched", "staged_version", status.StagedVersion)
+		u.logger.Info("update restart dispatched", "staged_version", version)
 	}()
-
-	return status, nil
 }
 
 func (u *Updater) available() error {
