@@ -1,20 +1,25 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/rtp"
 )
+
+const snapshotTestPoll = 20 * time.Millisecond
+
+var annexBStartCode = []byte{0, 0, 0, 1}
 
 func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 	image := []byte{0xff, 0xd8, 1, 2, 3, 0xff, 0xd9}
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
-		return &fakeSnapshotProcess{}, os.WriteFile(output, append([]byte("noise"), image...), 0o600)
-	}))
+	runner := &fakeSnapshotRunner{output: append([]byte("noise"), image...)}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
 	captured := make(chan struct{}, 1)
 
 	manager.SetOnCaptured(func() { captured <- struct{}{} })
@@ -24,7 +29,7 @@ func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 		t.Fatal("Arm() = nil")
 	}
 
-	attempt.Consume(testRTPPacket(1))
+	feedSnapshotKeyframe(attempt, 0, 0)
 
 	got := waitForSnapshot(t, manager, "front-door")
 	if string(got) != string(image) {
@@ -42,25 +47,54 @@ func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 	}
 }
 
-func TestSnapshotManagerDoesNotPublishCancelledGeneration(t *testing.T) {
-	started := make(chan struct{})
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(ctx context.Context, output string) (snapshotProcess, error) {
-		close(started)
-
-		go func() {
-			<-ctx.Done()
-
-			_ = os.WriteFile(output, []byte{0xff, 0xd8, 1, 0xff, 0xd9}, 0o600)
-		}()
-
-		return &fakeSnapshotProcess{}, nil
-	}))
-
+func TestSnapshotManagerDecodesTheFirstKeyframeAloneAsAnnexB(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: []byte{0xff, 0xd8, 1, 0xff, 0xd9}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
 	attempt := manager.Arm("front-door")
 
-	<-started
+	// A frame before the keyframe cannot be decoded and must not reach the
+	// decoder.
+	attempt.Consume(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 1, Timestamp: 0, Marker: true}, Payload: testClipSlice})
+	feedSnapshotKeyframe(attempt, 1, 3000)
+	waitForSnapshot(t, manager, "front-door")
+
+	inputs := runner.decoded()
+	if len(inputs) != 1 {
+		t.Fatalf("decoder received %d access units, want 1", len(inputs))
+	}
+
+	want := bytes.Join([][]byte{nil, testClipSPS, testClipPPS, testClipIDR, snapshotAccessUnitDelimiter}, annexBStartCode)
+	if !bytes.Equal(inputs[0], want) {
+		t.Fatalf("decoder input = %x, want %x", inputs[0], want)
+	}
+}
+
+func TestSnapshotManagerTriesTheNextKeyframeWhenTheDecoderMakesNoPicture(t *testing.T) {
+	image := []byte{0xff, 0xd8, 9, 0xff, 0xd9}
+	runner := &fakeSnapshotRunner{outputs: [][]byte{[]byte("no picture"), image}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+	attempt := manager.Arm("front-door")
+
+	feedSnapshotKeyframe(attempt, 0, 0)
+	feedSnapshotKeyframe(attempt, 3, 3000)
+
+	if got := waitForSnapshot(t, manager, "front-door"); string(got) != string(image) {
+		t.Fatalf("Latest() = %v, want %v", got, image)
+	}
+
+	if started := runner.startCount(); started != 2 {
+		t.Fatalf("decoders started = %d, want 2", started)
+	}
+}
+
+func TestSnapshotManagerDoesNotPublishCancelledGeneration(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: []byte{0xff, 0xd8, 1, 0xff, 0xd9}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+
+	attempt := manager.Arm("front-door")
 	attempt.Close()
-	time.Sleep(2 * snapshotPollInterval)
+	feedSnapshotKeyframe(attempt, 0, 0)
+	time.Sleep(5 * snapshotTestPoll)
 
 	if _, err := manager.Latest("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
 		t.Fatalf("Latest() error = %v, want %v", err, ErrSnapshotNotFound)
@@ -81,6 +115,17 @@ func TestSnapshotManagerRejectsUnsafeEntrypointFilename(t *testing.T) {
 	}
 }
 
+// feedSnapshotKeyframe sends SPS, PPS and an IDR as single-NAL packets, the
+// IDR closing the access unit.
+func feedSnapshotKeyframe(attempt *snapshotAttempt, sequence uint16, timestamp uint32) {
+	for i, nalu := range [][]byte{testClipSPS, testClipPPS, testClipIDR} {
+		attempt.Consume(&rtp.Packet{
+			Header:  rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: sequence + uint16(i), Timestamp: timestamp, Marker: i == 2}, // #nosec G115 -- small test values.
+			Payload: nalu,
+		})
+	}
+}
+
 func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string) []byte {
 	t.Helper()
 
@@ -90,7 +135,7 @@ func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string
 			return image
 		}
 
-		time.Sleep(snapshotPollInterval)
+		time.Sleep(snapshotTestPoll)
 	}
 
 	t.Fatal("snapshot was not published")
@@ -98,20 +143,58 @@ func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string
 	return nil
 }
 
-type snapshotRunnerFunc func(context.Context, string) (snapshotProcess, error)
+// fakeSnapshotRunner starts decoders that record their input and answer with
+// output, or with the next of outputs, one per decoder.
+type fakeSnapshotRunner struct {
+	mu      sync.Mutex
+	output  []byte
+	outputs [][]byte
+	starts  int
+	inputs  [][]byte
+}
 
-func (f snapshotRunnerFunc) Start(ctx context.Context, output string) (snapshotProcess, error) {
-	return f(ctx, output)
+func (r *fakeSnapshotRunner) Start(context.Context) (snapshotProcess, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	output := r.output
+	if r.starts < len(r.outputs) {
+		output = r.outputs[r.starts]
+	}
+
+	r.starts++
+
+	return &fakeSnapshotProcess{runner: r, output: output}, nil
+}
+
+func (r *fakeSnapshotRunner) decoded() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([][]byte(nil), r.inputs...)
+}
+
+func (r *fakeSnapshotRunner) startCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.starts
 }
 
 type fakeSnapshotProcess struct {
-	once sync.Once
+	runner *fakeSnapshotRunner
+	output []byte
 }
 
-func (p *fakeSnapshotProcess) Close() error {
-	p.once.Do(func() {})
-	return nil
+func (p *fakeSnapshotProcess) Decode(_ context.Context, accessUnit []byte) ([]byte, error) {
+	p.runner.mu.Lock()
+	p.runner.inputs = append(p.runner.inputs, bytes.Clone(accessUnit))
+	p.runner.mu.Unlock()
+
+	return p.output, nil
 }
+
+func (p *fakeSnapshotProcess) Close() error { return nil }
 
 func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string) []byte {
 	t.Helper()
@@ -122,7 +205,7 @@ func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID st
 			return image
 		}
 
-		time.Sleep(snapshotPollInterval)
+		time.Sleep(snapshotTestPoll)
 	}
 
 	t.Fatal("ring snapshot was not published")
@@ -132,15 +215,13 @@ func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID st
 
 func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 	image := []byte{0xff, 0xd8, 7, 0xff, 0xd9}
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
-		return &fakeSnapshotProcess{}, os.WriteFile(output, image, 0o600)
-	}))
+	manager := newSnapshotManager(t.TempDir(), nil, &fakeSnapshotRunner{output: image})
 
 	if latest, ring := manager.UpdatedAt("front-door"); !latest.IsZero() || !ring.IsZero() {
 		t.Fatalf("UpdatedAt() before any capture = %v, %v, want zero", latest, ring)
 	}
 
-	manager.Arm("front-door").Consume(testRTPPacket(1))
+	feedSnapshotKeyframe(manager.Arm("front-door"), 0, 0)
 	waitForSnapshot(t, manager, "front-door")
 
 	if _, err := manager.LatestRing("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
@@ -149,7 +230,7 @@ func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 
 	attempt := manager.Arm("front-door")
 	attempt.MarkRing()
-	attempt.Consume(testRTPPacket(2))
+	feedSnapshotKeyframe(attempt, 0, 0)
 
 	if got := waitForRingSnapshot(t, manager, "front-door"); string(got) != string(image) {
 		t.Fatalf("LatestRing() = %v, want %v", got, image)

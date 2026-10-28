@@ -65,16 +65,44 @@ func TestAVClientUsesObservedFlowAfterNACK(t *testing.T) {
 }
 
 func TestAVClientBoundsRejectedAttempts(t *testing.T) {
-	server := newAVTestServer(t, FrameNACK, FrameNACK, FrameNACK)
+	server := newAVTestServer(t, FrameNACK)
 	client := newAVTestClient(server)
+
+	started := time.Now()
 
 	err := client.Start(context.Background(), false, testAVPorts, &testFlowProbe{}, &testFlowProbe{})
 	if !errors.Is(err, ErrAVCommandRejected) {
 		t.Fatalf("start error = %v, want rejected command", err)
 	}
 
-	if got := len(server.Frames()); got != 3 {
-		t.Fatalf("attempts = %d, want 3", got)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("start gave up after %v, want about the %v retry window", elapsed, client.retryWindow)
+	}
+
+	if got := len(server.Frames()); got < 2 {
+		t.Fatalf("attempts = %d, want the request repeated within the window", got)
+	}
+}
+
+// The intercom refuses video until its own stream is up: the request is
+// repeated until it is accepted, however many refusals come first.
+func TestAVClientRetriesUntilTheIntercomAccepts(t *testing.T) {
+	server := newAVTestServer(t, FrameNACK, FrameNACK, FrameNACK, FrameNACK, FrameNACK, FrameACK)
+	client := newAVTestClient(server)
+	client.retryWindow = 5 * time.Second
+	video := &testFlowProbe{}
+	server.onFrame = func(count int) {
+		if count == 6 {
+			video.flowing = true
+		}
+	}
+
+	if err := client.StartVideo(context.Background(), false, testAVPorts.Video, video); err != nil {
+		t.Fatalf("StartVideo after five refusals: %v", err)
+	}
+
+	if got := len(server.Frames()); got != 6 {
+		t.Fatalf("attempts = %d, want 6", got)
 	}
 }
 
@@ -129,8 +157,11 @@ func (s *avTestServer) handle(conn net.Conn) {
 	s.mu.Lock()
 	s.frames = append(s.frames, string(buf[:n]))
 	count := len(s.frames)
+	// The last reply repeats once the others are used up.
 	reply := s.replies[0]
-	s.replies = s.replies[1:]
+	if len(s.replies) > 1 {
+		s.replies = s.replies[1:]
+	}
 	onFrame := s.onFrame
 	s.mu.Unlock()
 
@@ -153,6 +184,7 @@ func newAVTestClient(server *avTestServer) *AVClient {
 	client := NewAVClient(nil)
 	client.address = net.JoinHostPort("127.0.0.1", port)
 	client.retryDelay = time.Millisecond
+	client.retryWindow = 50 * time.Millisecond
 	client.flowTimeout = 20 * time.Millisecond
 	client.flowPoll = time.Millisecond
 

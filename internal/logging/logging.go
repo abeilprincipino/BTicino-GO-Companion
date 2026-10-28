@@ -132,7 +132,7 @@ func (h *humanHandler) Enabled(_ context.Context, level slog.Level) bool {
 
 func (h *humanHandler) Handle(_ context.Context, record slog.Record) error {
 	var line strings.Builder
-	line.WriteString(record.Time.Local().Format("2006-01-02 15:04:05"))
+	line.WriteString(record.Time.Local().Format("2006-01-02 15:04:05.000"))
 	line.WriteByte(' ')
 	line.WriteString(shortLevel(record.Level))
 	line.WriteByte(' ')
