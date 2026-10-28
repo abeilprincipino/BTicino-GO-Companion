@@ -82,6 +82,9 @@ Decisions taken with the user:
 
 - `System.UpdateChannel string`, persisted as `system.updates.channel`.
 - Load: empty → `stable`. Defaults: `stable`.
+- The loader rejects unknown keys (`KnownFields(true)`), so an older build would refuse a config
+  carrying `channel`. The key is written **only when it is `beta`** (`omitempty`, stable encoded
+  as empty): a Stable config stays readable by every build.
 - `Validate`: value must be `stable` or `beta`.
 - `run.go` passes it into `UpdatePolicy.Channel`.
 
