@@ -36,11 +36,6 @@ type AVClient struct {
 	flowTimeout  time.Duration
 	flowPoll     time.Duration
 	flowWindow   time.Duration
-	// readiness, when set, holds a ringing preview's first video request until
-	// the intercom has announced the ring's video parameters, for at most
-	// readinessWait.
-	readiness     *AVReadiness
-	readinessWait time.Duration
 }
 
 func NewAVClient(logger *slog.Logger) *AVClient {
@@ -49,22 +44,16 @@ func NewAVClient(logger *slog.Logger) *AVClient {
 	}
 
 	return &AVClient{
-		logger:        logger.With("component", "media.activation"),
-		address:       net.JoinHostPort(AVHost, "30007"),
-		retryWindow:   6 * time.Second,
-		dialTimeout:   2 * time.Second,
-		replyTimeout:  2 * time.Second,
-		retryDelay:    100 * time.Millisecond,
-		flowTimeout:   1200 * time.Millisecond,
-		flowPoll:      100 * time.Millisecond,
-		flowWindow:    2 * time.Second,
-		readinessWait: time.Second,
+		logger:       logger.With("component", "media.activation"),
+		address:      net.JoinHostPort(AVHost, "30007"),
+		retryWindow:  6 * time.Second,
+		dialTimeout:  2 * time.Second,
+		replyTimeout: 2 * time.Second,
+		retryDelay:   100 * time.Millisecond,
+		flowTimeout:  1200 * time.Millisecond,
+		flowPoll:     100 * time.Millisecond,
+		flowWindow:   2 * time.Second,
 	}
-}
-
-// SetReadiness makes StartVideo wait for the ring's video parameters.
-func (c *AVClient) SetReadiness(readiness *AVReadiness) {
-	c.readiness = readiness
 }
 
 // Start requests video then audio. Each request must receive an ACK or be
@@ -95,14 +84,6 @@ func (c *AVClient) StartVideo(ctx context.Context, highRes bool, port int, probe
 	}
 
 	c.logger.InfoContext(ctx, "av activation starting", "video_resolution", resolution)
-
-	// Only a ringing preview starts with video alone, and only a ring makes
-	// the intercom announce its video parameters.
-	if c.readiness != nil && !probe.RecentlyFlowing(c.flowWindow) {
-		waitStarted := time.Now()
-		ready := c.readiness.WaitVideoParameters(ctx, c.readinessWait)
-		c.logger.DebugContext(ctx, "av video parameters wait", "ready", ready, "waited", time.Since(waitStarted))
-	}
 
 	return c.startStream(ctx, "video", BuildAVAddStreamVideo("127.0.0.1", port, highRes), probe)
 }
