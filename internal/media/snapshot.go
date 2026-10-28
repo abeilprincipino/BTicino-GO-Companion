@@ -399,7 +399,9 @@ func (a *snapshotAttempt) finish() {
 
 func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	s.mu.Lock()
-	if s.active != attempt {
+	// A closed attempt stays active until its run returns, and its picture may
+	// be ready together with the cancellation.
+	if s.active != attempt || attempt.ctx.Err() != nil {
 		s.mu.Unlock()
 		return false
 	}
