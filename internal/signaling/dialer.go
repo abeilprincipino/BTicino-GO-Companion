@@ -869,6 +869,7 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	d.logger.Info("inbound sip invite received", "dialog_id", string(dialogID))
+	d.logger.Debug("inbound sip invite offer", "dialog_id", string(dialogID), "sdp", remoteSDP)
 
 	if err := handler.OnInvite(context.Background(), dialog); err != nil {
 		d.logger.Warn("inbound invite handling failed", "dialog_id", string(dialogID), "error", err)

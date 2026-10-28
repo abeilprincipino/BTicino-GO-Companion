@@ -151,6 +151,11 @@ func run(
 
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
+		// Who starts which stream, to where, and when: the AV frames say it.
+		if strings.HasPrefix(frame, "*7*") {
+			logger.Debug("openwebnet av frame", "frame", frame)
+		}
+
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
 			rtspServer.ObserveControlTrack(true)
