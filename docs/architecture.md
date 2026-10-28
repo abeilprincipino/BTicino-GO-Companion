@@ -252,7 +252,7 @@ Unmatched `/api/v3/` paths hit an explicit `notFound` rather than falling throug
 `session`, `login`, `admin/{logout,account,restart,reboot}`, `bootstrap/account`,
 `config/homeassistant{,/recovery-code}`, `config/entrypoints` (GET/PUT),
 `config/homekit{,/qr,/reset}` (GET/PUT/POST), `management/system` (GET/PUT),
-`management/diagnostics`, `management/update{,/check}`,
+`management/diagnostics`, `management/update{,/check,/channel,/prereleases}`,
 `logs/companion{,/level}`, `logs/openwebnet`. All but `session`/`login`/`bootstrap/account`
 are wrapped in `requireReady`.
 
