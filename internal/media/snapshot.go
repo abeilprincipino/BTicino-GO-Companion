@@ -32,20 +32,26 @@ const (
 	snapshotPacketBufferSize = 256
 	// snapshotMaxOutput bounds what the decoder may write back.
 	snapshotMaxOutput = 4 << 20
+	// snapshotMaxStderr bounds what the decoder's errors may add to the log.
+	snapshotMaxStderr = 4 << 10
+	// snapshotMaxDecoders bounds the decoders one capture starts when one
+	// exits without a picture.
+	snapshotMaxDecoders = 3
 )
 
-// snapshotAccessUnitDelimiter ends the keyframe handed to the decoder, so the
-// parser closes it without waiting for the next frame.
+// snapshotAccessUnitDelimiter ends each access unit handed to the decoder, so
+// the parser closes it without waiting for the next one.
 var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 
 // SnapshotManager captures one JPEG from each source generation. It is passive:
 // Arm never acquires a lease or sends intercom control commands.
 //
-// The capture depacketizes the H.264 stream itself and hands the decoder the
-// first keyframe alone, as one Annex-B access unit on stdin, then reads the
+// The capture depacketizes the H.264 stream itself and feeds the decoder from
+// the first keyframe on, as Annex-B access units on stdin, then takes the first
 // JPEG from stdout: no frame before the keyframe is decoded, nothing is lost to
 // a decoder not yet listening, and the picture is read the moment it is
-// written.
+// written. The decoder keeps getting frames after the keyframe because the VPU
+// gives no picture of a keyframe followed by the end of the stream.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -60,12 +66,16 @@ type snapshotRunner interface {
 	Start(context.Context) (snapshotProcess, error)
 }
 
-// snapshotProcess decodes one keyframe. It is started before the keyframe
-// arrives, so the decoder is ready when it does.
+// snapshotProcess is a decoder turning access units into JPEGs. It is started
+// before the keyframe arrives, so it is ready when it does.
 type snapshotProcess interface {
-	// Decode writes an Annex-B access unit, ends the input and returns what
-	// the decoder wrote until it exited.
-	Decode(ctx context.Context, accessUnit []byte) ([]byte, error)
+	// Write feeds the decoder an Annex-B access unit.
+	Write(accessUnit []byte) error
+	// Picture yields the first JPEG the decoder writes and is closed when the
+	// decoder exits.
+	Picture() <-chan []byte
+	// Err says why the decoder exited. It is set once Picture is closed.
+	Err() error
 	Close() error
 }
 
@@ -238,83 +248,91 @@ func (a *snapshotAttempt) run() {
 	}
 	defer func() { _ = process.Close() }()
 
-	keyframes := newSnapshotKeyframes()
+	accessUnits := newSnapshotAccessUnits()
+	decoders := 1
+	fed := 0
 
-	var firstPacket time.Time
+	var firstPacket, decodeStarted time.Time
 
 	for {
-		var packet *rtp.Packet
-
 		select {
 		case <-ctx.Done():
 			return
-		case packet = <-a.packets:
-		}
+		case image, ok := <-process.Picture():
+			if ok {
+				if a.manager.publish(a, image) {
+					a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
+						"since_arm", time.Since(armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
+						"fed_access_units", fed, "skipped_access_units", accessUnits.skipped)
+				}
 
-		if firstPacket.IsZero() {
-			firstPacket = time.Now()
-		}
-
-		accessUnit, ok := keyframes.push(packet)
-		if !ok {
-			continue
-		}
-
-		decodeStarted := time.Now()
-
-		output, err := process.Decode(ctx, accessUnit)
-		_ = process.Close()
-
-		image, found := firstJPEG(output)
-		if !found {
-			if ctx.Err() != nil {
 				return
 			}
 
-			// The decoder made no picture of this keyframe: a new decoder tries
-			// the next one.
-			a.manager.logger.Warn("snapshot decode produced no picture", "entrypoint_id", a.entrypointID, "error", err, "output_bytes", len(output))
+			a.manager.logger.Warn("snapshot decoder exited without a picture", "entrypoint_id", a.entrypointID, "decoder", decoders,
+				"fed_access_units", fed, "error", process.Err())
+
+			// A decoder that fails before any input will fail again.
+			if fed == 0 || decoders >= snapshotMaxDecoders || ctx.Err() != nil {
+				return
+			}
+
+			_ = process.Close()
 
 			if process, err = a.manager.runner.Start(ctx); err != nil {
 				a.manager.logger.Warn("restart snapshot decoder", "entrypoint_id", a.entrypointID, "error", err)
 				return
 			}
 
-			continue
+			decoders++
+			fed = 0
+			decodeStarted = time.Time{}
+
+			accessUnits.restart()
+		case packet := <-a.packets:
+			if firstPacket.IsZero() {
+				firstPacket = time.Now()
+			}
+
+			accessUnit, ok := accessUnits.push(packet)
+			if !ok {
+				continue
+			}
+
+			if decodeStarted.IsZero() {
+				decodeStarted = time.Now()
+			}
+
+			fed++
+
+			// A failed write means the decoder is gone: Picture says why.
+			_ = process.Write(accessUnit)
 		}
-
-		if !a.manager.publish(a, image) {
-			return
-		}
-
-		a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
-			"since_arm", time.Since(armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
-			"skipped_access_units", keyframes.skipped)
-
-		return
 	}
 }
 
-// snapshotKeyframes depacketizes a video stream until its first keyframe. The
-// SDP carries no sprop-parameter-sets, so SPS and PPS are taken in band.
-type snapshotKeyframes struct {
+// snapshotAccessUnits depacketizes a video stream into Annex-B access units
+// from its first keyframe on. The SDP carries no sprop-parameter-sets, so SPS
+// and PPS are taken in band and put before every keyframe.
+type snapshotAccessUnits struct {
 	decoder  *rtph264.Decoder
 	sps, pps []byte
-	// skipped counts the access units seen before the keyframe.
+	started  bool
+	// skipped counts the access units seen before the first keyframe.
 	skipped int
 }
 
-func newSnapshotKeyframes() *snapshotKeyframes {
+func newSnapshotAccessUnits() *snapshotAccessUnits {
 	decoder := &rtph264.Decoder{PacketizationMode: 1}
 	_ = decoder.Init() // Init fails only on an unsupported packetization mode.
 
-	return &snapshotKeyframes{decoder: decoder}
+	return &snapshotAccessUnits{decoder: decoder}
 }
 
-// push adds a packet and, once the first keyframe is complete, returns it with
-// its parameter sets as one Annex-B access unit.
-func (k *snapshotKeyframes) push(packet *rtp.Packet) ([]byte, bool) {
-	nalus, err := k.decoder.Decode(packet)
+// push adds a packet and returns the access unit it completes, once a keyframe
+// with its parameter sets has started the stream.
+func (u *snapshotAccessUnits) push(packet *rtp.Packet) ([]byte, bool) {
+	nalus, err := u.decoder.Decode(packet)
 	if err != nil {
 		// More packets needed, or a broken access unit: the next one may do.
 		return nil, false
@@ -330,9 +348,9 @@ func (k *snapshotKeyframes) push(packet *rtp.Packet) ([]byte, bool) {
 
 		switch h264.NALUType(nalu[0] & 0x1f) {
 		case h264.NALUTypeSPS:
-			k.sps = bytes.Clone(nalu)
+			u.sps = bytes.Clone(nalu)
 		case h264.NALUTypePPS:
-			k.pps = bytes.Clone(nalu)
+			u.pps = bytes.Clone(nalu)
 		case h264.NALUTypeAccessUnitDelimiter:
 		case h264.NALUTypeIDR:
 			idr = true
@@ -342,20 +360,33 @@ func (k *snapshotKeyframes) push(packet *rtp.Packet) ([]byte, bool) {
 		}
 	}
 
-	if !idr || k.sps == nil || k.pps == nil {
-		k.skipped++
+	if len(slices) == 0 {
 		return nil, false
 	}
 
-	unit := append([][]byte{k.sps, k.pps}, slices...)
+	if !u.started && (!idr || u.sps == nil || u.pps == nil) {
+		u.skipped++
+		return nil, false
+	}
+
+	unit := slices
+	if idr {
+		unit = append([][]byte{u.sps, u.pps}, slices...)
+	}
 
 	encoded, err := h264.AnnexB(append(unit, snapshotAccessUnitDelimiter)).Marshal()
 	if err != nil {
-		k.skipped++
 		return nil, false
 	}
 
+	u.started = true
+
 	return encoded, true
+}
+
+// restart waits for the next keyframe, for a new decoder.
+func (u *snapshotAccessUnits) restart() {
+	u.started = false
 }
 
 func (a *snapshotAttempt) finish() {
@@ -522,17 +553,30 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 		return nil, err
 	}
 
+	stderr := &cappedBuffer{max: snapshotMaxStderr}
+	command.Stderr = stderr
+
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
 
-	process := &gstreamerSnapshotProcess{command: command, stdin: stdin, done: make(chan struct{})}
+	process := &gstreamerSnapshotProcess{command: command, stdin: stdin, picture: make(chan []byte, 1)}
 	go func() {
-		// Wait closes stdout, so it runs only after the output is read.
-		process.output, process.readErr = io.ReadAll(io.LimitReader(stdout, snapshotMaxOutput))
-		_ = command.Wait()
+		image, readErr := readFirstJPEG(stdout)
+		if image != nil {
+			process.picture <- image
+		}
 
-		close(process.done)
+		// Wait closes stdout, so it runs only after the output is read. After a
+		// picture it returns once Close kills the decoder.
+		waitErr := command.Wait()
+
+		process.err = errors.Join(readErr, waitErr)
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			process.err = errors.Join(process.err, errors.New(message))
+		}
+
+		close(process.picture)
 	}()
 
 	return process, nil
@@ -541,27 +585,20 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 type gstreamerSnapshotProcess struct {
 	command *exec.Cmd
 	stdin   io.WriteCloser
-	done    chan struct{}
+	picture chan []byte
 	once    sync.Once
-	// output and readErr are set before done is closed.
-	output  []byte
-	readErr error
+	// err is set before picture is closed.
+	err error
 }
 
-// Decode ends the input after the access unit: the end of stream makes the
-// decoder flush the picture and gst-launch exit.
-func (p *gstreamerSnapshotProcess) Decode(ctx context.Context, accessUnit []byte) ([]byte, error) {
-	_, writeErr := p.stdin.Write(accessUnit)
-	closeErr := p.stdin.Close()
-
-	select {
-	case <-p.done:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	return p.output, errors.Join(writeErr, closeErr, p.readErr)
+func (p *gstreamerSnapshotProcess) Write(accessUnit []byte) error {
+	_, err := p.stdin.Write(accessUnit)
+	return err
 }
+
+func (p *gstreamerSnapshotProcess) Picture() <-chan []byte { return p.picture }
+
+func (p *gstreamerSnapshotProcess) Err() error { return p.err }
 
 func (p *gstreamerSnapshotProcess) Close() error {
 	p.once.Do(func() {
@@ -571,8 +608,51 @@ func (p *gstreamerSnapshotProcess) Close() error {
 			_ = p.command.Process.Kill()
 		}
 
-		<-p.done
+		for range p.picture {
+		}
 	})
 
 	return nil
+}
+
+// readFirstJPEG reads the decoder's output until it holds a whole JPEG and
+// returns it without waiting for the decoder to exit. It returns nil when the
+// output ends first.
+func readFirstJPEG(r io.Reader) ([]byte, error) {
+	var data []byte
+
+	chunk := make([]byte, 32<<10)
+
+	for len(data) < snapshotMaxOutput {
+		n, err := r.Read(chunk)
+		data = append(data, chunk[:n]...)
+
+		if image, ok := firstJPEG(data); ok {
+			return image, nil
+		}
+
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("decoder wrote %d bytes without a picture", len(data))
+}
+
+// cappedBuffer keeps the first max bytes written to it.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room > 0 {
+		b.Buffer.Write(p[:min(len(p), room)])
+	}
+
+	return len(p), nil
 }
