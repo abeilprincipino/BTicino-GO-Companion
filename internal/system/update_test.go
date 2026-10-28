@@ -261,14 +261,39 @@ func TestUpdaterPrereleasesListsOnlyPrereleasesNewestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []Prerelease{{Version: "v1.3.0-beta.10", PublishedAt: published}, {Version: "v1.3.0-beta.2", Installed: true}, {Version: "v1.2.0-rc.1"}}
+	want := []Prerelease{{Version: "v1.3.0-beta.10", PublishedAt: published}, {Version: "v1.3.0-beta.2", Installed: true}, {Version: "v1.2.0-rc.1", Older: true}}
 	if len(prereleases) != len(want) {
 		t.Fatalf("prereleases = %#v", prereleases)
 	}
 
 	for i := range want {
-		if prereleases[i].Version != want[i].Version || prereleases[i].Installed != want[i].Installed || !prereleases[i].PublishedAt.Equal(want[i].PublishedAt) {
+		if prereleases[i].Version != want[i].Version || prereleases[i].Installed != want[i].Installed || prereleases[i].Older != want[i].Older || !prereleases[i].PublishedAt.Equal(want[i].PublishedAt) {
 			t.Fatalf("prereleases[%d] = %#v, want %#v", i, prereleases[i], want[i])
+		}
+	}
+}
+
+func TestUpdaterPrereleasesMarksOlderThanStableBuild(t *testing.T) {
+	t.Parallel()
+
+	updater, _ := testPrereleaseUpdater(t, "v1.3.0", &testReleaseSource{releases: []ReleaseManifest{
+		{TagName: "v1.3.0-beta.1", Prerelease: true},
+		{TagName: "v1.4.0-beta.1", Prerelease: true},
+	}}, nil)
+
+	prereleases, err := updater.Prereleases(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{"v1.3.0-beta.1": true, "v1.4.0-beta.1": false}
+	if len(prereleases) != len(want) {
+		t.Fatalf("prereleases = %#v", prereleases)
+	}
+
+	for _, p := range prereleases {
+		if p.Installed || p.Older != want[p.Version] {
+			t.Fatalf("prerelease %#v, want older=%v installed=false", p, want[p.Version])
 		}
 	}
 }

@@ -277,6 +277,10 @@ are wrapped in `requireReady`.
   `RuntimeControl`.
 - **Debounced voicemail refresh.** An `aswm` ACK frame schedules a single refresh 250ms later
   with drain-on-wake, avoiding a burst of bus queries.
+- **Config stays readable by older builds.** The loader rejects unknown keys (`KnownFields(true)`) and the Beta
+  channel can downgrade, so every new persisted key must be omitted while it holds its default
+  (`omitempty`, as `system.updates.channel` does for `stable`). A downgraded build fails to start otherwise, and the
+  init script does not roll back to `companion.previous` on its own.
 - **Tests colocated and heavy.** 37 of 90 Go files are `_test.go` (588 `TESTS` edges in the
   graph); almost every package ships hand-written fakes rather than a mocking framework.
 

@@ -90,8 +90,9 @@ type UpdateStatus struct {
 // Prerelease is one entry of the Beta channel listing.
 type Prerelease struct {
 	Version     string    `json:"version"`
-	PublishedAt time.Time `json:"published_at"`
+	PublishedAt time.Time `json:"published_at,omitzero"`
 	Installed   bool      `json:"installed"`
+	Older       bool      `json:"older"`
 }
 
 type ReleaseSource interface {
@@ -259,7 +260,7 @@ func (u *Updater) Prereleases(ctx context.Context) ([]Prerelease, error) {
 
 	prereleases := make([]Prerelease, 0, len(manifests))
 	for _, manifest := range manifests {
-		prereleases = append(prereleases, Prerelease{Version: manifest.TagName, PublishedAt: manifest.PublishedAt, Installed: manifest.TagName == u.build.Version})
+		prereleases = append(prereleases, Prerelease{Version: manifest.TagName, PublishedAt: manifest.PublishedAt, Installed: manifest.TagName == u.build.Version, Older: newerVersion(u.build.Version, manifest.TagName)})
 	}
 
 	return prereleases, nil

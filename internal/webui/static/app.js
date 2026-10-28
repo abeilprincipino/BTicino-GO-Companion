@@ -927,7 +927,10 @@ function renderUpdateStatus(update) {
   }
   badge.textContent = label;
   document.getElementById('updatesCurrentVersion').textContent = update.current_version || '-';
-  document.getElementById('updatesLatestVersion').textContent = update.latest_version || '-';
+  var currentIsPrerelease = (update.current_version || '').indexOf('-') >= 0;
+  var latestShown = update.latest_version;
+  if (!latestShown || (latestShown === update.current_version && currentIsPrerelease)) latestShown = '-';
+  document.getElementById('updatesLatestVersion').textContent = latestShown;
   document.getElementById('updatesDescription').textContent = description;
   var install = document.getElementById('updatesInstall');
   if (install) install.classList.toggle('hidden', !update.update_available);
@@ -938,9 +941,11 @@ function renderUpdateStatus(update) {
     channel.value = beta ? 'beta' : 'stable';
     channel.disabled = !usable;
   }
-  document.getElementById('updatesStableActions').classList.toggle('hidden', beta);
-  document.getElementById('updatesBetaActions').classList.toggle('hidden', !beta);
-  if (beta && (update.stage === 'idle' || update.stage === 'available')) {
+  document.getElementById('updatesStableActions').classList.toggle('hidden', beta && usable);
+  document.getElementById('updatesBetaActions').classList.toggle('hidden', !(beta && usable));
+  if (beta && update.stage === 'available') {
+    document.getElementById('updatesDescription').textContent = 'Pick a pre-release to install. Stable ' + update.latest_version + ' is also available: switch to Stable to install it.';
+  } else if (beta && update.stage === 'idle') {
     document.getElementById('updatesDescription').textContent = 'Pick a pre-release to install. Companion restarts after installing it.';
   }
   if (beta && usable) loadPrereleases();
@@ -1010,7 +1015,6 @@ function renderPrereleases(prereleases) {
     container.innerHTML = '<p class="card-desc">No pre-releases published.</p>';
     return;
   }
-  var installedIndex = prereleases.findIndex(function(p) { return p.installed; });
   container.innerHTML = prereleases.map(function(p, index) {
     var date = p.published_at ? new Date(p.published_at).toLocaleDateString() : '';
     var action = p.installed
@@ -1022,7 +1026,7 @@ function renderPrereleases(prereleases) {
   container.querySelectorAll('button[data-index]').forEach(function(button) {
     var index = Number(button.getAttribute('data-index'));
     button.addEventListener('click', function() {
-      installPrerelease(prereleases[index].version, installedIndex >= 0 && index > installedIndex, button);
+      installPrerelease(prereleases[index].version, prereleases[index].older, button);
     });
   });
 }

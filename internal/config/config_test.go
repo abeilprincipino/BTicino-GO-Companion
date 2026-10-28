@@ -412,6 +412,51 @@ func TestSIPSectionPersistedReadsTheDocumentNotTheDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadReadsThePersistedUpdateChannel(t *testing.T) {
+	t.Parallel()
+
+	const block = "    updates:\n        enabled: false\n"
+
+	for name, testCase := range map[string]struct {
+		channel string
+		wantErr bool
+	}{
+		"beta":    {channel: "beta"},
+		"unknown": {channel: "nightly", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if strings.Count(legacyConfigWithoutSIP, block) != 1 {
+				t.Fatalf("updates block not found exactly once")
+			}
+
+			document := strings.Replace(legacyConfigWithoutSIP, block, block+"        channel: "+testCase.channel+"\n", 1)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			cfg, err := Load(path)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("Load() error = nil, want error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+
+			if cfg.System.UpdateChannel != "beta" {
+				t.Fatalf("UpdateChannel = %q", cfg.System.UpdateChannel)
+			}
+		})
+	}
+}
+
 func TestEnsureSIPSectionLeavesAnExistingSectionUntouched(t *testing.T) {
 	t.Parallel()
 
