@@ -156,6 +156,8 @@ func run(
 			logger.Debug("openwebnet av frame", "frame", frame)
 		}
 
+		runtime.avReadiness.Observe(frame)
+
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
 			rtspServer.ObserveControlTrack(true)
@@ -282,6 +284,7 @@ type applicationRuntime struct {
 	homeKit           *homekit.Manager
 	server            *api.Server
 	ringClips         *media.RingClipRecorder
+	avReadiness       *openwebnet.AVReadiness
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
 	dialer            interface {
@@ -397,9 +400,10 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	control := openwebnet.NewControl(initialConfig.Companion.Entrypoints, trace)
 	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
 	ringClips := media.NewRingClipRecorder(system.CompanionDataDir, logger)
+	avReadiness := openwebnet.NewAVReadiness()
 
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots)
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots, avReadiness)
 	})
 	if err != nil {
 		_ = dialer.Close()
@@ -492,6 +496,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	return &applicationRuntime{
 		projector:         projector,
 		ringClips:         ringClips,
+		avReadiness:       avReadiness,
 		trace:             trace,
 		control:           control,
 		rtspServer:        rtspServer,
@@ -624,7 +629,7 @@ func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Even
 	}
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager, avReadiness *openwebnet.AVReadiness) (media.ManagedSource, func(), error) {
 	backchannel, err := media.NewUDPBackchannel("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
@@ -646,7 +651,7 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 		if err := bridge.WriteIntercomSpeex(packet); err != nil {
 			logger.Warn("intercom audio bridge write failed", "error", err)
 		}
-	}, events.RemoteBYE)
+	}, events.RemoteBYE, avReadiness)
 	if err != nil {
 		if attempt != nil {
 			attempt.Close()
@@ -748,7 +753,7 @@ func (s *bridgeSource) WriteBackchannelRTP(packet *rtp.Packet) error {
 	return s.bridge.WriteBackchannelOpus(packet)
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func(), avReadiness *openwebnet.AVReadiness) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -785,12 +790,15 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		return nil, nil, errors.New("sip runtime does not support remote bye callback")
 	}
 
+	av := openwebnet.NewAVClient(logger)
+	av.SetReadiness(avReadiness)
+
 	source = media.NewSourceSession(
 		logger,
 		sourceConfig,
 		core.EntrypointID(entrypoint.ID),
 		calls,
-		openwebnet.NewAVClient(logger),
+		av,
 		// Video flows from the first packet, before the AV activation reports
 		// the stream started: the intercom opens it with its only keyframe for
 		// about a second, and the snapshot and the ring clip need that one.
