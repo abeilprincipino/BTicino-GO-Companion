@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/pion/rtp"
 )
 
@@ -25,14 +26,26 @@ var (
 )
 
 const (
-	snapshotRTPAddress       = "127.0.0.1:51074"
-	snapshotCaptureTimeout   = 8 * time.Second
-	snapshotPollInterval     = 50 * time.Millisecond
-	snapshotPacketBufferSize = 64
+	snapshotCaptureTimeout = 8 * time.Second
+	// snapshotPacketBufferSize holds a whole keyframe: a dropped fragment breaks
+	// it and the capture waits for the next one.
+	snapshotPacketBufferSize = 256
+	// snapshotMaxOutput bounds what the decoder may write back.
+	snapshotMaxOutput = 4 << 20
 )
+
+// snapshotAccessUnitDelimiter ends the keyframe handed to the decoder, so the
+// parser closes it without waiting for the next frame.
+var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 
 // SnapshotManager captures one JPEG from each source generation. It is passive:
 // Arm never acquires a lease or sends intercom control commands.
+//
+// The capture depacketizes the H.264 stream itself and hands the decoder the
+// first keyframe alone, as one Annex-B access unit on stdin, then reads the
+// JPEG from stdout: no frame before the keyframe is decoded, nothing is lost to
+// a decoder not yet listening, and the picture is read the moment it is
+// written.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -44,10 +57,15 @@ type SnapshotManager struct {
 }
 
 type snapshotRunner interface {
-	Start(context.Context, string) (snapshotProcess, error)
+	Start(context.Context) (snapshotProcess, error)
 }
 
+// snapshotProcess decodes one keyframe. It is started before the keyframe
+// arrives, so the decoder is ready when it does.
 type snapshotProcess interface {
+	// Decode writes an Annex-B access unit, ends the input and returns what
+	// the decoder wrote until it exited.
+	Decode(ctx context.Context, accessUnit []byte) ([]byte, error)
 	Close() error
 }
 
@@ -57,7 +75,7 @@ type snapshotAttempt struct {
 	id           uint64
 	ctx          context.Context
 	cancel       context.CancelFunc
-	packets      chan []byte
+	packets      chan *rtp.Packet
 	closeOnce    sync.Once
 	// ring marks a capture from a stream born as a ringing preview: its picture
 	// is also the doorbell picture.
@@ -107,7 +125,7 @@ func (s *SnapshotManager) Arm(entrypointID string) *snapshotAttempt {
 	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- snapshotAttempt.Close owns cancellation.
 	attempt := &snapshotAttempt{
 		manager: s, entrypointID: entrypointID, id: s.nextID,
-		ctx: ctx, cancel: cancel, packets: make(chan []byte, snapshotPacketBufferSize),
+		ctx: ctx, cancel: cancel, packets: make(chan *rtp.Packet, snapshotPacketBufferSize),
 	}
 	s.active = attempt
 	s.mu.Unlock()
@@ -185,13 +203,8 @@ func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
 		return
 	}
 
-	raw, err := packet.Marshal()
-	if err != nil {
-		return
-	}
-
 	select {
-	case a.packets <- raw:
+	case a.packets <- packet.Clone():
 	default:
 	}
 }
@@ -213,61 +226,136 @@ func (a *snapshotAttempt) MarkRing() {
 func (a *snapshotAttempt) run() {
 	defer a.finish()
 
-	output, err := os.CreateTemp("", "bticino-snapshot-*.mjpeg")
-	if err != nil {
-		a.manager.logger.Warn("create snapshot output", "entrypoint_id", a.entrypointID, "error", err)
-		return
-	}
-
-	outputPath := output.Name()
-	if err := output.Close(); err != nil {
-		a.manager.logger.Warn("close snapshot output", "entrypoint_id", a.entrypointID, "error", err)
-		return
-	}
-	defer os.Remove(outputPath) //nolint:errcheck // temporary capture cleanup
-
 	ctx, cancel := context.WithTimeout(a.ctx, snapshotCaptureTimeout)
 	defer cancel()
 
-	process, err := a.manager.runner.Start(ctx, outputPath)
+	armed := time.Now()
+
+	process, err := a.manager.runner.Start(ctx)
 	if err != nil {
-		a.manager.logger.Warn("start snapshot capture", "entrypoint_id", a.entrypointID, "error", err)
+		a.manager.logger.Warn("start snapshot decoder", "entrypoint_id", a.entrypointID, "error", err)
 		return
 	}
-	defer process.Close() //nolint:errcheck // capture process cleanup
+	defer func() { _ = process.Close() }()
 
-	conn, err := net.DialUDP("udp4", nil, mustResolveSnapshotAddress())
-	if err != nil {
-		a.manager.logger.Warn("connect snapshot RTP", "entrypoint_id", a.entrypointID, "error", err)
-		return
-	}
-	defer conn.Close() //nolint:errcheck // loopback socket cleanup
+	keyframes := newSnapshotKeyframes()
 
-	poll := time.NewTicker(snapshotPollInterval)
-	defer poll.Stop()
+	var firstPacket time.Time
 
 	for {
+		var packet *rtp.Packet
+
 		select {
 		case <-ctx.Done():
 			return
-		case packet := <-a.packets:
-			_, _ = conn.Write(packet)
-		case <-poll.C:
-			data, err := os.ReadFile(outputPath)
-			if err != nil {
-				continue
+		case packet = <-a.packets:
+		}
+
+		if firstPacket.IsZero() {
+			firstPacket = time.Now()
+		}
+
+		accessUnit, ok := keyframes.push(packet)
+		if !ok {
+			continue
+		}
+
+		decodeStarted := time.Now()
+
+		output, err := process.Decode(ctx, accessUnit)
+		_ = process.Close()
+
+		image, found := firstJPEG(output)
+		if !found {
+			if ctx.Err() != nil {
+				return
 			}
 
-			image, ok := firstJPEG(data)
-			if !ok || !a.manager.publish(a, image) {
-				continue
+			// The decoder made no picture of this keyframe: a new decoder tries
+			// the next one.
+			a.manager.logger.Warn("snapshot decode produced no picture", "entrypoint_id", a.entrypointID, "error", err, "output_bytes", len(output))
+
+			if process, err = a.manager.runner.Start(ctx); err != nil {
+				a.manager.logger.Warn("restart snapshot decoder", "entrypoint_id", a.entrypointID, "error", err)
+				return
 			}
 
-			a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image))
+			continue
+		}
 
+		if !a.manager.publish(a, image) {
 			return
 		}
+
+		a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
+			"since_arm", time.Since(armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
+			"skipped_access_units", keyframes.skipped)
+
+		return
 	}
+}
+
+// snapshotKeyframes depacketizes a video stream until its first keyframe. The
+// SDP carries no sprop-parameter-sets, so SPS and PPS are taken in band.
+type snapshotKeyframes struct {
+	decoder  *rtph264.Decoder
+	sps, pps []byte
+	// skipped counts the access units seen before the keyframe.
+	skipped int
+}
+
+func newSnapshotKeyframes() *snapshotKeyframes {
+	decoder := &rtph264.Decoder{PacketizationMode: 1}
+	_ = decoder.Init() // Init fails only on an unsupported packetization mode.
+
+	return &snapshotKeyframes{decoder: decoder}
+}
+
+// push adds a packet and, once the first keyframe is complete, returns it with
+// its parameter sets as one Annex-B access unit.
+func (k *snapshotKeyframes) push(packet *rtp.Packet) ([]byte, bool) {
+	nalus, err := k.decoder.Decode(packet)
+	if err != nil {
+		// More packets needed, or a broken access unit: the next one may do.
+		return nil, false
+	}
+
+	idr := false
+	slices := make([][]byte, 0, len(nalus))
+
+	for _, nalu := range nalus {
+		if len(nalu) == 0 {
+			continue
+		}
+
+		switch h264.NALUType(nalu[0] & 0x1f) {
+		case h264.NALUTypeSPS:
+			k.sps = bytes.Clone(nalu)
+		case h264.NALUTypePPS:
+			k.pps = bytes.Clone(nalu)
+		case h264.NALUTypeAccessUnitDelimiter:
+		case h264.NALUTypeIDR:
+			idr = true
+			slices = append(slices, nalu)
+		default:
+			slices = append(slices, nalu)
+		}
+	}
+
+	if !idr || k.sps == nil || k.pps == nil {
+		k.skipped++
+		return nil, false
+	}
+
+	unit := append([][]byte{k.sps, k.pps}, slices...)
+
+	encoded, err := h264.AnnexB(append(unit, snapshotAccessUnitDelimiter)).Marshal()
+	if err != nil {
+		k.skipped++
+		return nil, false
+	}
+
+	return encoded, true
 }
 
 func (a *snapshotAttempt) finish() {
@@ -416,25 +504,32 @@ func firstJPEG(data []byte) ([]byte, bool) {
 	return append([]byte(nil), data[start:start+end+4]...), true
 }
 
-func mustResolveSnapshotAddress() *net.UDPAddr {
-	address, _ := net.ResolveUDPAddr("udp4", snapshotRTPAddress)
-	return address
-}
-
 type gstreamerSnapshotRunner struct{}
 
-func (gstreamerSnapshotRunner) Start(ctx context.Context, outputPath string) (snapshotProcess, error) {
-	// outputPath comes from os.CreateTemp and is passed as an argument, not through a shell.
-	command := exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", // #nosec G204 -- fixed executable and pipeline; generated output path is an argument.
-		"udpsrc", "address=127.0.0.1", "port=51074", "caps=application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=96",
-		"!", "rtph264depay", "!", "h264parse", "!", "imxvpudec", "!", "jpegenc", "quality=90", "!", "filesink", "location="+outputPath,
+func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, error) {
+	command := exec.CommandContext(ctx, "/usr/bin/gst-launch-1.0", "-q", // #nosec G204 -- fixed executable and pipeline.
+		"fdsrc", "fd=0", "!", "video/x-h264,stream-format=byte-stream", "!", "h264parse", "!", "imxvpudec", "!",
+		"jpegenc", "quality=90", "!", "fdsink", "fd=1",
 	)
+
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
 
-	process := &gstreamerSnapshotProcess{command: command, done: make(chan struct{})}
+	process := &gstreamerSnapshotProcess{command: command, stdin: stdin, done: make(chan struct{})}
 	go func() {
+		// Wait closes stdout, so it runs only after the output is read.
+		process.output, process.readErr = io.ReadAll(io.LimitReader(stdout, snapshotMaxOutput))
 		_ = command.Wait()
 
 		close(process.done)
@@ -445,12 +540,33 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context, outputPath string) (sn
 
 type gstreamerSnapshotProcess struct {
 	command *exec.Cmd
+	stdin   io.WriteCloser
 	done    chan struct{}
 	once    sync.Once
+	// output and readErr are set before done is closed.
+	output  []byte
+	readErr error
+}
+
+// Decode ends the input after the access unit: the end of stream makes the
+// decoder flush the picture and gst-launch exit.
+func (p *gstreamerSnapshotProcess) Decode(ctx context.Context, accessUnit []byte) ([]byte, error) {
+	_, writeErr := p.stdin.Write(accessUnit)
+	closeErr := p.stdin.Close()
+
+	select {
+	case <-p.done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return p.output, errors.Join(writeErr, closeErr, p.readErr)
 }
 
 func (p *gstreamerSnapshotProcess) Close() error {
 	p.once.Do(func() {
+		_ = p.stdin.Close()
+
 		if p.command.Process != nil {
 			_ = p.command.Process.Kill()
 		}
