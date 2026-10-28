@@ -156,12 +156,6 @@ func run(
 			logger.Debug("openwebnet av frame", "frame", frame)
 		}
 
-		// Whether the indoor unit streams to its own display before it accepts
-		// the companion's request: the loopback traffic says it.
-		if openwebnet.IsRingStart(frame) {
-			media.ProbeLoopbackStreams(ctx, logger, 6*time.Second)
-		}
-
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
 			rtspServer.ObserveControlTrack(true)
@@ -774,8 +768,9 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	}
 
 	var (
-		source     *media.SourceSession
-		sourceLive atomic.Bool
+		source       *media.SourceSession
+		sourceLive   atomic.Bool
+		sourceClosed atomic.Bool
 	)
 
 	if callbackSetter, ok := dialer.(interface{ SetRemoteDialogEnded(func()) }); ok {
@@ -796,8 +791,11 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		core.EntrypointID(entrypoint.ID),
 		calls,
 		openwebnet.NewAVClient(logger),
+		// Video flows from the first packet, before the AV activation reports
+		// the stream started: the intercom opens it with its only keyframe for
+		// about a second, and the snapshot and the ring clip need that one.
 		media.NewVideoRTPReceiver(logger, func(packet *rtp.Packet) {
-			if sourceLive.Load() && videoPacket != nil {
+			if !sourceClosed.Load() && videoPacket != nil {
 				videoPacket(packet)
 			}
 		}),
@@ -811,6 +809,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 
 	return source, func() {
 		sourceLive.Store(false)
+		sourceClosed.Store(true)
 
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
