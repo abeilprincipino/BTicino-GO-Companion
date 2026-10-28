@@ -112,6 +112,29 @@ func TestResolveInboundEntrypointRefusesAmbiguity(t *testing.T) {
 	}
 }
 
+func TestResolveInboundEntrypointGivesTheCallToTheStreamingEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	entrypoints := []config.Entrypoint{
+		{ID: "main", DevAddr: "20", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "luci", DevAddr: "21", Capabilities: config.Capabilities{Unlock: true}},
+		{ID: "cancello", DevAddr: "22", Capabilities: config.Capabilities{Unlock: true}},
+	}
+
+	// Even a physical ring recorded against a light loses to the doorbell.
+	projector := core.NewProjector()
+	if _, err := projector.Apply(core.RingStarted{EntrypointID: "luci"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, projector)
+
+	id, devAddr := resolve()
+	if id != "main" || devAddr != "20" {
+		t.Fatalf("resolve() = %q/%q, want main/20", id, devAddr)
+	}
+}
+
 func TestServeRunsAPIAndWebUI(t *testing.T) {
 	t.Parallel()
 
