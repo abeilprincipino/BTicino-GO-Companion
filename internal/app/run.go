@@ -436,7 +436,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 
 	var source system.ReleaseSource
 	if strings.TrimSpace(build.ReleaseRepo) != "" {
-		source = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
+		source = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo)
 	}
 
 	updater := system.NewUpdater(source, build, policy, func(ctx context.Context) error { return rt.Restart(ctx, "companion") })

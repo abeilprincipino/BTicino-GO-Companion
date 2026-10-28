@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testAssetName = "companion.tar.gz"
@@ -83,7 +84,7 @@ func TestGitHubReleaseClient(t *testing.T) {
 		response(http.StatusOK, `{"tag_name":"v1.2.3","assets":[{"name":"companion.tar.gz","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","browser_download_url":"https://downloads.example.test/companion.tar.gz"}]}`), //nolint:bodyclose // consumed by production code
 		response(http.StatusOK, "artifact"), //nolint:bodyclose // consumed by production code
 	}}
-	releases := NewGitHubReleaseClient(client, "https://api.github.com/repos/example/companion/releases/latest")
+	releases := NewGitHubReleaseClient(client, "https://api.github.com/repos/example/companion")
 
 	manifest, err := releases.Latest(context.Background())
 	if err != nil {
@@ -107,7 +108,7 @@ func TestGitHubReleaseClient(t *testing.T) {
 		t.Fatalf("artifact = %q, read error = %v, close error = %v", data, readErr, closeErr)
 	}
 
-	if client.requests[0].Header.Get("Accept") != "application/vnd.github+json" || client.requests[1].URL.String() != asset.DownloadURL {
+	if client.requests[0].URL.String() != "https://api.github.com/repos/example/companion/releases/latest" || client.requests[0].Header.Get("Accept") != "application/vnd.github+json" || client.requests[1].URL.String() != asset.DownloadURL {
 		t.Fatalf("requests = %#v", client.requests)
 	}
 }
@@ -131,4 +132,61 @@ func (c *testHTTPClient) Do(request *http.Request) (*http.Response, error) {
 
 func response(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body))}
+}
+
+const testReleaseList = `[
+	{"tag_name":"v1.3.0","prerelease":false,"published_at":"2026-10-20T10:00:00Z","assets":[{"name":"companion.tar.gz","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","browser_download_url":"https://downloads.example.test/v1.3.0.tar.gz"}]},
+	{"tag_name":"v1.4.0-beta.1","prerelease":true,"published_at":"2026-10-25T10:00:00Z","assets":[{"name":"companion.tar.gz","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","browser_download_url":"https://downloads.example.test/v1.4.0-beta.1.tar.gz"}]},
+	{"tag_name":"v1.4.0-beta.2","prerelease":true,"draft":true,"published_at":null,"assets":[]},
+	{"tag_name":"v1.4.0-beta.0","prerelease":true,"published_at":"2026-10-21T10:00:00Z","assets":[{"name":"companion.tar.gz","digest":"md5:abc","browser_download_url":"https://downloads.example.test/broken.tar.gz"}]}
+]`
+
+func TestParseGitHubReleaseListSkipsDraftsAndInvalidEntries(t *testing.T) {
+	t.Parallel()
+
+	releases, err := ParseGitHubReleaseList(strings.NewReader(testReleaseList))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(releases) != 2 || releases[0].TagName != "v1.3.0" || releases[0].Prerelease || releases[1].TagName != "v1.4.0-beta.1" || !releases[1].Prerelease {
+		t.Fatalf("releases = %#v", releases)
+	}
+
+	if want := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC); !releases[1].PublishedAt.Equal(want) {
+		t.Fatalf("published_at = %v", releases[1].PublishedAt)
+	}
+}
+
+func TestParseGitHubReleaseListRejectsNonArray(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParseGitHubReleaseList(strings.NewReader(`{"tag_name":"v1.3.0","assets":[]}`)); !errors.Is(err, ErrInvalidReleaseManifest) {
+		t.Fatalf("ParseGitHubReleaseList() error = %v", err)
+	}
+}
+
+func TestGitHubReleaseClientList(t *testing.T) {
+	t.Parallel()
+
+	client := &testHTTPClient{responses: []*http.Response{response(http.StatusOK, testReleaseList)}} //nolint:bodyclose // consumed by production code
+	releases := NewGitHubReleaseClient(client, "https://api.github.com/repos/example/companion")
+
+	list, err := releases.List(context.Background())
+	if err != nil || len(list) != 2 {
+		t.Fatalf("List() = %#v, err = %v", list, err)
+	}
+
+	if client.requests[0].URL.String() != "https://api.github.com/repos/example/companion/releases?per_page=50" || client.requests[0].Header.Get("Accept") != "application/vnd.github+json" {
+		t.Fatalf("request = %#v", client.requests[0])
+	}
+}
+
+func TestGitHubReleaseClientListRejectsErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	client := &testHTTPClient{responses: []*http.Response{response(http.StatusInternalServerError, "boom")}} //nolint:bodyclose // closed by production code
+	if _, err := NewGitHubReleaseClient(client, "https://api.github.com/repos/example/companion").List(context.Background()); err == nil || !strings.Contains(err.Error(), "release list response") {
+		t.Fatalf("List() error = %v", err)
+	}
 }
