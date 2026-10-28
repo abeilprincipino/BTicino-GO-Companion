@@ -611,3 +611,64 @@ func TestClaimCodeFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateChannelDefaultsToStableAndPersistsOnlyBeta(t *testing.T) {
+	t.Parallel()
+
+	source := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(source, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	loaded, err := Load(source)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.System.UpdateChannel != UpdateChannelStable {
+		t.Fatalf("UpdateChannel = %q", loaded.System.UpdateChannel)
+	}
+
+	for channel, want := range map[string]string{UpdateChannelStable: "", UpdateChannelBeta: UpdateChannelBeta} {
+		loaded.System.UpdateChannel = channel
+
+		data, err := encode(loaded)
+		if err != nil {
+			t.Fatalf("encode() error = %v", err)
+		}
+
+		var document struct {
+			System struct {
+				Updates map[string]any `yaml:"updates"`
+			} `yaml:"system"`
+		}
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			t.Fatalf("decode encoded config: %v", err)
+		}
+
+		got, present := document.System.Updates["channel"]
+		if want == "" && present || want != "" && got != want {
+			t.Fatalf("channel %q encoded as %v (present %t)", channel, got, present)
+		}
+	}
+}
+
+func TestValidateUpdateChannel(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Default(Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.System.UpdateChannel != UpdateChannelStable {
+		t.Fatalf("default UpdateChannel = %q", cfg.System.UpdateChannel)
+	}
+
+	for channel, valid := range map[string]bool{"": true, UpdateChannelStable: true, UpdateChannelBeta: true, "nightly": false} {
+		cfg.System.UpdateChannel = channel
+		if err := Validate(cfg); (err == nil) != valid {
+			t.Fatalf("Validate(channel %q) error = %v", channel, err)
+		}
+	}
+}
