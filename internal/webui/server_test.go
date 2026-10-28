@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -635,9 +636,12 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, dst any) 
 }
 
 type fakeUpdateProvider struct {
-	status  system.UpdateStatus
-	check   func(context.Context) (system.UpdateStatus, error)
-	install func(context.Context) (system.UpdateStatus, error)
+	status         system.UpdateStatus
+	check          func(context.Context) (system.UpdateStatus, error)
+	install        func(context.Context) (system.UpdateStatus, error)
+	prereleases    []system.Prerelease
+	prereleasesErr error
+	installVersion func(context.Context, string) (system.UpdateStatus, error)
 }
 
 func (f fakeUpdateProvider) Status(context.Context) (system.UpdateStatus, error) {
@@ -658,6 +662,18 @@ func (f fakeUpdateProvider) Install(ctx context.Context) (system.UpdateStatus, e
 	}
 
 	return f.install(ctx)
+}
+
+func (f fakeUpdateProvider) Prereleases(context.Context) ([]system.Prerelease, error) {
+	return f.prereleases, f.prereleasesErr
+}
+
+func (f fakeUpdateProvider) InstallVersion(ctx context.Context, version string) (system.UpdateStatus, error) {
+	if f.installVersion == nil {
+		return f.status, nil
+	}
+
+	return f.installVersion(ctx, version)
 }
 
 // A bootstrap session whose snapshot predates a concurrent pair/local owner
@@ -700,5 +716,116 @@ func TestBootstrapSavePasswordRefusesWhenOwnerWasSetConcurrently(t *testing.T) {
 
 	if after := store.Snapshot().WebUI; after.AdminUsername != before.AdminUsername || after.AdminPasswordHash != before.AdminPasswordHash || after.SessionSecret != before.SessionSecret {
 		t.Fatalf("owner or session secret changed: before %#v, after %#v", before, after)
+	}
+}
+
+func TestUpdateChannelPersistsTheChoice(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{status: system.UpdateStatus{Channel: system.UpdateChannelBeta, Stage: "idle"}})
+
+	response := request(t, server, http.MethodPut, "/webui/api/management/update/channel", map[string]string{"channel": "beta"}, nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated channel status = %d", response.Code)
+	}
+
+	cookie := configuredSession(t, server)
+
+	response = request(t, server, http.MethodPut, "/webui/api/management/update/channel", map[string]string{"channel": "beta"}, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("channel status = %d: %s", response.Code, response.Body.String())
+	}
+
+	if got := store.Snapshot().System.UpdateChannel; got != config.UpdateChannelBeta {
+		t.Fatalf("UpdateChannel = %q", got)
+	}
+
+	response = request(t, server, http.MethodPut, "/webui/api/management/update/channel", map[string]string{"channel": "nightly"}, cookie)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid channel status = %d", response.Code)
+	}
+
+	if got := store.Snapshot().System.UpdateChannel; got != config.UpdateChannelBeta {
+		t.Fatalf("UpdateChannel after invalid request = %q", got)
+	}
+}
+
+func TestUpdatePrereleasesListsFromUpdater(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{prereleases: []system.Prerelease{{Version: "v1.3.0-beta.1", Installed: true}}})
+
+	response := request(t, server, http.MethodGet, "/webui/api/management/update/prereleases", nil, configuredSession(t, server))
+	if response.Code != http.StatusOK {
+		t.Fatalf("prereleases status = %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		Prereleases []system.Prerelease `json:"prereleases"`
+	}
+	decodeResponse(t, response, &body)
+
+	if len(body.Prereleases) != 1 || body.Prereleases[0].Version != "v1.3.0-beta.1" || !body.Prereleases[0].Installed {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestUpdatePrereleasesUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{prereleasesErr: system.ErrUpdateUnavailable})
+
+	response := request(t, server, http.MethodGet, "/webui/api/management/update/prereleases", nil, configuredSession(t, server))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("prereleases status = %d", response.Code)
+	}
+}
+
+func TestUpdateInstallWithVersionInvokesInstallVersion(t *testing.T) {
+	t.Parallel()
+
+	versions := make(chan string, 1)
+	server, _ := testServer(t, nil)
+	server.SetUpdate(fakeUpdateProvider{
+		install: func(context.Context) (system.UpdateStatus, error) {
+			t.Error("Install called for a versioned request")
+			return system.UpdateStatus{}, nil
+		},
+		installVersion: func(_ context.Context, version string) (system.UpdateStatus, error) {
+			versions <- version
+			return system.UpdateStatus{RestartRequired: true, StagedVersion: version}, nil
+		},
+	})
+
+	response := request(t, server, http.MethodPost, "/webui/api/management/update", map[string]string{"version": "v1.3.0-beta.1"}, configuredSession(t, server))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("install status = %d: %s", response.Code, response.Body.String())
+	}
+
+	if got := <-versions; got != "v1.3.0-beta.1" {
+		t.Fatalf("version = %q", got)
+	}
+}
+
+func TestUpdateInstallWithVersionMapsErrors(t *testing.T) {
+	t.Parallel()
+
+	for err, want := range map[error]int{
+		system.ErrReleaseNotFound:         http.StatusNotFound,
+		system.ErrReleaseAlreadyInstalled: http.StatusConflict,
+		errors.New("download failed"):     http.StatusServiceUnavailable,
+	} {
+		server, _ := testServer(t, nil)
+		server.SetUpdate(fakeUpdateProvider{installVersion: func(context.Context, string) (system.UpdateStatus, error) {
+			return system.UpdateStatus{}, err
+		}})
+
+		response := request(t, server, http.MethodPost, "/webui/api/management/update", map[string]string{"version": "v1.3.0-beta.1"}, configuredSession(t, server))
+		if response.Code != want {
+			t.Fatalf("error %v: status = %d, want %d", err, response.Code, want)
+		}
 	}
 }

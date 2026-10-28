@@ -431,7 +431,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	build := system.CurrentBuildInfo()
 	policy := func() system.UpdatePolicy {
 		cfg := configStore.Snapshot().System
-		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: system.CompanionDataDir}
+		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, Channel: cfg.UpdateChannel, DataDir: system.CompanionDataDir}
 	}
 
 	var source system.ReleaseSource
