@@ -253,19 +253,35 @@
     <div id="managementUpdatesPage" class="page hidden">
       <h1 class="page-title">Updates</h1>
       <p class="page-desc">Check for signed Companion releases, install an available update, and review the active release state.</p>
+      <div class="card section">
+        <div class="card-header">Channel</div>
+        <p class="card-desc">Stable installs the latest release. Beta lists the published pre-releases so you can pick the one to install, older ones included.</p>
+        <select id="updatesChannel" class="form-input filter-select" title="Update channel" onchange="changeUpdateChannel(this.value)">
+          <option value="stable">Stable</option>
+          <option value="beta">Beta</option>
+        </select>
+      </div>
       <div class="grid grid-2 section">
         <div class="card">
           <div class="card-header">Release</div>
           <div class="info-row"><span class="info-label">Current version</span><span id="updatesCurrentVersion" class="info-value mono">-</span></div>
-          <div class="info-row"><span class="info-label">Latest version</span><span id="updatesLatestVersion" class="info-value mono">-</span></div>
+          <div class="info-row"><span class="info-label">Latest stable</span><span id="updatesLatestVersion" class="info-value mono">-</span></div>
           <div class="info-row"><span class="info-label">Status</span><span class="info-value"><span id="updatesStageBadge" class="badge badge-info">-</span></span></div>
         </div>
         <div class="card">
           <div class="card-header">Actions</div>
           <p id="updatesDescription" class="card-desc">Loading update status.</p>
-          <div class="header-actions">
-            <button id="updatesCheck" class="btn btn-secondary btn-sm" type="button" onclick="checkForUpdates()">Check for Updates</button>
-            <button id="updatesInstall" class="btn btn-primary btn-sm hidden" type="button" onclick="installUpdate()">Install Update</button>
+          <div id="updatesStableActions">
+            <div class="header-actions">
+              <button id="updatesCheck" class="btn btn-secondary btn-sm" type="button" onclick="checkForUpdates()">Check for Updates</button>
+              <button id="updatesInstall" class="btn btn-primary btn-sm hidden" type="button" onclick="installUpdate()">Install Update</button>
+            </div>
+          </div>
+          <div id="updatesBetaActions" class="hidden">
+            <div id="updatesPrereleases"></div>
+            <div class="header-actions">
+              <button id="updatesRefreshPrereleases" class="btn btn-secondary btn-sm" type="button" onclick="loadPrereleases()">Refresh</button>
+            </div>
           </div>
           <div id="updatesStatus" class="form-status" aria-live="polite"></div>
         </div>

@@ -931,6 +931,19 @@ function renderUpdateStatus(update) {
   document.getElementById('updatesDescription').textContent = description;
   var install = document.getElementById('updatesInstall');
   if (install) install.classList.toggle('hidden', !update.update_available);
+  var beta = update.channel === 'beta';
+  var usable = update.enabled && update.stage !== 'unavailable';
+  var channel = document.getElementById('updatesChannel');
+  if (channel) {
+    channel.value = beta ? 'beta' : 'stable';
+    channel.disabled = !usable;
+  }
+  document.getElementById('updatesStableActions').classList.toggle('hidden', beta);
+  document.getElementById('updatesBetaActions').classList.toggle('hidden', !beta);
+  if (beta && (update.stage === 'idle' || update.stage === 'available')) {
+    document.getElementById('updatesDescription').textContent = 'Pick a pre-release to install. Companion restarts after installing it.';
+  }
+  if (beta && usable) loadPrereleases();
 }
 
 function checkForUpdates() {
@@ -963,6 +976,71 @@ function installUpdate() {
   }).catch(function(err) {
     if (button) button.disabled = false;
     handleApiError(err, 'Update failed');
+  });
+}
+
+function changeUpdateChannel(channel) {
+  var select = document.getElementById('updatesChannel');
+  if (select) select.disabled = true;
+  apiPut('/webui/api/management/update/channel', { channel: channel }).then(function(update) {
+    renderUpdateStatus(update);
+    toast.show({ kind: 'success', message: channel === 'beta' ? 'Beta channel selected.' : 'Stable channel selected.' });
+  }).catch(function(err) {
+    handleApiError(err, 'Failed to change update channel');
+    loadUpdateStatus();
+  });
+}
+
+function loadPrereleases() {
+  var container = document.getElementById('updatesPrereleases');
+  if (!container) return;
+  container.innerHTML = '<p class="card-desc">Loading pre-releases...</p>';
+  apiGet('/webui/api/management/update/prereleases').then(function(data) {
+    renderPrereleases(data.prereleases || []);
+  }).catch(function(err) {
+    container.innerHTML = '<p class="card-desc">' + escapeHtml(err.message || 'Failed to load pre-releases.') + '</p>';
+    handleApiError(err);
+  });
+}
+
+function renderPrereleases(prereleases) {
+  var container = document.getElementById('updatesPrereleases');
+  if (!container) return;
+  if (!prereleases.length) {
+    container.innerHTML = '<p class="card-desc">No pre-releases published.</p>';
+    return;
+  }
+  var installedIndex = prereleases.findIndex(function(p) { return p.installed; });
+  container.innerHTML = prereleases.map(function(p, index) {
+    var date = p.published_at ? new Date(p.published_at).toLocaleDateString() : '';
+    var action = p.installed
+      ? '<span class="badge badge-success">Installed</span>'
+      : '<button class="btn btn-primary btn-sm" type="button" data-index="' + index + '">Install</button>';
+    return '<div class="info-row"><span class="info-label"><span class="mono-inline">' + escapeHtml(p.version) + '</span>' +
+      (date ? ' &middot; ' + escapeHtml(date) : '') + '</span><span class="info-value">' + action + '</span></div>';
+  }).join('');
+  container.querySelectorAll('button[data-index]').forEach(function(button) {
+    var index = Number(button.getAttribute('data-index'));
+    button.addEventListener('click', function() {
+      installPrerelease(prereleases[index].version, installedIndex >= 0 && index > installedIndex, button);
+    });
+  });
+}
+
+function installPrerelease(version, downgrade, button) {
+  var message = downgrade
+    ? 'This pre-release is older than the running one: Companion will be downgraded to ' + version + ' and restart.'
+    : 'Companion will install ' + version + ' and restart.';
+  requestConfirmation('Install ' + version + '?', message, 'Install', function() {
+    if (button) button.disabled = true;
+    apiPost('/webui/api/management/update', { version: version }).then(function() {
+      toast.show({ kind: 'success', message: 'Update installed. Companion is restarting...' });
+      setTimeout(pollRestartReady, 1500);
+    }).catch(function(err) {
+      if (button) button.disabled = false;
+      setStatus('updatesStatus', err.message || 'Update failed.', 'var(--danger)');
+      handleApiError(err, 'Update failed');
+    });
   });
 }
 
