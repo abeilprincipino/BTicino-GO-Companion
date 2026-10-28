@@ -263,7 +263,8 @@ func (a *snapshotAttempt) run() {
 				if a.manager.publish(a, image) {
 					a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
 						"since_arm", time.Since(armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
-						"fed_access_units", fed, "skipped_access_units", accessUnits.skipped)
+						"fed_access_units", fed, "skipped_access_units", accessUnits.skipped,
+						"nal_types_until_keyframe", strings.Join(accessUnits.skippedTypes, " "), "broken_packets", accessUnits.broken)
 				}
 
 				return
@@ -318,9 +319,16 @@ type snapshotAccessUnits struct {
 	decoder  *rtph264.Decoder
 	sps, pps []byte
 	started  bool
-	// skipped counts the access units seen before the first keyframe.
-	skipped int
+	// skipped counts the access units seen before the first keyframe;
+	// skippedTypes lists the NAL unit types of the first of them.
+	skipped      int
+	skippedTypes []string
+	// broken counts the packets the depacketizer refused, other than the ones
+	// that only wait for more packets.
+	broken int
 }
+
+const snapshotMaxSkippedTypes = 32
 
 func newSnapshotAccessUnits() *snapshotAccessUnits {
 	decoder := &rtph264.Decoder{PacketizationMode: 1}
@@ -335,16 +343,23 @@ func (u *snapshotAccessUnits) push(packet *rtp.Packet) ([]byte, bool) {
 	nalus, err := u.decoder.Decode(packet)
 	if err != nil {
 		// More packets needed, or a broken access unit: the next one may do.
+		if !errors.Is(err, rtph264.ErrMorePacketsNeeded) {
+			u.broken++
+		}
+
 		return nil, false
 	}
 
 	idr := false
 	slices := make([][]byte, 0, len(nalus))
+	types := make([]string, 0, len(nalus))
 
 	for _, nalu := range nalus {
 		if len(nalu) == 0 {
 			continue
 		}
+
+		types = append(types, fmt.Sprint(nalu[0]&0x1f))
 
 		switch h264.NALUType(nalu[0] & 0x1f) {
 		case h264.NALUTypeSPS:
@@ -358,6 +373,10 @@ func (u *snapshotAccessUnits) push(packet *rtp.Packet) ([]byte, bool) {
 		default:
 			slices = append(slices, nalu)
 		}
+	}
+
+	if !u.started && len(u.skippedTypes) < snapshotMaxSkippedTypes {
+		u.skippedTypes = append(u.skippedTypes, strings.Join(types, "+"))
 	}
 
 	if len(slices) == 0 {
