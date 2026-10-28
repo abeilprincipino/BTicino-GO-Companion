@@ -66,7 +66,7 @@ func TestHumanHandlerFormatsReadableLine(t *testing.T) {
 		t.Fatalf("handle record: %v", err)
 	}
 
-	if got, want := output.String(), "2026-07-15 13:49:48 INF api listening addr=:8080 error=\"unexpected reply\"\n"; got != want {
+	if got, want := output.String(), "2026-07-15 13:49:48.000 INF api listening addr=:8080 error=\"unexpected reply\"\n"; got != want {
 		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
