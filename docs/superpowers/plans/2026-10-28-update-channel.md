@@ -1340,12 +1340,9 @@ In `index.html`, replace the whole `<div id="managementUpdatesPage" ...>` block 
 
 - [ ] **Step 2: Script**
 
-In `app.js`, add `var _updateStatus = null;` next to the other top-level `var` declarations (after `var _sessionRefreshPending = false;`).
-
 At the end of `renderUpdateStatus(update)` (after the `install` toggle line), append:
 
 ```js
-  _updateStatus = update;
   var beta = update.channel === 'beta';
   var usable = update.enabled && update.stage !== 'unavailable';
   var channel = document.getElementById('updatesChannel');
@@ -1430,7 +1427,7 @@ function installPrerelease(version, downgrade, button) {
 }
 ```
 
-Notes for the implementer: the downgrade test uses the list order (newest first), so it is only known when the running version is itself in the list; when a stable build is running the generic message is shown. `_updateStatus` is kept for debugging from the console and future use; do not add other uses.
+Notes for the implementer: the downgrade test uses the list order (newest first), so it is only known when the running version is itself in the list; when a stable build is running the generic message is shown.
 
 - [ ] **Step 3: Verify**
 
