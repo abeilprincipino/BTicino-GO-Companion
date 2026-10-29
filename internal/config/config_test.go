@@ -831,3 +831,103 @@ func TestValidateUpdateChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestUnlockSettingsLegacyAndRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	before := store.Snapshot()
+	for _, entrypoint := range before.Companion.Entrypoints {
+		if entrypoint.UnlockMode != "" || entrypoint.UnlockDurationMS != 0 {
+			t.Fatalf("legacy unlock settings = %+v", entrypoint)
+		}
+	}
+	encoded, err := encode(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("unlock_mode:")) || bytes.Contains(encoded, []byte("unlock_duration_ms:")) {
+		t.Fatal("saving legacy settings introduced new unlock keys")
+	}
+
+	entrypoints := []Entrypoint{
+		{ID: "pedonale", Label: "Pedonale", DevAddr: "20", Capabilities: Capabilities{Stream: true, Ring: true, Unlock: true}},
+		{ID: "carrabile", Label: "Carrabile", DevAddr: "10", UnlockMode: UnlockModeAuxiliary, UnlockDurationMS: 1000, Capabilities: Capabilities{Unlock: true}},
+	}
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Companion.Entrypoints = entrypoints
+		return nil
+	}); err != nil {
+		t.Fatalf("save unlock settings: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload unlock settings: %v", err)
+	}
+	if !reflect.DeepEqual(loaded.Companion.Entrypoints, entrypoints) {
+		t.Fatalf("round-trip entrypoints = %+v, want %+v", loaded.Companion.Entrypoints, entrypoints)
+	}
+	if loaded.Auth != before.Auth || loaded.WebUI != before.WebUI {
+		t.Fatal("saving unlock settings changed authentication")
+	}
+}
+
+func TestValidateUnlockSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name     string
+		mode     string
+		duration int
+		valid    bool
+	}{
+		{"legacy defaults", "", 0, true},
+		{"explicit door", UnlockModeDoor, 2000, true},
+		{"auxiliary default duration", UnlockModeAuxiliary, 0, true},
+		{"auxiliary one second", UnlockModeAuxiliary, 1000, true},
+		{"minimum duration", UnlockModeAuxiliary, 1, true},
+		{"unknown mode", "light", 1000, false},
+		{"negative duration", UnlockModeAuxiliary, -1, false},
+		{"excessive duration", UnlockModeAuxiliary, 2001, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := store.Snapshot()
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.Update(func(cfg *Config) error {
+				cfg.Companion.Entrypoints[0].UnlockMode = test.mode
+				cfg.Companion.Entrypoints[0].UnlockDurationMS = test.duration
+				return nil
+			})
+			if (err == nil) != test.valid {
+				t.Fatalf("Update() error = %v, valid = %t", err, test.valid)
+			}
+			if !test.valid {
+				persisted, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(persisted, original) || !reflect.DeepEqual(store.Snapshot(), before) {
+					t.Fatal("invalid settings changed the file or in-memory configuration")
+				}
+			}
+		})
+	}
+}

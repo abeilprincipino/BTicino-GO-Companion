@@ -28,6 +28,16 @@ const (
 	UpdateChannelBeta   = "beta"
 )
 
+const (
+	UnlockModeDoor      = "door"
+	UnlockModeAuxiliary = "auxiliary"
+
+	// Keep the original pulse and leave time for both acknowledgements within
+	// the OpenWebNet control session's three-second deadline.
+	DefaultUnlockDurationMS = 2000
+	MaxUnlockDurationMS     = 2000
+)
+
 var (
 	ErrMissingMetadata   = errors.New("missing device metadata")
 	ErrConfigExists      = errors.New("config already exists")
@@ -60,10 +70,12 @@ type Companion struct {
 }
 
 type Entrypoint struct {
-	ID           string       `yaml:"id" json:"id"`
-	Label        string       `yaml:"label" json:"label"`
-	DevAddr      string       `yaml:"devaddr" json:"devaddr"`
-	Capabilities Capabilities `yaml:"capabilities" json:"capabilities"`
+	ID               string       `yaml:"id" json:"id"`
+	Label            string       `yaml:"label" json:"label"`
+	DevAddr          string       `yaml:"devaddr" json:"devaddr"`
+	Capabilities     Capabilities `yaml:"capabilities" json:"capabilities"`
+	UnlockMode       string       `yaml:"unlock_mode,omitempty" json:"unlock_mode,omitempty"`
+	UnlockDurationMS int          `yaml:"unlock_duration_ms,omitempty" json:"unlock_duration_ms,omitempty"`
 }
 
 type Capabilities struct {
@@ -572,6 +584,16 @@ func Validate(cfg Config) error {
 
 		if _, ok := seen[entrypoint.ID]; ok {
 			return fmt.Errorf("duplicate entrypoint id %q", entrypoint.ID)
+		}
+
+		switch entrypoint.UnlockMode {
+		case "", UnlockModeDoor, UnlockModeAuxiliary:
+		default:
+			return fmt.Errorf("entrypoint %q: invalid unlock mode %q", entrypoint.ID, entrypoint.UnlockMode)
+		}
+
+		if entrypoint.UnlockDurationMS < 0 || entrypoint.UnlockDurationMS > MaxUnlockDurationMS {
+			return fmt.Errorf("entrypoint %q: unlock duration must be 0 (default) or 1-%d milliseconds", entrypoint.ID, MaxUnlockDurationMS)
 		}
 
 		seen[entrypoint.ID] = struct{}{}

@@ -18,6 +18,7 @@ and installing a local build see [docs/build-and-install.md](docs/build-and-inst
 - [Installing a Local Build](#installing-a-local-build)
 - [Installer Options](#installer-options)
 - [After Installation](#after-installation)
+- [Auxiliary unlock commands](#auxiliary-unlock-commands)
 - [Answering Calls from Home Assistant](#answering-calls-from-home-assistant)
 - [Service Commands](#service-commands)
 - [Updates and Rollback](#updates-and-rollback)
@@ -183,6 +184,16 @@ Then:
   enabled).
 - In Home Assistant, the companion is discovered over mDNS by
   [BTicino GO Integration](https://github.com/abeilprincipino/BTicino-GO-Integration).
+
+## Auxiliary unlock commands
+
+Entrypoints can use the standard door-lock command or the auxiliary/staircase-light
+command. In **Config > Entrypoints**, choose **Auxiliary / staircase light** for an
+output operated by that intercom button, and set its device address and press duration.
+Existing entrypoints keep the standard command and two-second press when these options
+are omitted. See [auxiliary unlock configuration](docs/auxiliary-unlock.md), including
+the example for an auxiliary gate and the configuration backup required before reverting
+to a build that does not understand these options.
 
 ## Answering Calls from Home Assistant
 
