@@ -795,6 +795,8 @@ function isDoorbell(ep) {
 function entrypointCardHTML(ep, idx) {
   ep = ep || {};
   var removeDisabled = ensureCompanionConfig().entrypoints.length <= 1;
+  var unlockMode = ep.unlock_mode || 'door';
+  var unlockDuration = ep.unlock_duration_ms || 2000;
   return '<div class="card section entrypoint-card" data-index="' + idx + '">'
     + '<div class="flex-between mb-16"><div class="card-header" style="border:none;margin:0;padding:0">Entrypoint ' + (idx + 1) + '</div>'
     + '<button type="button" class="btn btn-danger btn-sm"' + (removeDisabled ? ' disabled title="At least one entrypoint is required"' : '') + ' onclick="removeEntrypointCard(' + idx + ')">Remove</button></div>'
@@ -803,6 +805,16 @@ function entrypointCardHTML(ep, idx) {
     + '<div class="form-group"><label class="form-label">Label</label><input class="form-input ep-label" type="text" value="' + escapeHtml(ep.label || '') + '" required></div>'
     + '</div>'
     + '<div class="form-group"><label class="form-label">Device Address</label><input class="form-input ep-devaddr" type="text" value="' + escapeHtml(ep.devaddr || ep.dev_addr || '') + '" required></div>'
+    + '<div class="form-row">'
+    + '<div class="form-group"><label class="form-label" for="ep-unlock-mode-' + idx + '">Unlock command</label>'
+    + '<select class="form-select ep-unlock-mode" id="ep-unlock-mode-' + idx + '">'
+    + '<option value="door"' + (unlockMode === 'door' ? ' selected' : '') + '>Door lock</option>'
+    + '<option value="auxiliary"' + (unlockMode === 'auxiliary' ? ' selected' : '') + '>Auxiliary / staircase light</option>'
+    + '</select><div class="form-hint">Use Auxiliary for an output controlled by the intercom light button.</div></div>'
+    + '<div class="form-group"><label class="form-label" for="ep-unlock-duration-' + idx + '">Press duration (ms)</label>'
+    + '<input class="form-input ep-unlock-duration" id="ep-unlock-duration-' + idx + '" type="number" min="1" max="2000" step="1" value="' + escapeHtml(unlockDuration) + '" required>'
+    + '<div class="form-hint">1–2000 ms. 1000 ms equals 1 second.</div></div>'
+    + '</div>'
     + '<div class="form-check-row">'
       + checkboxHTML('ep-doorbell-' + idx, 'ep-has-doorbell', 'Doorbell (ring + stream)', isDoorbell(ep))
       + checkboxHTML('ep-unlock-' + idx, 'ep-has-unlock', 'Unlock', !!(ep.capabilities && ep.capabilities.unlock))
@@ -817,7 +829,9 @@ function checkboxHTML(id, cls, label, checked) {
 
 function addEntrypointCard() {
   var cfg = ensureCompanionConfig();
-  cfg.entrypoints = collectEntrypoints();
+  var entrypoints = collectEntrypoints();
+  if (!entrypoints) return;
+  cfg.entrypoints = entrypoints;
   var doorbell = !cfg.entrypoints.some(isDoorbell);
   cfg.entrypoints.push({ id: 'gate' + (cfg.entrypoints.length + 1), label: 'Gate ' + (cfg.entrypoints.length + 1), devaddr: '', capabilities: { stream: doorbell, unlock: true, ring: doorbell } });
   renderEntrypointsConfig();
@@ -825,7 +839,9 @@ function addEntrypointCard() {
 
 function removeEntrypointCard(idx) {
   var cfg = ensureCompanionConfig();
-  cfg.entrypoints = collectEntrypoints();
+  var entrypoints = collectEntrypoints();
+  if (!entrypoints) return;
+  cfg.entrypoints = entrypoints;
   if (cfg.entrypoints.length <= 1) {
     setStatus('entrypointsStatus', 'At least one entrypoint is required.', 'var(--danger)');
     return;
@@ -837,9 +853,24 @@ function removeEntrypointCard(idx) {
 function collectEntrypoints() {
   var cards = document.querySelectorAll('.entrypoint-card');
   var out = [];
-  cards.forEach(function(card) {
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    var modeInput = card.querySelector('.ep-unlock-mode');
+    var durationInput = card.querySelector('.ep-unlock-duration');
+    var durationText = durationInput.value.trim();
+    var duration = Number(durationText);
+    if (modeInput.value !== 'door' && modeInput.value !== 'auxiliary') {
+      setStatus('entrypointsStatus', 'Entrypoint ' + (i + 1) + ': select a valid unlock command.', 'var(--danger)');
+      modeInput.focus();
+      return null;
+    }
+    if (!durationText || !Number.isInteger(duration) || duration < 1 || duration > 2000) {
+      setStatus('entrypointsStatus', 'Entrypoint ' + (i + 1) + ': press duration must be a whole number from 1 to 2000 ms.', 'var(--danger)');
+      durationInput.focus();
+      return null;
+    }
     var doorbell = card.querySelector('.ep-has-doorbell').checked;
-    out.push({
+    var entrypoint = {
       id: card.querySelector('.ep-id').value.trim(),
       label: card.querySelector('.ep-label').value.trim(),
       devaddr: card.querySelector('.ep-devaddr').value.trim(),
@@ -848,14 +879,20 @@ function collectEntrypoints() {
         unlock: card.querySelector('.ep-has-unlock').checked,
         ring: doorbell
       }
-    });
-  });
+    };
+    // Leave defaults absent so an unchanged door remains readable by older builds.
+    if (modeInput.value !== 'door') entrypoint.unlock_mode = modeInput.value;
+    if (duration !== 2000) entrypoint.unlock_duration_ms = duration;
+    out.push(entrypoint);
+  }
   return out;
 }
 
 function saveEntrypointsConfig(saveBtn) {
   var cfg = ensureCompanionConfig();
-  cfg.entrypoints = collectEntrypoints();
+  var entrypoints = collectEntrypoints();
+  if (!entrypoints) return;
+  cfg.entrypoints = entrypoints;
   if (!cfg.entrypoints.length) {
     setStatus('entrypointsStatus', 'At least one entrypoint is required.', 'var(--danger)');
     return;
@@ -966,10 +1003,28 @@ function renderUpdateStatus(update) {
   }
   badge.textContent = label;
   document.getElementById('updatesCurrentVersion').textContent = update.current_version || '-';
-  document.getElementById('updatesLatestVersion').textContent = update.latest_version || '-';
+  var currentIsPrerelease = (update.current_version || '').indexOf('-') >= 0;
+  var latestShown = update.latest_version;
+  if (!latestShown || (latestShown === update.current_version && currentIsPrerelease)) latestShown = '-';
+  document.getElementById('updatesLatestVersion').textContent = latestShown;
   document.getElementById('updatesDescription').textContent = description;
   var install = document.getElementById('updatesInstall');
   if (install) install.classList.toggle('hidden', !update.update_available);
+  var beta = update.channel === 'beta';
+  var usable = update.enabled && update.stage !== 'unavailable';
+  var channel = document.getElementById('updatesChannel');
+  if (channel) {
+    channel.value = beta ? 'beta' : 'stable';
+    channel.disabled = !usable;
+  }
+  document.getElementById('updatesStableActions').classList.toggle('hidden', beta && usable);
+  document.getElementById('updatesBetaActions').classList.toggle('hidden', !(beta && usable));
+  if (beta && update.stage === 'available') {
+    document.getElementById('updatesDescription').textContent = 'Pick a pre-release to install. Stable ' + update.latest_version + ' is also available: switch to Stable to install it.';
+  } else if (beta && update.stage === 'idle') {
+    document.getElementById('updatesDescription').textContent = 'Pick a pre-release to install. Companion restarts after installing it.';
+  }
+  if (beta && usable) loadPrereleases();
 }
 
 function checkForUpdates() {
@@ -1002,6 +1057,70 @@ function installUpdate() {
   }).catch(function(err) {
     if (button) button.disabled = false;
     handleApiError(err, 'Update failed');
+  });
+}
+
+function changeUpdateChannel(channel) {
+  var select = document.getElementById('updatesChannel');
+  if (select) select.disabled = true;
+  apiPut('/webui/api/management/update/channel', { channel: channel }).then(function(update) {
+    renderUpdateStatus(update);
+    toast.show({ kind: 'success', message: channel === 'beta' ? 'Beta channel selected.' : 'Stable channel selected.' });
+  }).catch(function(err) {
+    handleApiError(err, 'Failed to change update channel');
+    loadUpdateStatus();
+  });
+}
+
+function loadPrereleases() {
+  var container = document.getElementById('updatesPrereleases');
+  if (!container) return;
+  container.innerHTML = '<p class="card-desc">Loading pre-releases...</p>';
+  apiGet('/webui/api/management/update/prereleases').then(function(data) {
+    renderPrereleases(data.prereleases || []);
+  }).catch(function(err) {
+    container.innerHTML = '<p class="card-desc">' + escapeHtml(err.message || 'Failed to load pre-releases.') + '</p>';
+    handleApiError(err);
+  });
+}
+
+function renderPrereleases(prereleases) {
+  var container = document.getElementById('updatesPrereleases');
+  if (!container) return;
+  if (!prereleases.length) {
+    container.innerHTML = '<p class="card-desc">No pre-releases published.</p>';
+    return;
+  }
+  container.innerHTML = prereleases.map(function(p, index) {
+    var date = p.published_at ? new Date(p.published_at).toLocaleDateString() : '';
+    var action = p.installed
+      ? '<span class="badge badge-success">Installed</span>'
+      : '<button class="btn btn-primary btn-sm" type="button" data-index="' + index + '">Install</button>';
+    return '<div class="info-row"><span class="info-label"><span class="mono-inline">' + escapeHtml(p.version) + '</span>' +
+      (date ? ' &middot; ' + escapeHtml(date) : '') + '</span><span class="info-value">' + action + '</span></div>';
+  }).join('');
+  container.querySelectorAll('button[data-index]').forEach(function(button) {
+    var index = Number(button.getAttribute('data-index'));
+    button.addEventListener('click', function() {
+      installPrerelease(prereleases[index].version, prereleases[index].older, button);
+    });
+  });
+}
+
+function installPrerelease(version, downgrade, button) {
+  var message = downgrade
+    ? 'This pre-release is older than the running one: Companion will be downgraded to ' + version + ' and restart.'
+    : 'Companion will install ' + version + ' and restart.';
+  requestConfirmation('Install ' + version + '?', message, 'Install', function() {
+    if (button) button.disabled = true;
+    apiPost('/webui/api/management/update', { version: version }).then(function() {
+      toast.show({ kind: 'success', message: 'Update installed. Companion is restarting...' });
+      setTimeout(pollRestartReady, 1500);
+    }).catch(function(err) {
+      if (button) button.disabled = false;
+      setStatus('updatesStatus', err.message || 'Update failed.', 'var(--danger)');
+      handleApiError(err, 'Update failed');
+    });
   });
 }
 

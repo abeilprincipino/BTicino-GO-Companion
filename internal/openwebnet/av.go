@@ -23,9 +23,13 @@ var (
 
 // AVClient starts the intercom clear-RTP streams.
 type AVClient struct {
-	logger       *slog.Logger
-	address      string
-	attempts     int
+	logger  *slog.Logger
+	address string
+	// retryWindow is how long a rejected request is retried: the intercom
+	// refuses video until its own stream is up, which it decides, so the
+	// request is repeated every retryDelay until then rather than a fixed
+	// number of times.
+	retryWindow  time.Duration
 	dialTimeout  time.Duration
 	replyTimeout time.Duration
 	retryDelay   time.Duration
@@ -42,10 +46,10 @@ func NewAVClient(logger *slog.Logger) *AVClient {
 	return &AVClient{
 		logger:       logger.With("component", "media.activation"),
 		address:      net.JoinHostPort(AVHost, "30007"),
-		attempts:     3,
+		retryWindow:  6 * time.Second,
 		dialTimeout:  2 * time.Second,
 		replyTimeout: 2 * time.Second,
-		retryDelay:   300 * time.Millisecond,
+		retryDelay:   100 * time.Millisecond,
 		flowTimeout:  1200 * time.Millisecond,
 		flowPoll:     100 * time.Millisecond,
 		flowWindow:   2 * time.Second,
@@ -103,7 +107,12 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 
 	var lastErr error
 
-	for attempt := 1; attempt <= c.attempts; attempt++ {
+	deadline := time.Now().Add(c.retryWindow)
+	attempt := 0
+
+	for attempt == 0 || time.Now().Before(deadline) {
+		attempt++
+
 		if attempt > 1 {
 			c.logger.DebugContext(ctx, "av stream retrying", "stream", kind, "attempt", attempt, "retry_delay", c.retryDelay)
 
@@ -114,7 +123,10 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 
 		c.logger.DebugContext(ctx, "av stream request", "stream", kind, "attempt", attempt)
 
+		requested := time.Now()
 		ack, err := c.exchange(ctx, frame)
+		c.logger.DebugContext(ctx, "av stream reply", "stream", kind, "attempt", attempt, "ack", ack, "error", err, "elapsed", time.Since(requested))
+
 		if err != nil {
 			lastErr = err
 		} else if !ack {
@@ -133,9 +145,9 @@ func (c *AVClient) startStream(ctx context.Context, kind, frame string, probe me
 		c.logger.DebugContext(ctx, "av stream attempt failed", "stream", kind, "attempt", attempt, "error", lastErr)
 	}
 
-	c.logger.WarnContext(ctx, "av stream start failed", "stream", kind, "attempts", c.attempts, "error", lastErr)
+	c.logger.WarnContext(ctx, "av stream start failed", "stream", kind, "attempts", attempt, "error", lastErr)
 
-	return fmt.Errorf("start %s stream after %d attempts: %w", kind, c.attempts, lastErr)
+	return fmt.Errorf("start %s stream after %d attempts: %w", kind, attempt, lastErr)
 }
 
 func (c *AVClient) exchange(ctx context.Context, frame string) (bool, error) {

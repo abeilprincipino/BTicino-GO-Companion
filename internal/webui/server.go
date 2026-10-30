@@ -45,6 +45,8 @@ type (
 		Status(context.Context) (system.UpdateStatus, error)
 		Check(context.Context) (system.UpdateStatus, error)
 		Install(context.Context) (system.UpdateStatus, error)
+		Prereleases(context.Context) ([]system.Prerelease, error)
+		InstallVersion(context.Context, string) (system.UpdateStatus, error)
 	}
 )
 
@@ -152,6 +154,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /webui/api/management/update", s.requireReady(s.handleUpdateStatus))
 	mux.HandleFunc("POST /webui/api/management/update/check", s.requireReady(s.handleUpdateCheck))
 	mux.HandleFunc("POST /webui/api/management/update", s.requireReady(s.handleUpdateInstall))
+	mux.HandleFunc("PUT /webui/api/management/update/channel", s.requireReady(s.handleUpdateChannel))
+	mux.HandleFunc("GET /webui/api/management/update/prereleases", s.requireReady(s.handleUpdatePrereleases))
 	mux.HandleFunc("GET /webui/api/logs/companion", s.requireReady(s.handleLogs))
 	mux.HandleFunc("GET /webui/api/logs/companion/level", s.requireReady(s.handleLogging))
 	mux.HandleFunc("PUT /webui/api/logs/companion/level", s.requireReady(s.handleLogging))
@@ -201,8 +205,32 @@ func (s *Server) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.update.Install(r.Context())
-	if err != nil {
+	var body struct {
+		Version string `json:"version"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+
+	var (
+		status system.UpdateStatus
+		err    error
+	)
+
+	if body.Version == "" {
+		status, err = s.update.Install(r.Context())
+	} else {
+		status, err = s.update.InstallVersion(r.Context(), body.Version)
+	}
+
+	switch {
+	case errors.Is(err, system.ErrReleaseNotFound):
+		writeError(w, http.StatusNotFound, "release is not a published pre-release")
+		return
+	case errors.Is(err, system.ErrReleaseAlreadyInstalled):
+		writeError(w, http.StatusConflict, "release is already installed")
+		return
+	case err != nil:
 		writeError(w, http.StatusServiceUnavailable, "update install failed")
 		return
 	}
@@ -227,6 +255,60 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
+		return
+	}
+
+	var body struct {
+		Channel string `json:"channel"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+
+	if body.Channel != config.UpdateChannelStable && body.Channel != config.UpdateChannelBeta {
+		writeError(w, http.StatusBadRequest, "update channel must be stable or beta")
+		return
+	}
+
+	if err := s.config.Update(func(cfg *config.Config) error {
+		cfg.System.UpdateChannel = body.Channel
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "configuration is invalid")
+		return
+	}
+
+	status, err := s.update.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "update status is unavailable")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleUpdatePrereleases(w http.ResponseWriter, r *http.Request) {
+	if s.update == nil {
+		writeError(w, http.StatusServiceUnavailable, "update control is unavailable")
+		return
+	}
+
+	prereleases, err := s.update.Prereleases(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "pre-release list is unavailable")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"prereleases": prereleases})
 }
 
 func readMemAvailableKB() int64 {

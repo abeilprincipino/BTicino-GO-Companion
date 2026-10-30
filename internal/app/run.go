@@ -151,6 +151,11 @@ func run(
 
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
+		// Who starts which stream, to where, and when: the AV frames say it.
+		if strings.HasPrefix(frame, "*7*") {
+			logger.Debug("openwebnet av frame", "frame", frame)
+		}
+
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
 			rtspServer.ObserveControlTrack(true)
@@ -438,12 +443,12 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	build := system.CurrentBuildInfo()
 	policy := func() system.UpdatePolicy {
 		cfg := configStore.Snapshot().System
-		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, DataDir: system.CompanionDataDir}
+		return system.UpdatePolicy{Enabled: cfg.UpdateEnabled, Exposed: cfg.UpdateExposed, Channel: cfg.UpdateChannel, DataDir: system.CompanionDataDir}
 	}
 
 	var source system.ReleaseSource
 	if strings.TrimSpace(build.ReleaseRepo) != "" {
-		source = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo+"/releases/latest")
+		source = system.NewGitHubReleaseClient(&http.Client{Timeout: 30 * time.Second}, "https://api.github.com/repos/"+build.ReleaseRepo)
 	}
 
 	updater := system.NewUpdater(source, build, policy, func(ctx context.Context) error { return rt.Restart(ctx, "companion") })
@@ -763,8 +768,9 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 	}
 
 	var (
-		source     *media.SourceSession
-		sourceLive atomic.Bool
+		source       *media.SourceSession
+		sourceLive   atomic.Bool
+		sourceClosed atomic.Bool
 	)
 
 	if callbackSetter, ok := dialer.(interface{ SetRemoteDialogEnded(func()) }); ok {
@@ -785,8 +791,11 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		core.EntrypointID(entrypoint.ID),
 		calls,
 		openwebnet.NewAVClient(logger),
+		// Video flows from the first packet, before the AV activation reports
+		// the stream started: the intercom opens it with its only keyframe for
+		// about a second, and the snapshot and the ring clip need that one.
 		media.NewVideoRTPReceiver(logger, func(packet *rtp.Packet) {
-			if sourceLive.Load() && videoPacket != nil {
+			if !sourceClosed.Load() && videoPacket != nil {
 				videoPacket(packet)
 			}
 		}),
@@ -800,6 +809,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 
 	return source, func() {
 		sourceLive.Store(false)
+		sourceClosed.Store(true)
 
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

@@ -35,10 +35,17 @@ type Control struct {
 	host        string
 	port        int
 	password    string
-	entrypoints map[core.EntrypointID]string
+	entrypoints map[core.EntrypointID]unlockTarget
 	timeout     time.Duration
 	trace       *Trace
 }
+
+type unlockTarget struct {
+	address    string
+	mode       string
+	durationMS int
+}
+
 type VoicemailStatus struct{ Enabled bool }
 
 // DiagnosticSnapshot contains device metadata reported by OpenWebNet.
@@ -53,26 +60,48 @@ type DiagnosticSnapshot struct {
 }
 
 func NewControl(entrypoints []config.Entrypoint, trace *Trace) *Control {
-	addresses := make(map[core.EntrypointID]string, len(entrypoints))
+	targets := make(map[core.EntrypointID]unlockTarget, len(entrypoints))
 	for _, entrypoint := range entrypoints {
-		addresses[core.EntrypointID(entrypoint.ID)] = entrypoint.DevAddr
+		targets[core.EntrypointID(entrypoint.ID)] = unlockTarget{
+			address:    strings.TrimSpace(entrypoint.DevAddr),
+			mode:       entrypoint.UnlockMode,
+			durationMS: entrypoint.UnlockDurationMS,
+		}
 	}
 
-	return &Control{host: commandHost, port: commandPort, entrypoints: addresses, timeout: 3 * time.Second, trace: trace}
+	return &Control{host: commandHost, port: commandPort, entrypoints: targets, timeout: 3 * time.Second, trace: trace}
 }
 
 func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
-	address := c.entrypoints[id]
-	if address == "" {
+	target, ok := c.entrypoints[id]
+	if !ok || target.address == "" {
 		return fmt.Errorf("unknown entrypoint %q", id)
 	}
 
+	var openFrame, closeFrame string
+	switch target.mode {
+	case "", config.UnlockModeDoor:
+		openFrame, closeFrame = BuildUnlockOpen(target.address), BuildUnlockClose(target.address)
+	case config.UnlockModeAuxiliary:
+		openFrame, closeFrame = BuildAuxiliaryOpen(target.address), BuildAuxiliaryClose(target.address)
+	default:
+		return fmt.Errorf("entrypoint %q: invalid unlock mode %q", id, target.mode)
+	}
+
+	durationMS := target.durationMS
+	if durationMS == 0 {
+		durationMS = config.DefaultUnlockDurationMS
+	}
+	if durationMS < 1 || durationMS > config.MaxUnlockDurationMS {
+		return fmt.Errorf("entrypoint %q: invalid unlock duration %d milliseconds", id, durationMS)
+	}
+
 	return c.exec(ctx, func(reader *frameReader) error {
-		if err := c.send(reader, BuildUnlockOpen(address), FrameACK); err != nil {
+		if err := c.send(reader, openFrame, FrameACK); err != nil {
 			return fmt.Errorf("unlock open: %w", err)
 		}
 
-		timer := time.NewTimer(2 * time.Second)
+		timer := time.NewTimer(time.Duration(durationMS) * time.Millisecond)
 		defer timer.Stop()
 
 		select {
@@ -81,7 +110,7 @@ func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
 		case <-timer.C:
 		}
 
-		if err := c.send(reader, BuildUnlockClose(address), FrameACK); err != nil {
+		if err := c.send(reader, closeFrame, FrameACK); err != nil {
 			return fmt.Errorf("unlock close: %w", err)
 		}
 

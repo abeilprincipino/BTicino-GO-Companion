@@ -219,11 +219,23 @@ func (c *RingClip) run(writer *clipWriter) {
 	defer close(c.done)
 	defer c.finish(writer)
 
+	var firstPacket time.Time
+
 	for {
 		select {
 		case packet := <-c.packets:
+			if firstPacket.IsZero() {
+				firstPacket = time.Now()
+			}
+
+			started := writer.started
 			if writer.push(packet) {
 				return
+			}
+
+			if !started && writer.started {
+				c.recorder.logger.Debug("ring clip first keyframe", "entrypoint_id", c.entrypointID,
+					"dropped_access_units", writer.droppedAccessUnits, "since_first_packet", time.Since(firstPacket))
 			}
 		case <-c.closed:
 			// What was queued before the close still belongs to the clip.

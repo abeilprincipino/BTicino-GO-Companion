@@ -96,6 +96,10 @@ func (l *Listener) Run(ctx context.Context, sink func(core.Event)) error {
 		l.trace.Record(message, len(events))
 
 		for _, event := range events {
+			l.logger.Debug("openwebnet event", "event_type", event.Type(), "frame", message.Raw)
+		}
+
+		for _, event := range events {
 			sink(event)
 		}
 	}

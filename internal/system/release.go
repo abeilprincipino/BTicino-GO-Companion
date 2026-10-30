@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 var (
@@ -28,8 +29,11 @@ type ReleaseAsset struct {
 }
 
 type ReleaseManifest struct {
-	TagName string         `json:"tag_name"`
-	Assets  []ReleaseAsset `json:"assets"`
+	TagName     string         `json:"tag_name"`
+	Prerelease  bool           `json:"prerelease"`
+	Draft       bool           `json:"draft"`
+	PublishedAt time.Time      `json:"published_at"`
+	Assets      []ReleaseAsset `json:"assets"`
 }
 
 func ParseGitHubReleaseManifest(reader io.Reader) (ReleaseManifest, error) {
@@ -40,26 +44,65 @@ func ParseGitHubReleaseManifest(reader io.Reader) (ReleaseManifest, error) {
 		return ReleaseManifest{}, fmt.Errorf("decode release manifest: %w", ErrInvalidReleaseManifest)
 	}
 
-	if decoder.Decode(&struct{}{}) != io.EOF || manifest.TagName == "" {
+	if decoder.Decode(&struct{}{}) != io.EOF {
 		return ReleaseManifest{}, ErrInvalidReleaseManifest
+	}
+
+	if err := validateReleaseManifest(manifest); err != nil {
+		return ReleaseManifest{}, err
+	}
+
+	return manifest, nil
+}
+
+// ParseGitHubReleaseList decodes a GitHub release listing. Drafts and entries
+// that fail manifest validation are dropped, so one broken release does not
+// hide the others.
+func ParseGitHubReleaseList(reader io.Reader) ([]ReleaseManifest, error) {
+	var manifests []ReleaseManifest
+
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(&manifests); err != nil {
+		return nil, fmt.Errorf("decode release list: %w", ErrInvalidReleaseManifest)
+	}
+
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, ErrInvalidReleaseManifest
+	}
+
+	releases := make([]ReleaseManifest, 0, len(manifests))
+	for _, manifest := range manifests {
+		if manifest.Draft || validateReleaseManifest(manifest) != nil {
+			continue
+		}
+
+		releases = append(releases, manifest)
+	}
+
+	return releases, nil
+}
+
+func validateReleaseManifest(manifest ReleaseManifest) error {
+	if manifest.TagName == "" {
+		return ErrInvalidReleaseManifest
 	}
 
 	for _, asset := range manifest.Assets {
 		if asset.Name == "" || asset.Digest == "" || asset.DownloadURL == "" {
-			return ReleaseManifest{}, ErrInvalidReleaseManifest
+			return ErrInvalidReleaseManifest
 		}
 
 		if _, err := parseSHA256Digest(asset.Digest); err != nil {
-			return ReleaseManifest{}, fmt.Errorf("asset %q: %w", asset.Name, err)
+			return fmt.Errorf("asset %q: %w", asset.Name, err)
 		}
 
 		parsedURL, err := url.Parse(asset.DownloadURL)
 		if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
-			return ReleaseManifest{}, fmt.Errorf("asset %q: %w", asset.Name, ErrInvalidReleaseManifest)
+			return fmt.Errorf("asset %q: %w", asset.Name, ErrInvalidReleaseManifest)
 		}
 	}
 
-	return manifest, nil
+	return nil
 }
 
 func (m ReleaseManifest) Asset(name string) (ReleaseAsset, error) {
@@ -109,37 +152,65 @@ type HTTPDoer interface {
 }
 
 type GitHubReleaseClient struct {
-	client HTTPDoer
-	url    string
+	client  HTTPDoer
+	repoURL string
 }
 
-func NewGitHubReleaseClient(client HTTPDoer, latestReleaseURL string) *GitHubReleaseClient {
-	return &GitHubReleaseClient{client: client, url: latestReleaseURL}
+// NewGitHubReleaseClient takes the repository API base,
+// https://api.github.com/repos/<owner>/<repo>.
+func NewGitHubReleaseClient(client HTTPDoer, repoURL string) *GitHubReleaseClient {
+	return &GitHubReleaseClient{client: client, repoURL: strings.TrimSuffix(repoURL, "/")}
 }
 
 func (c *GitHubReleaseClient) Latest(ctx context.Context) (ReleaseManifest, error) {
-	if c == nil || c.client == nil || c.url == "" {
+	if c == nil || c.client == nil || c.repoURL == "" {
 		return ReleaseManifest{}, ErrRuntimeUnavailable
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	body, err := c.get(ctx, c.repoURL+"/releases/latest", "latest release")
 	if err != nil {
-		return ReleaseManifest{}, fmt.Errorf("create latest release request: %w", err)
+		return ReleaseManifest{}, err
+	}
+	defer body.Close() //nolint:errcheck // response already validated
+
+	return ParseGitHubReleaseManifest(io.LimitReader(body, 1<<20))
+}
+
+// List returns the 50 most recent published releases, pre-releases included.
+func (c *GitHubReleaseClient) List(ctx context.Context) ([]ReleaseManifest, error) {
+	if c == nil || c.client == nil || c.repoURL == "" {
+		return nil, ErrRuntimeUnavailable
+	}
+
+	body, err := c.get(ctx, c.repoURL+"/releases?per_page=50", "release list")
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close() //nolint:errcheck // response already validated
+
+	return ParseGitHubReleaseList(io.LimitReader(body, 4<<20))
+}
+
+func (c *GitHubReleaseClient) get(ctx context.Context, target, what string) (io.ReadCloser, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create %s request: %w", what, err)
 	}
 
 	request.Header.Set("Accept", "application/vnd.github+json")
 
 	response, err := c.client.Do(request)
 	if err != nil {
-		return ReleaseManifest{}, fmt.Errorf("request latest release: %w", err)
+		return nil, fmt.Errorf("request %s: %w", what, err)
 	}
-	defer response.Body.Close() //nolint:errcheck // response already validated
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return ReleaseManifest{}, fmt.Errorf("latest release response: %s", response.Status)
+		response.Body.Close() //nolint:errcheck,gosec // status error is returned instead
+
+		return nil, fmt.Errorf("%s response: %s", what, response.Status)
 	}
 
-	return ParseGitHubReleaseManifest(io.LimitReader(response.Body, 1<<20))
+	return response.Body, nil
 }
 
 func (c *GitHubReleaseClient) Download(ctx context.Context, asset ReleaseAsset) (io.ReadCloser, error) {

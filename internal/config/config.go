@@ -23,6 +23,21 @@ const (
 	defaultEntrypoint = "main"
 )
 
+const (
+	UpdateChannelStable = "stable"
+	UpdateChannelBeta   = "beta"
+)
+
+const (
+	UnlockModeDoor      = "door"
+	UnlockModeAuxiliary = "auxiliary"
+
+	// Keep the original pulse and leave time for both acknowledgements within
+	// the OpenWebNet control session's three-second deadline.
+	DefaultUnlockDurationMS = 2000
+	MaxUnlockDurationMS     = 2000
+)
+
 var (
 	ErrMissingMetadata   = errors.New("missing device metadata")
 	ErrConfigExists      = errors.New("config already exists")
@@ -55,10 +70,12 @@ type Companion struct {
 }
 
 type Entrypoint struct {
-	ID           string       `yaml:"id" json:"id"`
-	Label        string       `yaml:"label" json:"label"`
-	DevAddr      string       `yaml:"devaddr" json:"devaddr"`
-	Capabilities Capabilities `yaml:"capabilities" json:"capabilities"`
+	ID               string       `yaml:"id" json:"id"`
+	Label            string       `yaml:"label" json:"label"`
+	DevAddr          string       `yaml:"devaddr" json:"devaddr"`
+	Capabilities     Capabilities `yaml:"capabilities" json:"capabilities"`
+	UnlockMode       string       `yaml:"unlock_mode,omitempty" json:"unlock_mode,omitempty"`
+	UnlockDurationMS int          `yaml:"unlock_duration_ms,omitempty" json:"unlock_duration_ms,omitempty"`
 }
 
 type Capabilities struct {
@@ -100,6 +117,7 @@ type System struct {
 	RebootEnabled bool               `yaml:"reboot_enabled"`
 	UpdateEnabled bool               `yaml:"update_enabled"`
 	UpdateExposed bool               `yaml:"update_exposed"`
+	UpdateChannel string             `yaml:"update_channel"`
 	Services      map[string]Service `yaml:"services"`
 }
 
@@ -112,11 +130,16 @@ type persistedSystem struct {
 	Reboot struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"reboot"`
-	Updates struct {
-		Enabled bool `yaml:"enabled"`
-		Exposed bool `yaml:"exposed"`
-	} `yaml:"updates"`
+	Updates  persistedUpdates   `yaml:"updates"`
 	Services map[string]Service `yaml:"services"`
+}
+
+// persistedUpdates omits a stable channel: the loader rejects unknown keys, so
+// writing it would make the config unreadable for builds older than channels.
+type persistedUpdates struct {
+	Enabled bool   `yaml:"enabled"`
+	Exposed bool   `yaml:"exposed"`
+	Channel string `yaml:"channel,omitempty"`
 }
 
 type Service struct {
@@ -230,6 +253,7 @@ func Default(metadata Metadata) (Config, error) {
 			RebootEnabled: true,
 			UpdateEnabled: true,
 			UpdateExposed: false,
+			UpdateChannel: UpdateChannelStable,
 			Services: map[string]Service{
 				"companion": {Enabled: true, Exposed: true},
 				"dropbear":  {Enabled: true, Exposed: true},
@@ -283,8 +307,12 @@ func Load(path string) (Config, error) {
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
 		Logging: persisted.Logging,
-		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, Services: persisted.System.Services},
+		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, UpdateChannel: persisted.System.Updates.Channel, Services: persisted.System.Services},
 		HomeKit: persisted.HomeKit,
+	}
+
+	if cfg.System.UpdateChannel == "" {
+		cfg.System.UpdateChannel = UpdateChannelStable
 	}
 
 	if err := ensureSingleDocument(decoder); err != nil {
@@ -558,11 +586,25 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("duplicate entrypoint id %q", entrypoint.ID)
 		}
 
+		switch entrypoint.UnlockMode {
+		case "", UnlockModeDoor, UnlockModeAuxiliary:
+		default:
+			return fmt.Errorf("entrypoint %q: invalid unlock mode %q", entrypoint.ID, entrypoint.UnlockMode)
+		}
+
+		if entrypoint.UnlockDurationMS < 0 || entrypoint.UnlockDurationMS > MaxUnlockDurationMS {
+			return fmt.Errorf("entrypoint %q: unlock duration must be 0 (default) or 1-%d milliseconds", entrypoint.ID, MaxUnlockDurationMS)
+		}
+
 		seen[entrypoint.ID] = struct{}{}
 	}
 
 	if cfg.HomeKit.PIN != "" && !validHomeKitPIN(cfg.HomeKit.PIN) {
 		return ErrInvalidHomeKitPIN
+	}
+
+	if channel := cfg.System.UpdateChannel; channel != "" && channel != UpdateChannelStable && channel != UpdateChannelBeta {
+		return fmt.Errorf("invalid update channel %q", channel)
 	}
 
 	return nil
@@ -610,10 +652,7 @@ func encode(cfg Config) ([]byte, error) {
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
 		System: persistedSystem{Reboot: struct {
 			Enabled bool `yaml:"enabled"`
-		}{Enabled: cfg.System.RebootEnabled}, Updates: struct {
-			Enabled bool `yaml:"enabled"`
-			Exposed bool `yaml:"exposed"`
-		}{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed}, Services: cfg.System.Services},
+		}{Enabled: cfg.System.RebootEnabled}, Updates: persistedUpdates{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed, Channel: persistedChannel(cfg.System.UpdateChannel)}, Services: cfg.System.Services},
 		HomeKit: cfg.HomeKit,
 	})
 	if err != nil {
@@ -621,6 +660,14 @@ func encode(cfg Config) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+func persistedChannel(channel string) string {
+	if channel == UpdateChannelStable {
+		return ""
+	}
+
+	return channel
 }
 
 func ensureSingleDocument(decoder *yaml.Decoder) error {

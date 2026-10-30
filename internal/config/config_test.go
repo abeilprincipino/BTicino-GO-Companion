@@ -526,6 +526,51 @@ func TestSIPSectionPersistedReadsTheDocumentNotTheDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadReadsThePersistedUpdateChannel(t *testing.T) {
+	t.Parallel()
+
+	const block = "    updates:\n        enabled: false\n"
+
+	for name, testCase := range map[string]struct {
+		channel string
+		wantErr bool
+	}{
+		"beta":    {channel: "beta"},
+		"unknown": {channel: "nightly", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if strings.Count(legacyConfigWithoutSIP, block) != 1 {
+				t.Fatalf("updates block not found exactly once")
+			}
+
+			document := strings.Replace(legacyConfigWithoutSIP, block, block+"        channel: "+testCase.channel+"\n", 1)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			cfg, err := Load(path)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("Load() error = nil, want error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+
+			if cfg.System.UpdateChannel != "beta" {
+				t.Fatalf("UpdateChannel = %q", cfg.System.UpdateChannel)
+			}
+		})
+	}
+}
+
 func TestEnsureSIPSectionLeavesAnExistingSectionUntouched(t *testing.T) {
 	t.Parallel()
 
@@ -723,5 +768,166 @@ func TestClaimCodeFormat(t *testing.T) {
 		if ValidClaimCode(invalid) {
 			t.Errorf("ValidClaimCode(%q) = true, want false", invalid)
 		}
+	}
+}
+
+func TestUpdateChannelDefaultsToStableAndPersistsOnlyBeta(t *testing.T) {
+	t.Parallel()
+
+	source := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(source, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	loaded, err := Load(source)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.System.UpdateChannel != UpdateChannelStable {
+		t.Fatalf("UpdateChannel = %q", loaded.System.UpdateChannel)
+	}
+
+	for channel, want := range map[string]string{UpdateChannelStable: "", UpdateChannelBeta: UpdateChannelBeta} {
+		loaded.System.UpdateChannel = channel
+
+		data, err := encode(loaded)
+		if err != nil {
+			t.Fatalf("encode() error = %v", err)
+		}
+
+		var document struct {
+			System struct {
+				Updates map[string]any `yaml:"updates"`
+			} `yaml:"system"`
+		}
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			t.Fatalf("decode encoded config: %v", err)
+		}
+
+		got, present := document.System.Updates["channel"]
+		if want == "" && present || want != "" && got != want {
+			t.Fatalf("channel %q encoded as %v (present %t)", channel, got, present)
+		}
+	}
+}
+
+func TestValidateUpdateChannel(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Default(Metadata{Model: "C300X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.System.UpdateChannel != UpdateChannelStable {
+		t.Fatalf("default UpdateChannel = %q", cfg.System.UpdateChannel)
+	}
+
+	for channel, valid := range map[string]bool{"": true, UpdateChannelStable: true, UpdateChannelBeta: true, "nightly": false} {
+		cfg.System.UpdateChannel = channel
+		if err := Validate(cfg); (err == nil) != valid {
+			t.Fatalf("Validate(channel %q) error = %v", channel, err)
+		}
+	}
+}
+
+func TestUnlockSettingsLegacyAndRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+	before := store.Snapshot()
+	for _, entrypoint := range before.Companion.Entrypoints {
+		if entrypoint.UnlockMode != "" || entrypoint.UnlockDurationMS != 0 {
+			t.Fatalf("legacy unlock settings = %+v", entrypoint)
+		}
+	}
+	encoded, err := encode(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("unlock_mode:")) || bytes.Contains(encoded, []byte("unlock_duration_ms:")) {
+		t.Fatal("saving legacy settings introduced new unlock keys")
+	}
+
+	entrypoints := []Entrypoint{
+		{ID: "pedonale", Label: "Pedonale", DevAddr: "20", Capabilities: Capabilities{Stream: true, Ring: true, Unlock: true}},
+		{ID: "carrabile", Label: "Carrabile", DevAddr: "10", UnlockMode: UnlockModeAuxiliary, UnlockDurationMS: 1000, Capabilities: Capabilities{Unlock: true}},
+	}
+	if err := store.Update(func(cfg *Config) error {
+		cfg.Companion.Entrypoints = entrypoints
+		return nil
+	}); err != nil {
+		t.Fatalf("save unlock settings: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload unlock settings: %v", err)
+	}
+	if !reflect.DeepEqual(loaded.Companion.Entrypoints, entrypoints) {
+		t.Fatalf("round-trip entrypoints = %+v, want %+v", loaded.Companion.Entrypoints, entrypoints)
+	}
+	if loaded.Auth != before.Auth || loaded.WebUI != before.WebUI {
+		t.Fatal("saving unlock settings changed authentication")
+	}
+}
+
+func TestValidateUnlockSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name     string
+		mode     string
+		duration int
+		valid    bool
+	}{
+		{"legacy defaults", "", 0, true},
+		{"explicit door", UnlockModeDoor, 2000, true},
+		{"auxiliary default duration", UnlockModeAuxiliary, 0, true},
+		{"auxiliary one second", UnlockModeAuxiliary, 1000, true},
+		{"minimum duration", UnlockModeAuxiliary, 1, true},
+		{"unknown mode", "light", 1000, false},
+		{"negative duration", UnlockModeAuxiliary, -1, false},
+		{"excessive duration", UnlockModeAuxiliary, 2001, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := store.Snapshot()
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.Update(func(cfg *Config) error {
+				cfg.Companion.Entrypoints[0].UnlockMode = test.mode
+				cfg.Companion.Entrypoints[0].UnlockDurationMS = test.duration
+				return nil
+			})
+			if (err == nil) != test.valid {
+				t.Fatalf("Update() error = %v, valid = %t", err, test.valid)
+			}
+			if !test.valid {
+				persisted, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(persisted, original) || !reflect.DeepEqual(store.Snapshot(), before) {
+					t.Fatal("invalid settings changed the file or in-memory configuration")
+				}
+			}
+		})
 	}
 }

@@ -1,20 +1,26 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"os"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/rtp"
 )
+
+const snapshotTestPoll = 20 * time.Millisecond
+
+var annexBStartCode = []byte{0, 0, 0, 1}
 
 func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 	image := []byte{0xff, 0xd8, 1, 2, 3, 0xff, 0xd9}
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
-		return &fakeSnapshotProcess{}, os.WriteFile(output, append([]byte("noise"), image...), 0o600)
-	}))
+	runner := &fakeSnapshotRunner{output: append([]byte("noise"), image...)}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
 	captured := make(chan struct{}, 1)
 
 	manager.SetOnCaptured(func() { captured <- struct{}{} })
@@ -24,7 +30,7 @@ func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 		t.Fatal("Arm() = nil")
 	}
 
-	attempt.Consume(testRTPPacket(1))
+	feedSnapshotKeyframe(attempt, 0, 0)
 
 	got := waitForSnapshot(t, manager, "front-door")
 	if string(got) != string(image) {
@@ -42,25 +48,92 @@ func TestSnapshotManagerArmsPassiveCaptureAndPublishesLatest(t *testing.T) {
 	}
 }
 
-func TestSnapshotManagerDoesNotPublishCancelledGeneration(t *testing.T) {
-	started := make(chan struct{})
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(ctx context.Context, output string) (snapshotProcess, error) {
-		close(started)
-
-		go func() {
-			<-ctx.Done()
-
-			_ = os.WriteFile(output, []byte{0xff, 0xd8, 1, 0xff, 0xd9}, 0o600)
-		}()
-
-		return &fakeSnapshotProcess{}, nil
-	}))
-
+func TestSnapshotManagerFeedsTheDecoderFromTheFirstKeyframeAsAnnexB(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: []byte{0xff, 0xd8, 1, 0xff, 0xd9}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
 	attempt := manager.Arm("front-door")
 
-	<-started
+	// A frame before the keyframe cannot be decoded and must not reach the
+	// decoder.
+	attempt.Consume(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 1, Timestamp: 0, Marker: true}, Payload: testClipSlice})
+	feedSnapshotKeyframe(attempt, 1, 3000)
+	waitForSnapshot(t, manager, "front-door")
+
+	inputs := runner.decoded()
+	if len(inputs) != 1 {
+		t.Fatalf("decoder received %d access units, want 1", len(inputs))
+	}
+
+	want := bytes.Join([][]byte{nil, testClipSPS, testClipPPS, testClipIDR, snapshotAccessUnitDelimiter}, annexBStartCode)
+	if !bytes.Equal(inputs[0], want) {
+		t.Fatalf("decoder input = %x, want %x", inputs[0], want)
+	}
+}
+
+// The decoder keeps getting the frames after the keyframe until the JPEG comes
+// out.
+func TestSnapshotManagerKeepsFeedingFramesUntilTheDecoderMakesAPicture(t *testing.T) {
+	image := []byte{0xff, 0xd8, 5, 0xff, 0xd9}
+	runner := &fakeSnapshotRunner{output: image, pictureAfter: 3}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+	attempt := manager.Arm("front-door")
+
+	feedSnapshotKeyframe(attempt, 0, 0)
+	for i := range 2 {
+		attempt.Consume(&rtp.Packet{
+			Header:  rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: uint16(3 + i), Timestamp: uint32(3000 * (i + 1)), Marker: true}, // #nosec G115 -- small test values.
+			Payload: testClipSlice,
+		})
+	}
+
+	if got := waitForSnapshot(t, manager, "front-door"); string(got) != string(image) {
+		t.Fatalf("Latest() = %v, want %v", got, image)
+	}
+
+	inputs := runner.decoded()
+	if len(inputs) != 3 {
+		t.Fatalf("decoder received %d access units, want 3", len(inputs))
+	}
+
+	want := bytes.Join([][]byte{nil, testClipSlice, snapshotAccessUnitDelimiter}, annexBStartCode)
+	if !bytes.Equal(inputs[1], want) {
+		t.Fatalf("decoder input after the keyframe = %x, want %x", inputs[1], want)
+	}
+}
+
+func TestSnapshotManagerTriesTheNextKeyframeWhenTheDecoderMakesNoPicture(t *testing.T) {
+	image := []byte{0xff, 0xd8, 9, 0xff, 0xd9}
+	runner := &fakeSnapshotRunner{outputs: [][]byte{[]byte("no picture"), image}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+	attempt := manager.Arm("front-door")
+
+	feedSnapshotKeyframe(attempt, 0, 0)
+
+	// The second keyframe goes to the decoder started after the first exited.
+	deadline := time.Now().Add(time.Second)
+	for runner.startCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(snapshotTestPoll)
+	}
+
+	feedSnapshotKeyframe(attempt, 3, 3000)
+
+	if got := waitForSnapshot(t, manager, "front-door"); string(got) != string(image) {
+		t.Fatalf("Latest() = %v, want %v", got, image)
+	}
+
+	if started := runner.startCount(); started != 2 {
+		t.Fatalf("decoders started = %d, want 2", started)
+	}
+}
+
+func TestSnapshotManagerDoesNotPublishCancelledGeneration(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: []byte{0xff, 0xd8, 1, 0xff, 0xd9}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+
+	attempt := manager.Arm("front-door")
 	attempt.Close()
-	time.Sleep(2 * snapshotPollInterval)
+	feedSnapshotKeyframe(attempt, 0, 0)
+	time.Sleep(5 * snapshotTestPoll)
 
 	if _, err := manager.Latest("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
 		t.Fatalf("Latest() error = %v, want %v", err, ErrSnapshotNotFound)
@@ -74,10 +147,42 @@ func TestFirstJPEGExtractsOneCompleteFrame(t *testing.T) {
 	}
 }
 
+// The decoder keeps running after its first picture: it is read without
+// waiting for the output to end.
+func TestReadFirstJPEGReturnsBeforeTheOutputEnds(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	go func() { _, _ = writer.Write([]byte{1, 0xff, 0xd8, 2, 0xff, 0xd9, 3}) }()
+
+	image, err := readFirstJPEG(reader)
+	if err != nil || !bytes.Equal(image, []byte{0xff, 0xd8, 2, 0xff, 0xd9}) {
+		t.Fatalf("readFirstJPEG() = %v, %v", image, err)
+	}
+}
+
+func TestReadFirstJPEGReturnsNothingWhenTheOutputEndsWithoutAPicture(t *testing.T) {
+	image, err := readFirstJPEG(bytes.NewReader([]byte("no picture")))
+	if err != nil || image != nil {
+		t.Fatalf("readFirstJPEG() = %v, %v, want nil, nil", image, err)
+	}
+}
+
 func TestSnapshotManagerRejectsUnsafeEntrypointFilename(t *testing.T) {
 	manager := NewSnapshotManager(t.TempDir(), nil)
 	if _, ok := manager.path("../gate1"); ok {
 		t.Fatal("path() accepted traversal")
+	}
+}
+
+// feedSnapshotKeyframe sends SPS, PPS and an IDR as single-NAL packets, the
+// IDR closing the access unit.
+func feedSnapshotKeyframe(attempt *snapshotAttempt, sequence uint16, timestamp uint32) {
+	for i, nalu := range [][]byte{testClipSPS, testClipPPS, testClipIDR} {
+		attempt.Consume(&rtp.Packet{
+			Header:  rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: sequence + uint16(i), Timestamp: timestamp, Marker: i == 2}, // #nosec G115 -- small test values.
+			Payload: nalu,
+		})
 	}
 }
 
@@ -90,7 +195,7 @@ func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string
 			return image
 		}
 
-		time.Sleep(snapshotPollInterval)
+		time.Sleep(snapshotTestPoll)
 	}
 
 	t.Fatal("snapshot was not published")
@@ -98,20 +203,78 @@ func waitForSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string
 	return nil
 }
 
-type snapshotRunnerFunc func(context.Context, string) (snapshotProcess, error)
+// fakeSnapshotRunner starts decoders that record their input. Each answers
+// with output, or with the next of outputs, once it has been fed pictureAfter
+// access units (one when unset): with its JPEG, or by exiting when it holds
+// none.
+type fakeSnapshotRunner struct {
+	mu           sync.Mutex
+	output       []byte
+	outputs      [][]byte
+	pictureAfter int
+	starts       int
+	inputs       [][]byte
+}
 
-func (f snapshotRunnerFunc) Start(ctx context.Context, output string) (snapshotProcess, error) {
-	return f(ctx, output)
+func (r *fakeSnapshotRunner) Start(context.Context) (snapshotProcess, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	output := r.output
+	if r.starts < len(r.outputs) {
+		output = r.outputs[r.starts]
+	}
+
+	r.starts++
+
+	return &fakeSnapshotProcess{runner: r, output: output, pictureAfter: max(r.pictureAfter, 1), picture: make(chan []byte, 1)}, nil
+}
+
+func (r *fakeSnapshotRunner) decoded() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([][]byte(nil), r.inputs...)
+}
+
+func (r *fakeSnapshotRunner) startCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.starts
 }
 
 type fakeSnapshotProcess struct {
-	once sync.Once
+	runner       *fakeSnapshotRunner
+	output       []byte
+	pictureAfter int
+	writes       int
+	picture      chan []byte
+	once         sync.Once
 }
 
-func (p *fakeSnapshotProcess) Close() error {
-	p.once.Do(func() {})
+func (p *fakeSnapshotProcess) Write(accessUnit []byte) error {
+	p.runner.mu.Lock()
+	p.runner.inputs = append(p.runner.inputs, bytes.Clone(accessUnit))
+	p.runner.mu.Unlock()
+
+	p.writes++
+	if p.writes == p.pictureAfter {
+		if image, ok := firstJPEG(p.output); ok {
+			p.picture <- image
+		} else {
+			p.once.Do(func() { close(p.picture) })
+		}
+	}
+
 	return nil
 }
+
+func (p *fakeSnapshotProcess) Picture() <-chan []byte { return p.picture }
+
+func (p *fakeSnapshotProcess) Err() error { return nil }
+
+func (p *fakeSnapshotProcess) Close() error { return nil }
 
 func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID string) []byte {
 	t.Helper()
@@ -122,7 +285,7 @@ func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID st
 			return image
 		}
 
-		time.Sleep(snapshotPollInterval)
+		time.Sleep(snapshotTestPoll)
 	}
 
 	t.Fatal("ring snapshot was not published")
@@ -132,15 +295,13 @@ func waitForRingSnapshot(t *testing.T, manager *SnapshotManager, entrypointID st
 
 func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 	image := []byte{0xff, 0xd8, 7, 0xff, 0xd9}
-	manager := newSnapshotManager(t.TempDir(), nil, snapshotRunnerFunc(func(_ context.Context, output string) (snapshotProcess, error) {
-		return &fakeSnapshotProcess{}, os.WriteFile(output, image, 0o600)
-	}))
+	manager := newSnapshotManager(t.TempDir(), nil, &fakeSnapshotRunner{output: image})
 
 	if latest, ring := manager.UpdatedAt("front-door"); !latest.IsZero() || !ring.IsZero() {
 		t.Fatalf("UpdatedAt() before any capture = %v, %v, want zero", latest, ring)
 	}
 
-	manager.Arm("front-door").Consume(testRTPPacket(1))
+	feedSnapshotKeyframe(manager.Arm("front-door"), 0, 0)
 	waitForSnapshot(t, manager, "front-door")
 
 	if _, err := manager.LatestRing("front-door"); !errors.Is(err, ErrSnapshotNotFound) {
@@ -149,7 +310,7 @@ func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 
 	attempt := manager.Arm("front-door")
 	attempt.MarkRing()
-	attempt.Consume(testRTPPacket(2))
+	feedSnapshotKeyframe(attempt, 0, 0)
 
 	if got := waitForRingSnapshot(t, manager, "front-door"); string(got) != string(image) {
 		t.Fatalf("LatestRing() = %v, want %v", got, image)
