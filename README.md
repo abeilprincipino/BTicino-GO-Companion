@@ -23,6 +23,7 @@ and installing a local build see [docs/build-and-install.md](docs/build-and-inst
 - [Service Commands](#service-commands)
 - [Updates and Rollback](#updates-and-rollback)
 - [Uninstall](#uninstall)
+- [Contributing](#contributing)
 
 ## Prerequisites
 
@@ -270,6 +271,11 @@ the installer added are closed: installations made before the installer recorded
 ports, and the uninstaller says so with a `WARN:` line. It ends with
 `OK: Companion removed. Restart Flexisip or reboot the intercom.` and exits with code `1` if any step
 failed.
+
+## Contributing
+
+Pull requests target the `develop` branch. Changes are published as beta releases from `develop`
+before they reach `main` and an official release. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

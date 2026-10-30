@@ -17,6 +17,29 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Check the tag's branch
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          git fetch --no-tags origin main develop
+          on_branch() { git merge-base --is-ancestor "$GITHUB_SHA" "origin/$1" 2>/dev/null; }
+          case "$TAG" in
+            *-*)
+              # A beta is cut from develop; main is accepted for a pre-release of a hotfix.
+              if ! on_branch develop && ! on_branch main; then
+                echo "::error::Pre-release $TAG must point to a commit on develop or main."
+                exit 1
+              fi
+              ;;
+            *)
+              if ! on_branch main; then
+                echo "::error::Release $TAG must point to a commit on main. Merge develop into main first."
+                exit 1
+              fi
+              ;;
+          esac
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
