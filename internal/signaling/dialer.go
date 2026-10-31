@@ -535,9 +535,12 @@ func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (Outgoi
 		return nil, fmt.Errorf("ack invite: %w", err)
 	}
 
+	answerSDP := string(dialog.InviteResponse.Body())
+	d.logger.DebugContext(ctx, "sip stream answer", "dialog_id", dialog.ID, "sdp", answerSDP)
+
 	// The dialog's own context, not ctx: the keepalive must outlive this call
 	// and end with the dialog, whichever side ends it.
-	d.keepDialogAlive(dialog.Context(), dialog.ID, string(dialog.InviteResponse.Body()))
+	d.keepDialogAlive(dialog.Context(), dialog.ID, answerSDP)
 
 	d.logger.InfoContext(ctx, "sip stream established", "elapsed", time.Since(sentAt))
 
