@@ -797,7 +797,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		sourceConfig,
 		core.EntrypointID(entrypoint.ID),
 		calls,
-		ringWatch.sourceAV(openwebnet.NewAVClient(logger), cfg.Companion.RingVideoRequest == config.RingVideoRequestReactive),
+		ringWatch.sourceAV(openwebnet.NewAVClient(logger)),
 		// Video flows from the first packet, before the AV activation reports
 		// the stream started: the intercom opens it with its only keyframe for
 		// about a second, and the snapshot and the ring clip need that one.

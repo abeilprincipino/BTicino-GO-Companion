@@ -73,7 +73,7 @@ func TestReactiveRingVideoWaitsForTheIntercomStream(t *testing.T) {
 	watch.observeFrame(testRingFrame)
 	watch.observeFrame(testActivationFrame)
 
-	done := startVideoAsync(watch.sourceAV(fake, true))
+	done := startVideoAsync(watch.sourceAV(fake))
 
 	// Our own request echoed back is not the intercom's stream.
 	watch.observeFrame(testOwnStreamFrame)
@@ -105,7 +105,7 @@ func TestReactiveRingVideoWaitsForTheIntercomStream(t *testing.T) {
 		t.Fatalf("want one timeline line, got:\n%s", out)
 	}
 
-	for _, want := range []string{"mode=reactive", "reason=complete", "request_reason=intercom_stream"} {
+	for _, want := range []string{"reason=complete", "request_reason=intercom_stream"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("timeline lacks %q:\n%s", want, out)
 		}
@@ -119,7 +119,7 @@ func TestReactiveRingVideoFallsBack(t *testing.T) {
 	watch.observeFrame(testRingFrame)
 	started := time.Now()
 
-	if err := <-startVideoAsync(watch.sourceAV(fake, true)); err != nil {
+	if err := <-startVideoAsync(watch.sourceAV(fake)); err != nil {
 		t.Fatalf("StartVideo() error = %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestReactiveRingVideoGoesAtOnceWhenTheStreamIsAlreadyUp(t *testing.T) {
 	watch.observeFrame(testIntercomStreamFrame)
 
 	select {
-	case err := <-startVideoAsync(watch.sourceAV(fake, true)):
+	case err := <-startVideoAsync(watch.sourceAV(fake)):
 		if err != nil {
 			t.Fatalf("StartVideo() error = %v", err)
 		}
@@ -159,7 +159,7 @@ func TestReactiveRingVideoWaitsAgainOnTheNextRing(t *testing.T) {
 	watch.observeFrame(testIntercomStreamFrame)
 	watch.observeFrame(testRingFrame)
 
-	done := startVideoAsync(watch.sourceAV(fake, true))
+	done := startVideoAsync(watch.sourceAV(fake))
 
 	select {
 	case <-fake.videoRequests:
@@ -171,42 +171,6 @@ func TestReactiveRingVideoWaitsAgainOnTheNextRing(t *testing.T) {
 
 	if err := <-done; err != nil {
 		t.Fatalf("StartVideo() error = %v", err)
-	}
-}
-
-func TestEarlyRingVideoDoesNotWait(t *testing.T) {
-	watch, logs := newTestRingWatch(5 * time.Second)
-	fake := &fakeRingAV{videoRequests: make(chan time.Time, 1)}
-
-	watch.observeFrame(testRingFrame)
-
-	select {
-	case err := <-startVideoAsync(watch.sourceAV(fake, false)):
-		if err != nil {
-			t.Fatalf("StartVideo() error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the early mode waited")
-	}
-
-	watch.observeFrame(testActivationFrame)
-	watch.observeFrame(testActivationFrame) // a repeated copy
-	watch.observeFrame(testIntercomStreamFrame)
-	watch.clip(nopRingClip{}).VideoRTP(&rtp.Packet{})
-
-	out := logs.String()
-	for _, want := range []string{"mode=early", "request_reason=early"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("timeline lacks %q:\n%s", want, out)
-		}
-	}
-
-	if strings.Contains(out, "activation_ms=-1") || strings.Contains(out, "intercom_stream_ms=-1") {
-		t.Fatalf("timeline missed a frame:\n%s", out)
-	}
-
-	if activations := strings.SplitN(strings.SplitN(out, "activation_ms=", 2)[1], " ", 2)[0]; strings.Contains(activations, ",") {
-		t.Fatalf("repeated activation counted twice: %s", activations)
 	}
 }
 

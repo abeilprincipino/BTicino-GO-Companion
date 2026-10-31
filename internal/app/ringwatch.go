@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	// ringVideoFallback is how long a reactive request waits for the intercom's
-	// own streams before asking anyway, as the early mode does.
+	// ringVideoFallback is how long the ring's video request waits for the
+	// intercom's own streams before asking anyway.
 	ringVideoFallback = 3 * time.Second
 	// ringTimelineWindow bounds a ring's timeline: whatever has not happened by
 	// then is reported as missing.
@@ -26,9 +26,9 @@ const (
 	ringFrameRepeat = 100 * time.Millisecond
 )
 
-// ringVideoWatch follows the AV frames of each ring. It tells a reactive
-// ringing preview when the intercom has started its own streams, and logs one
-// timeline line per ring so the early and reactive modes can be compared. See
+// ringVideoWatch follows the AV frames of each ring. It tells the ringing
+// preview when the intercom has started its own streams, so the video request
+// goes out only then, and logs one timeline line per ring to measure it. See
 // docs/analysis/2026-10-29-ring-snapshot-latency.md, P4.
 type ringVideoWatch struct {
 	logger   *slog.Logger
@@ -47,7 +47,6 @@ type ringVideoWatch struct {
 }
 
 type ringTimeline struct {
-	mode           string
 	activations    []time.Duration
 	parameters     time.Duration
 	intercomStream time.Duration
@@ -180,7 +179,6 @@ func (w *ringVideoWatch) reportLocked(reason string) {
 	}
 
 	w.logger.Info("ring video timeline",
-		"mode", t.mode,
 		"reason", reason,
 		"activation_ms", strings.Join(activations, ","),
 		"parameters_ms", offsetMS(t.parameters),
@@ -203,11 +201,10 @@ func offsetMS(offset time.Duration) int64 {
 }
 
 // sourceAV wraps the AV client of a media source. Only a ringing preview asks
-// for video alone, so StartVideo is the ring's request: in reactive mode it
-// waits for the intercom's own streams first. Both modes record it in the
-// timeline.
-func (w *ringVideoWatch) sourceAV(av media.SourceAV, reactive bool) media.SourceAV {
-	return ringSourceAV{SourceAV: av, watch: w, reactive: reactive}
+// for video alone, so StartVideo is the ring's request: it waits for the
+// intercom's own streams first.
+func (w *ringVideoWatch) sourceAV(av media.SourceAV) media.SourceAV {
+	return ringSourceAV{SourceAV: av, watch: w}
 }
 
 // clip wraps the ring holder's clip to stamp the ring's first video packet.
@@ -217,20 +214,15 @@ func (w *ringVideoWatch) clip(clip ringClip) ringClip {
 
 type ringSourceAV struct {
 	media.SourceAV
-	watch    *ringVideoWatch
-	reactive bool
+	watch *ringVideoWatch
 }
 
 func (a ringSourceAV) StartVideo(ctx context.Context, highRes bool, port int, probe media.FlowProbe) error {
-	mode, reason := "early", "early"
-	if a.reactive {
-		mode = "reactive"
-		reason = a.watch.waitIntercomStream(ctx)
-		a.watch.logger.DebugContext(ctx, "ring video request released", "reason", reason)
+	reason := a.watch.waitIntercomStream(ctx)
+	a.watch.logger.DebugContext(ctx, "ring video request released", "reason", reason)
 
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// The ring holder asks first; a card that opens its own preview later in
@@ -240,7 +232,7 @@ func (a ringSourceAV) StartVideo(ctx context.Context, highRes bool, port int, pr
 	a.watch.record(func(t *ringTimeline, offset time.Duration) {
 		if t.request == 0 {
 			first = true
-			t.mode, t.request, t.requestReason = mode, offset, reason
+			t.request, t.requestReason = offset, reason
 		}
 	})
 
