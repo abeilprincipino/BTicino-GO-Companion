@@ -5,7 +5,7 @@ Fonte: log DEBUG del ring delle 09:46:15 (non risposto, porta aperta dalla card)
 on-demand delle 09:46:45, più 10 ring del 28/10 ripresi dai log grezzi della sessione precedente (§1.2). Le
 affermazioni ereditate da analisi precedenti e non riverificate sui log sono segnalate come tali. Il §8
 confronta il companion con ha-bticino-c300x, un progetto analogo per il C300X. Il §9 riporta le prove del
-31/10 (v0.12.1-beta.1 → beta.5): P4, P2, S1, S3 e le verifiche fatte via SSH sul citofono.
+31/10 (v0.12.1-beta.1 → beta.8): P4, P2, S1, S3, §5 punto 7, S8 e le verifiche fatte via SSH sul citofono.
 
 ## In breve
 
@@ -29,8 +29,9 @@ confronta il companion con ha-bticino-c300x, un progetto analogo per il C300X. I
 - Sullo stream (§6): un **bug latente nell'audio bridge** (i pacchetti in coda condividono il buffer di
   lettura), un audio bridge che può passare da 4 processi a 2 senza ricampionamenti, lo snapshot che clona ogni
   pacchetto video per tutta la durata dello stream, e una **live view chiusa dall'intercom dopo ~31,6 s** pur
-  con il keepalive attivo. La causa più probabile è che il keepalive viaggia in chiaro mentre la chiamata
-  negozia SRTP (S8).
+  con il keepalive attivo. La causa era il keepalive in chiaro su una chiamata SRTP, e valeva anche per le
+  chiamate risposte. Con il keepalive SRTP (S8, beta.8) la live view dura 60 s (§9.4): per ora basta, e il
+  limite dei 60 s resta come spunto (S9).
 - ha-bticino-c300x (§8) non ha una strada più rapida per il video del ring. Ne vengono due spunti: il keepalive
   SRTP (S8) e l'audio in PCMU, che toglie Opus e ricampionamenti dal percorso WebRTC (S2).
 
@@ -334,7 +335,7 @@ stesso hardware: al ring non chiede niente, e aggiunge il suo stream quando vede
 | 4 | `newEventApplier` scrive stato ed evento a ogni client WebSocket nel goroutine del chiamante (listener OpenWebNet, SIP), con deadline di 5 s per client ([websocket.go:154](../../internal/api/websocket.go#L154), [:197](../../internal/api/websocket.go#L197)). Un HA lento o una rete degradata bloccano la lettura dei frame, `ring.started` compreso | Coda per client non bloccante, con coalescenza degli `state` (conta solo l'ultimo) | evita ritardi rari ma lunghi sul ring | medio |
 | 5 | Ogni frame `*7*` arriva 2–4 volte (es. `*7*300#127#0#0#1#46168#1*##` alle 18.297, 18.321 e 18.323) e ogni copia passa da `ObserveControlTrack` e dal log | Dedup nel listener dei frame idempotenti ripetuti entro ~100 ms | piccolo | basso |
 | 6 | Lo snapshot scade 8 s dopo l'arm ([snapshot.go:29](../../internal/media/snapshot.go#L29)), mentre i retry AV durano fino a 6 s più 1,2 s di attesa del flusso ([av.go:49](../../internal/openwebnet/av.go#L49)). Con un intercom lento lo stream parte ma la foto no, e oggi neanche la notifica | Far partire il timeout dal primo pacchetto o allinearlo alla finestra AV | robustezza | basso |
-| 7 | A ogni ring finiscono su flash due JPEG (latest e ring, sotto lock e prima del broadcast) e la clip (1,4 MB). A livello DEBUG si aggiungono ~150 righe di log in 3 s | Tenere l'ultima foto in memoria, servirla da lì e salvarla in modo asincrono. Log a INFO in esercizio | pochi ms, meno usura della flash | basso-medio |
+| 7 | A ogni ring finiscono su flash due JPEG (latest e ring, sotto lock e prima del broadcast) e la clip (1,4 MB). A livello DEBUG si aggiungono ~150 righe di log in 3 s | **Fatto in beta.6** (§9.4): foto in memoria, servita da lì e salvata in modo asincrono. Resta il log a INFO in esercizio | ~40 ms sul ring (la partizione dati è montata `sync`), meno usura della flash | basso-medio |
 | 8 | ICE `disconnected` alle 09:46:58.694, ma la sessione resta attiva fino al BYE dell'intercom alle 09:47:20.475 (22 s) con AV, pipeline audio e ricevitori accesi | Dopo `disconnected`, un breve periodo di grazia e poi il rilascio del lease | libera l'intercom prima | basso |
 | 9 | Il contatore della connessione TCP verso Flexisip passa da `ref=2` (REGISTER prima del ring) a `ref=4` (REGISTER delle 09:54) dopo una chiamata in ingresso e una in uscita: una transazione INVITE non rilascia il suo riferimento (sipgo) | Verificare se cresce a ogni chiamata. È innocuo finché la connessione resta persistente | da verificare | da valutare |
 | 10 | Quando il ring finisce normalmente, la sessione WebRTC ancora aperta viene chiusa con `reason="source failure"` (09:46:33.085) | Usare un motivo `ring ended`: rende chiari il log e la card | solo diagnostica/UX | basso |
@@ -351,11 +352,12 @@ in 791 pacchetti). L'audio passa per l'audio bridge: due processi GStreamer e tr
 | S1 | Audio bridge: i pacchetti in coda condividono il buffer di lettura (bug latente) | audio senza frame ripetuti o corrotti sotto carico | molto basso |
 | S2 | Audio bridge da 4 processi a 2, senza ricampionamenti (Opus a 8 kHz, oppure PCMU verso il browser) | metà dei processi, meno CPU per chiamata, un salto in meno | medio |
 | S3 | Lo snapshot clona ogni pacchetto per tutta la durata dello stream | ~100 KB/s di garbage e ~280 KB trattenuti in meno | molto basso |
-| S4 | Fan-out sincrono nella goroutine del ricevitore | isolamento tra consumatori | medio |
+| S4 | Fan-out sincrono nella goroutine del ricevitore (`SetReadBuffer` fatto in beta.6, §9.4) | isolamento tra consumatori | medio |
 | S5 | Mutex del coordinator preso a ogni pacchetto | percorso dei pacchetti libero dal controllo | basso-medio |
 | S6 | Allocazioni per pacchetto (HomeKit) e misura del GC | meno lavoro del GC su ARM | basso |
 | S7 | Card e RTSP/HomeKit si escludono a vicenda | niente riavvii da ~4,4 s al cambio di consumatore | medio |
-| S8 | Live view chiusa dall'intercom dopo ~31,6 s: keepalive in chiaro su una chiamata SRTP | visioni lunghe senza interruzioni | basso, dopo due verifiche |
+| S8 | Live view e chiamata risposta chiuse dall'intercom dopo ~31 s: keepalive in chiaro su una chiamata SRTP. **Fatto in beta.8** (§9.4) | da 31 a 60 s | basso |
+| S9 | Live view chiusa dall'intercom dopo 60 s anche con il keepalive SRTP | visioni oltre il minuto | basso |
 
 **S1 — Bug latente: l'audio bridge riusa il buffer dei pacchetti in coda.** Il lettore legge ogni datagramma
 nello stesso buffer da 1 500 byte e mette il pacchetto in un canale da 32 posti
@@ -461,16 +463,29 @@ HomeKit fa già lo stesso ([camera.go:634](../../internal/homekit/camera.go#L634
 causa è un'altra: allora keepalive ogni secondo e anche sulla porta video, poi un re-INVITE prima dei 30 s. Se
 dopo il fix il video si ferma comunque a intervalli fissi, c'è un precedente: ha-bticino-c300x ripete la
 richiesta `*7*300` ogni 20 s.
+*Esito:* l'intercom accetta SRTP (§9.4) e la proposta è in beta.8. La live view passa da 31 a 60 s.
+
+**S9 — Live view chiusa dall'intercom dopo 60 s.** Con il keepalive SRTP la live view delle 18:00:56 è durata
+60,4 s: BYE SIP dell'intercom alle 18:01:56.743, nello stesso millisecondo di `*7*55`, `*7*219` e `*7*73#0#0`,
+cioè della chiusura della sessione AV. Video e audio sono arrivati regolari fino alla fine. In
+`/etc/linphone.conf` non c'è nessun limite a 60 s.
+*Ipotesi:* la sessione AV scade se non viene rinnovata. ha-bticino-c300x, durante la visione, ripete la
+richiesta `*7*300` ogni 20 s (`MEDIA_RENEW_SECONDS` in `media_bridge.c:58`) e manda un receiver report SRTCP
+ogni secondo sulle porte RTCP di audio e video (`media_bridge.c:4002`).
+*Proposta:* rinnovare la richiesta AV video ogni 20 s finché lo stream è attivo, per la live view e per la
+chiamata risposta; se non basta, aggiungere gli SRTCP RR. **Non prioritario:** 60 s bastano per l'uso
+attuale.
 
 ## 7. Ordine suggerito
 
-Stato al 31/10: P4, S1, S3 e P2 (punti 1–3) sono in v0.12.1-beta.5, con gli esiti del §9. Restano aperti P0,
-P1, P3, S8 (manca la verifica dell'SDP del 200 OK), P2.4 e il resto.
+Stato al 31/10: P4, S1, S3 e P2 (punti 1–3) sono in v0.12.1-beta.5; §5 punto 7, `SetReadBuffer` (S4) e S8
+in v0.12.1-beta.8, con gli esiti del §9. P0 è applicato in Home Assistant (automazione
+`BTicino_Doorbell_Pressed`). Restano aperti P1, P3, P2.4, S9 e il resto.
 
 1. **P0 subito**, poi misurare il tempo tra ring e notifica sul telefono.
 2. **P4** (esperimento sulla richiesta reattiva), **S1** e **S3**: poche righe e rischio basso. P4 è l'unica
    strada nota per accorciare lo snapshot di più di qualche decina di millisecondi.
-3. **S8** (keepalive SRTP), dopo le due verifiche: SDP del 200 OK e `nortp_timeout`.
+3. **S8** (keepalive SRTP): fatto in beta.8. **S9** (limite dei 60 s) solo se servono visioni più lunghe.
 4. **P3** (bug) e **P1.2** (prefetch): interventi piccoli e indipendenti.
 5. **Misure sul device**: P2 (snapshot), GC (S6), `net.core.rmem_max` (S4), e se l'intercom può passare a PCMU
    (S2).
@@ -580,8 +595,41 @@ l'inizializzazione, ma non la contesa.
   con una chiamata risposta.
 - **S3** (beta.3): finita la foto, lo snapshot non clona più i pacchetti e libera quelli in coda.
 - **S8, una delle due verifiche:** `/etc/linphone.conf` ha `media_encryption=1` (SRTP) e nessuna sezione
-  `[rtp]`, quindi `nortp_timeout` vale il default di 30 s. La causa più probabile resta il keepalive in chiaro.
-  Manca l'SDP del 200 OK di una live view.
+  `[rtp]`, quindi `nortp_timeout` vale il default di 30 s. La seconda verifica e l'esito sono nel §9.4.
 - **Correzione al §1.1:** nello stesso file la sezione `[video]` ha `rtp_io=1` e `rtp_local_port=5002`, e
   `[sound]` ha `rtp_local_port=5000`. Lo stream `#5002#1` è quindi l'ingresso video di linphone, cioè dello stack
   SIP, non del display, e `#5000#2` è l'audio verso linphone. A cosa serva `#5007#0` resta da capire.
+
+### 9.4 Beta.6 → beta.8: snapshot in memoria, buffer RTP, S8
+
+**§5 punto 7 (beta.6).** La partizione dati del companion (`/home/bticino/cfg/extra`) è ext4 montata
+`sync,data=journal`: ogni scrittura è sincrona e passa due volte dal journal. Nel ring delle 17:00:40 le due
+scritture del JPEG hanno trattenuto il broadcast per ~40 ms (mtime: `main.jpg` a .381, cartella `ring/`
+a .421). Ora la foto viene annunciata e servita dalla memoria, e i file vengono scritti in background, uno alla
+volta e sempre con la foto più recente. L'mtime dei file è l'istante di cattura, quindi dopo un riavvio
+`ring_snapshot_updated_at` non cambia. Resta un limite: se il processo si ferma entro ~50 ms da una cattura, il
+file resta quello precedente. Il guadagno sul ring è ancora da misurare.
+
+**S4, solo il buffer (beta.6).** `net.core.rmem_max` e `rmem_default` valgono 163 840 sul C100X.
+`SetReadBuffer(1 MiB)` sui socket RTP viene limitato a `rmem_max` e raddoppiato dal kernel: 320 KiB invece di
+160. In 6 giorni di uptime `RcvbufErrors` segnava 2 861 datagrammi persi, senza modo di attribuirli a un
+socket. Per superare `rmem_max` servirebbe `SO_RCVBUFFORCE` (il companion gira come root).
+
+**S8 (beta.6 → beta.8).**
+
+- **Chiamata risposta:** il problema c'era anche lì. Il 28/10 alle 16:52:08 un ring risposto dalla card è stato
+  chiuso dall'intercom (`inbound sip call ended by remote`) alle 16:52:39, dopo 31,2 s, con il keepalive
+  partito. L'INVITE dell'intercom offre SRTP con chiavi SDES vere
+  (`a=crypto:1 AES_CM_128_HMAC_SHA1_80` e `a=crypto:2 AES_CM_128_HMAC_SHA1_32`), e noi rispondevamo con
+  `dummykey`.
+- **SDP del 200 OK** (live view delle 17:46, beta.6): `RTP/SAVP` con `a=crypto:1 AES_CM_128_HMAC_SHA1_80` e
+  chiave vera, sia sull'audio sia sul video. L'intercom accetta SRTP. BYE di nuovo a 31,4 s.
+- **Correzione (beta.8):** ogni offerta e ogni risposta portano una chiave SDES nuova per linea media, e il
+  keepalive viene cifrato con la chiave audio del nostro SDP quando anche l'audio dell'altro lato dichiara SRTP
+  ([keepalive.go](../../internal/signaling/keepalive.go), [sdp.go](../../internal/signaling/sdp.go)).
+- **Esito:** nella live view delle 18:00:56 il log dice `sip media keepalive started … srtp=true`, e il BYE
+  arriva dopo 60,4 s invece di 31. Il nuovo limite è S9. La chiamata risposta non è ancora stata riprovata.
+
+**Release.** La beta.7 non è stata pubblicata: un test nuovo dello snapshot lasciava una scrittura in
+background oltre la fine del test, e la pulizia di `t.TempDir` falliva in CI. I test ora aspettano le
+scritture (`f05aad5`), e la beta.8 contiene tutto.
