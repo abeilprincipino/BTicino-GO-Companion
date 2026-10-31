@@ -236,3 +236,52 @@ func (p *fakeAudioPipeline) Close() error {
 	p.closed = true
 	return nil
 }
+
+// The reader queues packets ahead of a slow consumer: each must keep its own
+// payload once the next datagram is read.
+func TestGStreamerAudioPipelineQueuedPacketsKeepTheirPayload(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender, err := net.DialUDP("udp4", nil, conn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+
+	pipeline := &gstreamerAudioPipeline{stop: make(chan struct{})}
+	output := make(chan *rtp.Packet, 4)
+
+	pipeline.readers.Add(1)
+	go pipeline.read(conn, 110, output)
+
+	for i := range 3 {
+		data, err := (&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 110, SequenceNumber: uint16(i)}, Payload: []byte{byte(i), byte(i), byte(i)}}).Marshal() // #nosec G115 -- small test values.
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := sender.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Let all three reach the queue before reading any.
+	deadline := time.Now().Add(time.Second)
+	for len(output) < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	for i := range 3 {
+		packet := <-output
+		if want := []byte{byte(i), byte(i), byte(i)}; string(packet.Payload) != string(want) {
+			t.Fatalf("packet %d payload = %v, want %v", i, packet.Payload, want)
+		}
+	}
+
+	close(pipeline.stop)
+	_ = conn.Close()
+	pipeline.readers.Wait()
+}
