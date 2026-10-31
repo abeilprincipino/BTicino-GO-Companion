@@ -354,3 +354,27 @@ func TestGStreamerSnapshotProcessEndsItsInputAfterTheKeyframe(t *testing.T) {
 		t.Fatalf("second Write() error = %v, want %v", err, errSnapshotInputEnded)
 	}
 }
+
+// Once the picture is taken the source keeps delivering the stream: nothing is
+// copied or queued for a capture that is over.
+func TestSnapshotAttemptStopsQueueingAfterTheCapture(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: []byte{0xff, 0xd8, 1, 0xff, 0xd9}}
+	manager := newSnapshotManager(t.TempDir(), nil, runner)
+	attempt := manager.Arm("front-door")
+
+	feedSnapshotKeyframe(attempt, 0, 0)
+	waitForSnapshot(t, manager, "front-door")
+
+	deadline := time.Now().Add(time.Second)
+	for !attempt.done.Load() && time.Now().Before(deadline) {
+		time.Sleep(snapshotTestPoll)
+	}
+
+	for i := range 10 {
+		attempt.Consume(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: uint16(10 + i)}, Payload: testClipSlice}) // #nosec G115 -- small test values.
+	}
+
+	if queued := len(attempt.packets); queued != 0 {
+		t.Fatalf("%d packets queued after the capture ended", queued)
+	}
+}

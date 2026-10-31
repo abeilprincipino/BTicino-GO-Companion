@@ -91,6 +91,9 @@ type snapshotAttempt struct {
 	// ring marks a capture from a stream born as a ringing preview: its picture
 	// is also the doorbell picture.
 	ring atomic.Bool
+	// done is set when the capture ends. The source keeps calling Consume for
+	// the whole stream, and nothing reads the packets any more.
+	done atomic.Bool
 }
 
 // NewSnapshotManager stores the latest valid JPEG for each entrypoint below dir.
@@ -210,7 +213,7 @@ func modTime(path string, ok bool) time.Time {
 
 // Consume queues a best-effort RTP copy without blocking source delivery.
 func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
-	if a == nil || packet == nil {
+	if a == nil || packet == nil || a.done.Load() {
 		return
 	}
 
@@ -410,6 +413,17 @@ func (u *snapshotAccessUnits) restart() {
 }
 
 func (a *snapshotAttempt) finish() {
+	a.done.Store(true)
+
+	// Release the copies still queued: the attempt lives as long as the stream.
+	for draining := true; draining; {
+		select {
+		case <-a.packets:
+		default:
+			draining = false
+		}
+	}
+
 	a.manager.mu.Lock()
 	if a.manager.active == a {
 		a.manager.active = nil
