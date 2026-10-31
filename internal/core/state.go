@@ -144,9 +144,7 @@ func apply(state *State, event Event) error {
 		// this the state reads "ringing" between the hangup and that frame and
 		// Home Assistant notifies a ring that never happened. See
 		// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-		if state.PhysicalRing != nil && state.PhysicalRing.EntrypointID == incoming.EntrypointID {
-			state.PhysicalRing = nil
-		}
+		clearRingOf(state, incoming.EntrypointID)
 
 		state.LastIncomingCallEnd = nil
 		state.ActiveCall = &ActiveCall{DialogID: incoming.DialogID, EntrypointID: incoming.EntrypointID}
@@ -168,10 +166,15 @@ func apply(state *State, event Event) error {
 			return nil
 		}
 
-		if _, err := matchingIncoming(state, event.DialogID); err != nil {
+		incoming, err := matchingIncoming(state, event.DialogID)
+		if err != nil {
 			return err
 		}
 
+		// A ringing call refused here: as on the answer, the bus frame that
+		// clears the ring comes much later, and until then the state would
+		// still read "ringing" with no call left to answer.
+		clearRingOf(state, incoming.EntrypointID)
 		state.IncomingCall = nil
 	case PreviewStarted:
 		if event.StreamID == "" || event.EntrypointID == "" {
@@ -240,6 +243,14 @@ func requireDialogAndEntrypoint(dialogID DialogID, entrypointID EntrypointID) er
 
 func transitionError(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidTransition, fmt.Sprintf(format, args...))
+}
+
+// clearRingOf ends the physical ring of the entrypoint whose call this
+// companion answered or hung up, ahead of the bus frame that would clear it.
+func clearRingOf(state *State, entrypointID EntrypointID) {
+	if state.PhysicalRing != nil && state.PhysicalRing.EntrypointID == entrypointID {
+		state.PhysicalRing = nil
+	}
 }
 
 func deriveCallState(state State) CallState {
