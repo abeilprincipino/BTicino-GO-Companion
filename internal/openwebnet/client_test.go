@@ -143,6 +143,65 @@ func TestControlEnableVoicemailChecksAvailabilityFirst(t *testing.T) {
 	}
 }
 
+func TestControlEndCallSendsTheCallEndFrame(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	command := make(chan string, 1)
+	done := make(chan error, 1)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+
+		reader := &frameReader{conn: conn}
+		if frame, err := reader.read(); err != nil || frame != FrameSessionStartCmd {
+			done <- errUnexpectedFrame(frame, err)
+			return
+		}
+
+		_, _ = conn.Write([]byte(FrameACK))
+
+		frame, err := reader.read()
+		if err != nil {
+			done <- err
+			return
+		}
+
+		command <- frame
+
+		_, _ = conn.Write([]byte(FrameACK))
+
+		done <- nil
+	}()
+
+	host, portText, _ := net.SplitHostPort(listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	control := NewControl(nil, nil)
+	control.host = host
+	control.port = port
+	control.timeout = time.Second
+
+	if err := control.EndCall(context.Background(), "11"); err != nil {
+		t.Fatalf("EndCall() error = %v", err)
+	}
+
+	if frame := <-command; frame != "*8*3#1#4*11##" {
+		t.Fatalf("command = %q, want the call end frame", frame)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+}
+
 func TestControlDiagnosticSnapshotUsesOneSession(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -151,11 +151,33 @@ func run(
 	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))
 
+	// The address the last ring called, which a declined call is closed on.
+	var ringCalled atomic.Pointer[string]
+
+	// A hangup from any client ends the stream for every consumer, not only for
+	// the one whose user pressed it. A declined call is also closed on the bus:
+	// the 603 ends only the companion's SIP fork, and the indoor unit kept
+	// ringing until the intercom's own timeout.
+	runtime.calls.SetHangupObserver(func(declined bool) {
+		rtspServer.Coordinator().EndCall()
+
+		if declined {
+			go endBusCall(openWebNetControl, ringCalled.Load(), logger)
+		}
+	})
+
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
 		// Who starts which stream, to where, and when: the AV frames say it.
+		// The door-entry frames are logged too, to learn how the bus ends a call.
 		if strings.HasPrefix(frame, "*7*") {
 			logger.Debug("openwebnet av frame", "frame", frame)
+		} else if strings.HasPrefix(frame, "*8*") {
+			logger.Debug("openwebnet door entry frame", "frame", frame)
+		}
+
+		if where, ok := openwebnet.ParseRingCalledAddress(frame); ok {
+			ringCalled.Store(&where)
 		}
 
 		runtime.ringWatch.observeFrame(frame)
@@ -423,9 +445,6 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// HomeKit wait for the answer. See
 	// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 	rtspServer.Coordinator().SetRingingCallProbe(calls.HasRingingInboundCall)
-	// A hangup from any client ends the stream for every consumer, not only for
-	// the one whose user pressed it.
-	calls.SetHangupObserver(rtspServer.Coordinator().EndCall)
 
 	if err := rtspServer.Start(ctx); err != nil {
 		_ = dialer.Close()
@@ -566,6 +585,25 @@ func newVoicemailRefresher(control *openwebnet.Control, projector *core.Projecto
 
 		return true, nil
 	}
+}
+
+// endBusCall closes a declined call on the bus for every device, the indoor
+// unit included. where is nil when no ring frame was seen since the start.
+func endBusCall(control *openwebnet.Control, where *string, logger *slog.Logger) {
+	if where == nil {
+		logger.Warn("bus call end skipped; no ring frame seen")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := control.EndCall(ctx, *where); err != nil {
+		logger.Warn("bus call end failed", "where", *where, "error", err)
+		return
+	}
+
+	logger.Info("bus call end sent", "where", *where)
 }
 
 // eventSinkFunc adapts the applier closure to signaling.EventSink.

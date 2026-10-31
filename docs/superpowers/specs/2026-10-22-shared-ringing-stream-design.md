@@ -228,6 +228,11 @@ from `active` to `idle`.
   the other consumers kept a stream whose call was gone. The observer is called directly, not from
   `CallHungUp`: events arrive later, on the drain goroutine, and the media teardown publishes
   `CallHungUp` as well, so an event-driven stop could hit a newer stream.
+- **Decline on the bus** (beta experiment, 2026-10-31): the 603 ends only the companion's SIP
+  fork; on the device the indoor unit kept ringing until the intercom's own ~27 s timeout. When
+  the observer reports a decline, the companion also sends `*8*3#1#4*<where>##` (the call end
+  ha-bticino-c300x recognises), `<where>` being the called address of the last ring frame
+  `*8*1#1#4#<a>*<where>##`. Every `*8*` frame is now logged at debug to confirm or correct it.
 
 ## 6. Error handling
 

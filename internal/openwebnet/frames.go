@@ -78,6 +78,32 @@ func IsRingStart(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#1#4#")
 }
 
+// ParseRingCalledAddress returns <b> from a ring frame *8*1#1#4#<a>*<b>##, the
+// address the call rings, which BuildCallEnd closes.
+func ParseRingCalledAddress(frame string) (string, bool) {
+	trimmed := strings.TrimSpace(frame)
+	if !IsRingStart(trimmed) || !strings.HasSuffix(trimmed, "##") {
+		return "", false
+	}
+
+	_, called, found := strings.Cut(strings.TrimSuffix(trimmed, "##"), "*8*1#1#4#")
+	if !found {
+		return "", false
+	}
+
+	_, called, found = strings.Cut(called, "*")
+	called = strings.TrimSpace(called)
+
+	return called, found && called != ""
+}
+
+// BuildCallEnd closes the door-entry call on the bus, which a SIP 603 does not
+// do: the indoor unit keeps ringing until the intercom's own timeout. The frame
+// is the call end ha-bticino-c300x recognises; sending it is a beta experiment.
+func BuildCallEnd(where string) string {
+	return fmt.Sprintf("*8*3#1#4*%s##", strings.TrimSpace(where))
+}
+
 func IsViewRequest(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#5#4#")
 }
