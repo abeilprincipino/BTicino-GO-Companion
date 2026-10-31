@@ -356,11 +356,12 @@ func (d *streamDialer) notifyRemoteDialogEnded() {
 
 // SetRemoteDialogEnded assigns the callback for the sole active stream.
 // keepDialogAlive starts the media keepalive of one established dialog. It
-// runs until ctx, the dialog's context, ends.
-func (d *streamDialer) keepDialogAlive(ctx context.Context, dialogID, remoteSDP string) {
+// runs until ctx, the dialog's context, ends. localSDP is the SDP we sent in the
+// dialog, the offer or the answer.
+func (d *streamDialer) keepDialogAlive(ctx context.Context, dialogID, remoteSDP, localSDP string) {
 	logger := d.logger.With("dialog_id", dialogID)
 
-	startDialogKeepalive(ctx, logger, remoteSDP, d.keepalivePort, d.keepaliveInterval)
+	startDialogKeepalive(ctx, logger, remoteSDP, localSDP, d.keepalivePort, d.keepaliveInterval)
 }
 
 func (d *streamDialer) SetRemoteDialogEnded(callback func()) {
@@ -540,7 +541,7 @@ func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (Outgoi
 
 	// The dialog's own context, not ctx: the keepalive must outlive this call
 	// and end with the dialog, whichever side ends it.
-	d.keepDialogAlive(dialog.Context(), dialog.ID, answerSDP)
+	d.keepDialogAlive(dialog.Context(), dialog.ID, answerSDP, offer)
 
 	d.logger.InfoContext(ctx, "sip stream established", "elapsed", time.Since(sentAt))
 
@@ -809,7 +810,7 @@ func (d *streamDialer) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 			d.inboundDialogs.Delete(session.ID)
 		case sip.DialogStateConfirmed:
 			keepaliveOnce.Do(func() {
-				d.keepDialogAlive(session.Context(), string(dialogID), remoteSDP)
+				d.keepDialogAlive(session.Context(), string(dialogID), remoteSDP, dialog.answerSDP())
 			})
 		}
 	})
@@ -988,16 +989,26 @@ type incomingDialog struct {
 	id      core.DialogID
 	logger  *slog.Logger
 
-	// mu guards the two fields below and is held across a provisional response,
+	// mu guards the fields below and is held across a provisional response,
 	// so a final one can never start writing while a 180 is still on the wire.
 	mu        sync.Mutex
 	ringing   bool
 	concluded bool
+	// sdp is the body of our 2xx, whose audio key the media keepalive uses.
+	sdp string
 }
 
 var _ IncomingDialog = (*incomingDialog)(nil)
 
 func (d *incomingDialog) ID() core.DialogID { return d.id }
+
+// answerSDP returns the SDP our 2xx carried, "" before the call is answered.
+func (d *incomingDialog) answerSDP() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.sdp
+}
 
 // Respond sends a provisional or final response.
 //
@@ -1046,6 +1057,9 @@ func (d *incomingDialog) Respond(ctx context.Context, status int, reason, body s
 	// released: writing it waits for the far end, and nothing else may be
 	// written on this dialog afterwards anyway.
 	d.concluded = true
+	if status < 300 {
+		d.sdp = body
+	}
 	d.mu.Unlock()
 
 	if status < 300 {

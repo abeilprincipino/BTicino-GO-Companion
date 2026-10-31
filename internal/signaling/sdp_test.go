@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -61,5 +62,39 @@ func TestBuildAnswerOmitsEmptyDevAddr(t *testing.T) {
 
 	if strings.Contains(answer, "DEVADDR") {
 		t.Fatalf("answer must not contain DEVADDR when devaddr is empty: %s", answer)
+	}
+}
+
+// Each SDP gives the far end a fresh SRTP key per media line, which the media
+// keepalive then encrypts with.
+func TestBuildOfferAndAnswerCarryFreshSRTPKeys(t *testing.T) {
+	t.Parallel()
+
+	seen := map[string]bool{}
+
+	for _, sdp := range []string{BuildOffer("192.0.2.10", ""), BuildAnswer("192.0.2.10", ""), BuildOffer("192.0.2.10", "")} {
+		keys := 0
+
+		for _, line := range strings.Split(sdp, "\r\n") {
+			inline, ok := strings.CutPrefix(line, "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:")
+			if !ok {
+				continue
+			}
+
+			if material, err := base64.StdEncoding.DecodeString(inline); err != nil || len(material) != 30 {
+				t.Fatalf("crypto key %q decodes to %d bytes (%v), want 30", inline, len(material), err)
+			}
+
+			if seen[inline] {
+				t.Fatalf("crypto key %q used twice", inline)
+			}
+
+			seen[inline] = true
+			keys++
+		}
+
+		if keys != 2 {
+			t.Fatalf("SDP has %d crypto keys, want one per media line: %s", keys, sdp)
+		}
 	}
 }
