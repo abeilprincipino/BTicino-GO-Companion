@@ -423,6 +423,9 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// HomeKit wait for the answer. See
 	// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 	rtspServer.Coordinator().SetRingingCallProbe(calls.HasRingingInboundCall)
+	// A hangup from any client ends the stream for every consumer, not only for
+	// the one whose user pressed it.
+	calls.SetHangupObserver(rtspServer.Coordinator().EndCall)
 
 	if err := rtspServer.Start(ctx); err != nil {
 		_ = dialer.Close()

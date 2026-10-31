@@ -87,6 +87,9 @@ type Manager struct {
 	// activeEntrypoint is the entrypoint the answered inbound call belongs to,
 	// kept because Answer clears incomingEntrypoint.
 	activeEntrypoint core.EntrypointID
+
+	// hungUp runs after Hangup has ended a call; see SetHangupObserver.
+	hungUp func()
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -108,6 +111,23 @@ func NewManager(host string, dialer StreamDialer, events EventSink, resolve Entr
 func (m *Manager) SetEvents(events EventSink) {
 	m.mu.Lock()
 	m.events = events
+	m.mu.Unlock()
+}
+
+// SetHangupObserver installs fn, which Hangup runs after it has ended a call —
+// the BYE or the 603 sent, error or not — and never when there was nothing to
+// end. HangupCall, the media path's hangup, never runs it.
+//
+// The application stops the media stream from it, for every consumer: the
+// consumer whose user hung up closes its own session, but the others would keep
+// holding a stream whose call is gone. It is called directly rather than from
+// the CallHungUp event, because events are delivered later, on their own
+// goroutine, and the media teardown publishes CallHungUp too: a late one would
+// stop whatever stream started after it. See
+// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
+func (m *Manager) SetHangupObserver(fn func()) {
+	m.mu.Lock()
+	m.hungUp = fn
 	m.mu.Unlock()
 }
 
@@ -286,9 +306,15 @@ func (m *Manager) Decline(ctx context.Context) error {
 // docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
+	hungUp := m.hungUp
 
 	if m.active != nil {
-		return m.byeActiveLocked(ctx)
+		err := m.byeActiveLocked(ctx)
+		if hungUp != nil {
+			hungUp()
+		}
+
+		return err
 	}
 
 	dialog := m.takeIncomingLocked(nil)
@@ -300,7 +326,12 @@ func (m *Manager) Hangup(ctx context.Context) error {
 
 	m.publishLocked(core.CallHungUp{DialogID: dialog.ID()})
 
-	if err := dialog.Respond(ctx, 603, "Decline", ""); err != nil {
+	err := dialog.Respond(ctx, 603, "Decline", "")
+	if hungUp != nil {
+		hungUp()
+	}
+
+	if err != nil {
 		return fmt.Errorf("sip decline response: %w", err)
 	}
 

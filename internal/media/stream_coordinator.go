@@ -19,6 +19,7 @@ var (
 	ErrRingingCall            = errors.New("media: intercom call is ringing")
 	ErrRingingEnded           = errors.New("media: ringing call ended")
 	ErrRingingPreviewLost     = errors.New("media: ringing preview lost")
+	ErrCallEnded              = errors.New("media: call ended")
 	ErrStreamStopped          = errors.New("media: stream stopped")
 )
 
@@ -61,6 +62,7 @@ var (
 	causeStartupFailed    = stopCause{reason: "source startup failed"}
 	causeStartupTimedOut  = stopCause{reason: "source startup timed out"}
 	causeRingingEnded     = stopCause{reason: "ringing call ended"}
+	causeCallEnded        = stopCause{reason: "call ended"}
 )
 
 // ManagedSourceCallEnder is an optional capability of a managed source that
@@ -821,6 +823,41 @@ func (c *StreamCoordinator) StopRinging() {
 
 	if f != nil {
 		f.failed(ErrRingingEnded)
+	}
+}
+
+// EndCall stops the stream after the user ended the call through the companion.
+// The BYE or the 603 is already sent, so the stream carries a call that is gone:
+// it stops without a BYE of its own and every consumer is told, as for a remote
+// BYE, not only the one whose user hung up. A ringing preview ends exactly as
+// StopRinging ends it. A no-op with no stream.
+//
+// It must run right after the hangup, from signaling.Manager's hangup observer:
+// it stops whatever stream is current, so it must never be driven by a call
+// event, which arrives late enough to find a newer stream.
+func (c *StreamCoordinator) EndCall() {
+	c.mu.Lock()
+	if c.leaseID == 0 {
+		c.mu.Unlock()
+
+		return
+	}
+
+	cause, told := causeCallEnded, ErrCallEnded
+	if c.previewRinging {
+		cause, told = causeRingingEnded, ErrRingingEnded
+	}
+
+	lease := &StreamLease{id: c.leaseID}
+	f := c.fanout
+	c.mu.Unlock()
+
+	if !c.stop(lease, cause) {
+		return
+	}
+
+	if f != nil {
+		f.failed(told)
 	}
 }
 

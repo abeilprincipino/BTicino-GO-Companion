@@ -95,11 +95,10 @@ The coordinator still owns one intercom stream at a time, but a stream may have 
     principle join a stream born outside the ring and get none of the preview behaviour. It cannot
     happen today: a stream born outside the ring is an outbound live view, whose active dialog
     makes `Manager.OnInvite` answer `486 Busy Here`, so no ring ever reaches the card or the ring
-    holder while it runs. One narrow window remains: after the hangup of an answered call, a
+    holder while it runs. The window that remained after the hangup of an answered call — a
     consumer still attached (a Home Assistant native-camera viewer, or a session the integration
-    no longer tracks) keeps the stream up until the bus stop frame or the stall watchdog, about
-    5 s; a new ring inside that window joins the dead stream and gets no picture and no preview.
-    Accepted as rare. Revisit if that 486 is ever removed or the window shows up on the device.
+    no longer tracks) kept the stream up until the bus stop frame or the stall watchdog — is
+    closed: `POST /api/v3/call/hangup` now stops the stream for every consumer (see §5.2).
 - **Joining a starting stream** waits for its startup to finish, bounded by the joiner's
   `startupCtx`. If startup fails, or the stream stops before the joiner is in, the joiner gets
   `ErrStreamStopped`. A `streamStart` per stream carries this; a fan-out whose last consumer
@@ -221,7 +220,14 @@ from `active` to `idle`.
   It opens nothing until the call ends. This replaces today's listen-only viewer.
 - Answering from this card: unchanged. With a preview it adds the microphone to its session;
   without one it offers, which now joins.
-- Hangup and closing the answering card: unchanged; the last `Release` sends the BYE.
+- Closing the answering card: unchanged; the last `Release` sends the BYE.
+- **Hangup** (amended 2026-10-31): `Manager.Hangup` sends the BYE (or the 603) and then runs its
+  hangup observer, `StreamCoordinator.EndCall`, which stops the stream with `causeCallEnded`
+  (`endsCall: false`) and tells every consumer `Failed(ErrCallEnded)` — a ringing preview gets
+  `ErrRingingEnded`, as from `StopRinging`. Before, only the hanging-up card's session closed and
+  the other consumers kept a stream whose call was gone. The observer is called directly, not from
+  `CallHungUp`: events arrive later, on the drain goroutine, and the media teardown publishes
+  `CallHungUp` as well, so an event-driven stop could hit a newer stream.
 
 ## 6. Error handling
 
