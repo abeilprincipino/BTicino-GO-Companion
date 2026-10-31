@@ -579,12 +579,14 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 		// partial caps there ("Filter caps do not completely specify the
 		// output format"), and h264parse detects the byte-stream itself.
 		//
-		// The VPU encodes the JPEG too: ~2 ms a frame against ~29 for jpegenc
-		// at quality 90 on the C100X, and at its default quality a 640x480
-		// picture weighs ~40 KB instead of ~58. The VPU library prints its
-		// logs on stdout after the picture; readFirstJPEG skips them.
+		// The JPEG is encoded on the CPU, not with imxvpuenc_mjpeg: idle, the
+		// VPU encoder is ~20 ms quicker, but during a ring the intercom opens
+		// its own decoders at the same instant, and four rings took ~140 ms
+		// against ~115 with jpegenc. Quality 80 keeps a 640x480 picture at
+		// ~40 KB instead of ~58 at 90. The VPU library prints its logs on
+		// stdout after the picture; readFirstJPEG skips them.
 		"fdsrc", "fd=0", "!", "h264parse", "!", "imxvpudec", "!",
-		"imxvpuenc_mjpeg", "!", "fdsink", "fd=1",
+		"jpegenc", "quality=80", "!", "fdsink", "fd=1",
 	)
 
 	stdin, err := command.StdinPipe()
