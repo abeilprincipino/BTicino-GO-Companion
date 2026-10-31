@@ -45,6 +45,22 @@ func TestFramePredicatesAndExtractors(t *testing.T) {
 		t.Fatal("video stream must not be classified as audio")
 	}
 
+	for frame, want := range map[string]bool{
+		"*7*300#127#0#0#1#5002#1*##":  true,
+		"*7*300#127#0#0#1#5007#0*##":  true,
+		"*7*300#127#0#0#1#46168#1*##": false,
+		"*7*300#127#0#0#1#5007#2*##":  false,
+		"*7*0*##":                     false,
+	} {
+		if got := IsIntercomStreamStart(frame); got != want {
+			t.Fatalf("IsIntercomStreamStart(%q) = %t, want %t", frame, got, want)
+		}
+	}
+
+	if !IsAVActivation("*7*58#8#0#0#1*##") || IsAVActivation("*7*580#1*##") {
+		t.Fatal("expected only *7*58# to be an AV activation")
+	}
+
 	if where, ok := ParseReceiveVideoWhere("*7*0*4001##"); !ok || where != "4001" {
 		t.Fatalf("unexpected receive-video parse: where=%q ok=%t", where, ok)
 	}

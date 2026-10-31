@@ -571,6 +571,69 @@ func TestLoadReadsThePersistedUpdateChannel(t *testing.T) {
 	}
 }
 
+func TestLoadReadsTheRingVideoRequest(t *testing.T) {
+	t.Parallel()
+
+	for name, testCase := range map[string]struct {
+		value   string
+		wantErr bool
+	}{
+		"early":    {value: RingVideoRequestEarly},
+		"reactive": {value: RingVideoRequestReactive},
+		"unknown":  {value: "lazy", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if _, err := Create(path, Metadata{Model: testModel, MAC: testMAC}); err != nil {
+				t.Fatalf("create config: %v", err)
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+
+			if strings.Contains(string(data), "ring_video_request") {
+				t.Fatal("an unset ring_video_request was written")
+			}
+
+			data = []byte(strings.Replace(string(data), "companion:\n", "companion:\n    ring_video_request: "+testCase.value+"\n", 1))
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			store, err := Open(path)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("Open() error = nil, want error")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+
+			// A rewrite must keep the key.
+			if err := store.Update(func(*Config) error { return nil }); err != nil {
+				t.Fatalf("Update() error = %v", err)
+			}
+
+			loaded, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+
+			if loaded.Companion.RingVideoRequest != testCase.value {
+				t.Fatalf("RingVideoRequest = %q, want %q", loaded.Companion.RingVideoRequest, testCase.value)
+			}
+		})
+	}
+}
+
 func TestEnsureSIPSectionLeavesAnExistingSectionUntouched(t *testing.T) {
 	t.Parallel()
 

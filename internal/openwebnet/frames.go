@@ -123,6 +123,36 @@ func IsStreamStartAudio(frame string) bool {
 	return ok && channel == "2"
 }
 
+// IsIntercomStreamStart reports a video stream the intercom starts for itself:
+// to its display (5002) or its SIP stack (5007), never to a companion receiver,
+// whose ports are ephemeral. A ring's video is ready once one of them appears.
+func IsIntercomStreamStart(frame string) bool {
+	if !IsStreamStartVideo(frame) {
+		return false
+	}
+
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(frame), "*7*300#"), "*##"), "#")
+	if len(parts) < 2 {
+		return false
+	}
+
+	port := strings.TrimSpace(parts[len(parts)-2])
+
+	return port == "5002" || port == "5007"
+}
+
+// IsAVActivation reports the intercom (re)activating the entrance panel's
+// video: it sends one at every ring, and again when it drops a pending request.
+func IsAVActivation(frame string) bool {
+	return strings.HasPrefix(strings.TrimSpace(frame), "*7*58#")
+}
+
+// IsAVParameters reports the entrance panel's video parameters, which the
+// intercom announces while it powers the camera on.
+func IsAVParameters(frame string) bool {
+	return strings.HasPrefix(strings.TrimSpace(frame), "*7*77#") || strings.HasPrefix(strings.TrimSpace(frame), "*7*77*")
+}
+
 func IsStreamStop(frame string) bool {
 	return strings.TrimSpace(frame) == FrameStop
 }

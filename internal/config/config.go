@@ -38,6 +38,15 @@ const (
 	MaxUnlockDurationMS     = 2000
 )
 
+// How a ringing preview asks the intercom for video. Early asks as soon as the
+// INVITE arrives; reactive waits for the intercom to start its own streams. The
+// reactive mode is an experiment: see
+// docs/analysis/2026-10-29-ring-snapshot-latency.md, P4.
+const (
+	RingVideoRequestEarly    = "early"
+	RingVideoRequestReactive = "reactive"
+)
+
 var (
 	ErrMissingMetadata   = errors.New("missing device metadata")
 	ErrConfigExists      = errors.New("config already exists")
@@ -67,6 +76,9 @@ type Companion struct {
 	Model       string       `yaml:"-"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
 	SIP         SIP          `yaml:"sip"`
+	// RingVideoRequest is RingVideoRequestEarly or RingVideoRequestReactive;
+	// empty means early.
+	RingVideoRequest string `yaml:"ring_video_request,omitempty"`
 }
 
 type Entrypoint struct {
@@ -164,9 +176,12 @@ type persistedConfig struct {
 	HomeKit   HomeKit            `yaml:"homekit"`
 }
 
+// persistedCompanion omits an unset ring_video_request: the loader rejects
+// unknown keys, so writing it would make the config unreadable for older builds.
 type persistedCompanion struct {
-	Entrypoints []Entrypoint `yaml:"entrypoints"`
-	SIP         SIP          `yaml:"sip"`
+	Entrypoints      []Entrypoint `yaml:"entrypoints"`
+	SIP              SIP          `yaml:"sip"`
+	RingVideoRequest string       `yaml:"ring_video_request,omitempty"`
 }
 
 type Metadata struct {
@@ -301,8 +316,9 @@ func Load(path string) (Config, error) {
 
 	cfg := Config{
 		Companion: Companion{
-			Entrypoints: persisted.Companion.Entrypoints,
-			SIP:         persisted.Companion.SIP,
+			Entrypoints:      persisted.Companion.Entrypoints,
+			SIP:              persisted.Companion.SIP,
+			RingVideoRequest: persisted.Companion.RingVideoRequest,
 		},
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
@@ -607,6 +623,12 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("invalid update channel %q", channel)
 	}
 
+	switch cfg.Companion.RingVideoRequest {
+	case "", RingVideoRequestEarly, RingVideoRequestReactive:
+	default:
+		return fmt.Errorf("invalid ring video request %q", cfg.Companion.RingVideoRequest)
+	}
+
 	return nil
 }
 
@@ -645,8 +667,9 @@ func save(path string, cfg Config, exclusive bool) error {
 func encode(cfg Config) ([]byte, error) {
 	data, err := yaml.Marshal(persistedConfig{
 		Companion: persistedCompanion{
-			Entrypoints: cfg.Companion.Entrypoints,
-			SIP:         cfg.Companion.SIP,
+			Entrypoints:      cfg.Companion.Entrypoints,
+			SIP:              cfg.Companion.SIP,
+			RingVideoRequest: cfg.Companion.RingVideoRequest,
 		},
 		Logging: cfg.Logging,
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
