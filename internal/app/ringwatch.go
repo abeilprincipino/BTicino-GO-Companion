@@ -24,6 +24,9 @@ const (
 	ringTimelineWindow = 10 * time.Second
 	// ringFrameRepeat folds the 2–4 copies the intercom sends of each AV frame.
 	ringFrameRepeat = 100 * time.Millisecond
+	// ringStartRepeat folds the copies of the ring frame, which arrive up to
+	// ~330 ms after the first.
+	ringStartRepeat = time.Second
 )
 
 // ringVideoWatch follows the AV frames of each ring. It tells the ringing
@@ -76,7 +79,10 @@ func (w *ringVideoWatch) observeFrame(frame string) {
 	defer w.mu.Unlock()
 
 	if openwebnet.IsRingStart(frame) {
-		w.startRing(now)
+		if w.ringAt.IsZero() || now.Sub(w.ringAt) >= ringStartRepeat {
+			w.startRing(now)
+		}
+
 		return
 	}
 
@@ -106,9 +112,14 @@ func (w *ringVideoWatch) observeFrame(frame string) {
 func (w *ringVideoWatch) startRing(now time.Time) {
 	w.reportLocked("next ring")
 
+	// A request may already wait on streamUp: it is replaced only once closed,
+	// so the next intercom stream always reaches the waiter.
+	if w.timeline.intercomStream != 0 {
+		w.streamUp = make(chan struct{})
+	}
+
 	w.generation++
 	w.ringAt = now
-	w.streamUp = make(chan struct{})
 	w.timeline = ringTimeline{}
 
 	generation := w.generation

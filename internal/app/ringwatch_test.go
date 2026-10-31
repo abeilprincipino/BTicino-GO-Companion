@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,12 +152,71 @@ func TestReactiveRingVideoGoesAtOnceWhenTheStreamIsAlreadyUp(t *testing.T) {
 	}
 }
 
+// The intercom repeats the ring frame up to ~330 ms later. The copies must not
+// start a new ring under a request that already waits.
+func TestReactiveRingVideoIgnoresCopiesOfTheRingFrame(t *testing.T) {
+	watch, logs := newTestRingWatch(5 * time.Second)
+	fake := &fakeRingAV{videoRequests: make(chan time.Time, 1)}
+
+	watch.observeFrame(testRingFrame)
+
+	done := startVideoAsync(watch.sourceAV(fake))
+
+	time.Sleep(50 * time.Millisecond)
+	watch.observeFrame(testRingFrame)
+	watch.observeFrame(testRingFrame)
+	watch.observeFrame(testIntercomStreamFrame)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartVideo() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the request missed the intercom stream after copies of the ring frame")
+	}
+
+	if strings.Contains(logs.String(), "next ring") {
+		t.Fatalf("a copy of the ring frame started a new ring:\n%s", logs.String())
+	}
+}
+
+// A ring that arrives before the previous one's stream keeps the signal a
+// request may already wait on.
+func TestReactiveRingVideoKeepsTheSignalAcrossARingWithoutStream(t *testing.T) {
+	watch, _ := newTestRingWatch(5 * time.Second)
+	fake := &fakeRingAV{videoRequests: make(chan time.Time, 1)}
+
+	clock := newTestClock()
+	watch.now = clock.now
+
+	watch.observeFrame(testRingFrame)
+
+	done := startVideoAsync(watch.sourceAV(fake))
+
+	time.Sleep(50 * time.Millisecond)
+	clock.advance(5 * time.Second)
+	watch.observeFrame(testRingFrame)
+	watch.observeFrame(testIntercomStreamFrame)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the request missed the stream of the next ring")
+	}
+}
+
 func TestReactiveRingVideoWaitsAgainOnTheNextRing(t *testing.T) {
 	watch, _ := newTestRingWatch(5 * time.Second)
 	fake := &fakeRingAV{videoRequests: make(chan time.Time, 1)}
 
+	clock := newTestClock()
+	watch.now = clock.now
+
 	watch.observeFrame(testRingFrame)
 	watch.observeFrame(testIntercomStreamFrame)
+
+	clock.advance(20 * time.Second)
 	watch.observeFrame(testRingFrame)
 
 	done := startVideoAsync(watch.sourceAV(fake))
@@ -173,6 +233,17 @@ func TestReactiveRingVideoWaitsAgainOnTheNextRing(t *testing.T) {
 		t.Fatalf("StartVideo() error = %v", err)
 	}
 }
+
+// testClock is read by the request's goroutine while the test moves it.
+type testClock struct{ offset atomic.Int64 }
+
+func newTestClock() *testClock { return &testClock{} }
+
+func (c *testClock) now() time.Time {
+	return time.Now().Add(time.Duration(c.offset.Load()))
+}
+
+func (c *testClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 
 type nopRingClip struct{}
 
