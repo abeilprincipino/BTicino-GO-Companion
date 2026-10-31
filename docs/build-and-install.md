@@ -417,12 +417,9 @@ Rilevanti solo in modalità download (senza argomento), tranne le ultime due:
 
 ## 7. Note sul repo
 
-Un'incongruenza rilevata leggendo la pipeline, non bloccante per l'install locale:
-
-- **`dist/` non è in [.gitignore](../.gitignore)** (che copre solo `/companion`,
-  `/coverage.out`, `/.dev/`), ma è la directory in cui scrivono sia il comando di §2 sia
-  [release.yaml:32](../.github/workflows/release.yaml#L32). Gli artefatti di build finiscono
-  in `git status`.
+- **`dist/` è in [.gitignore](../.gitignore)**: è la directory in cui scrivono sia il comando
+  di §2 sia [release.yaml](../.github/workflows/release.yaml), e i binari non vanno committati.
+  Le release ufficiali e le beta vengono sempre costruite dalla CI.
 
 ---
 
