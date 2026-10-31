@@ -3,6 +3,7 @@ package signaling
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/pion/srtp/v3"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 
 // keepalivePayload is the body of every keepalive packet: one byte, which is
 // enough for the far end to count the stream as alive without decoding audio.
+// It is also what ha-bticino-c300x sends to the intercom as Speex silence.
 var keepalivePayload = []byte{0}
 
 // The companion never sends audio upstream: the clear RTP it consumes arrives
@@ -34,10 +37,13 @@ var keepalivePayload = []byte{0}
 // far end that watches its RTP for inactivity therefore sees a silent stream
 // and ends the answered call on its own. rtpKeepalive closes that gap by
 // sending a minimal RTP packet on the advertised audio port, at a fixed
-// interval, for as long as the dialog lasts.
+// interval, for as long as the dialog lasts. When both SDPs negotiated SRTP
+// the packet is encrypted with our key, or the far end could not authenticate
+// it and would not count it.
 type rtpKeepalive struct {
 	conn     *net.UDPConn
 	remote   *net.UDPAddr
+	srtp     *srtp.Context
 	interval time.Duration
 	logger   *slog.Logger
 	packet   rtp.Packet
@@ -49,8 +55,8 @@ type rtpKeepalive struct {
 
 // startRTPKeepalive binds localPort — the audio port our SDP advertised, so the
 // packets come from where the far end expects them — and starts sending to
-// remote every interval until Stop is called.
-func startRTPKeepalive(localPort int, remote *net.UDPAddr, interval time.Duration, logger *slog.Logger) (*rtpKeepalive, error) {
+// remote every interval until Stop is called, through protect when it is set.
+func startRTPKeepalive(localPort int, remote *net.UDPAddr, protect *srtp.Context, interval time.Duration, logger *slog.Logger) (*rtpKeepalive, error) {
 	if interval <= 0 {
 		return nil, fmt.Errorf("media keepalive interval must be positive, got %s", interval)
 	}
@@ -69,6 +75,7 @@ func startRTPKeepalive(localPort int, remote *net.UDPAddr, interval time.Duratio
 	k := &rtpKeepalive{
 		conn:     conn,
 		remote:   remote,
+		srtp:     protect,
 		interval: interval,
 		logger:   logger,
 		stop:     make(chan struct{}),
@@ -126,6 +133,12 @@ func (k *rtpKeepalive) write() error {
 		return fmt.Errorf("marshal keepalive RTP: %w", err)
 	}
 
+	if k.srtp != nil {
+		if data, err = k.srtp.EncryptRTP(nil, data, nil); err != nil {
+			return fmt.Errorf("encrypt keepalive RTP: %w", err)
+		}
+	}
+
 	if _, err := k.conn.WriteToUDP(data, k.remote); err != nil {
 		return fmt.Errorf("send keepalive RTP: %w", err)
 	}
@@ -146,8 +159,10 @@ func (k *rtpKeepalive) Stop() {
 // startDialogKeepalive keeps the media of one established dialog alive until
 // ctx — the dialog's own context — ends. Without a usable audio target in the
 // far end's SDP there is nothing to keep alive, and the call goes on without
-// it: a keepalive is never a reason to fail a dialog.
-func startDialogKeepalive(ctx context.Context, logger *slog.Logger, remoteSDP string, localPort int, interval time.Duration) {
+// it: a keepalive is never a reason to fail a dialog. localSDP is the one we
+// sent, whose audio key encrypts the keepalive when the far end's SDP accepted
+// SRTP too.
+func startDialogKeepalive(ctx context.Context, logger *slog.Logger, remoteSDP, localSDP string, localPort int, interval time.Duration) {
 	remote, err := parseRemoteAudioTarget(remoteSDP)
 	if err != nil {
 		logger.Warn("sip media keepalive unavailable", "error", err)
@@ -155,7 +170,14 @@ func startDialogKeepalive(ctx context.Context, logger *slog.Logger, remoteSDP st
 		return
 	}
 
-	keepalive, err := startRTPKeepalive(localPort, remote, interval, logger)
+	protect, err := keepaliveSRTP(remoteSDP, localSDP)
+	if err != nil {
+		logger.Warn("sip media keepalive unavailable", "error", err)
+
+		return
+	}
+
+	keepalive, err := startRTPKeepalive(localPort, remote, protect, interval, logger)
 	if err != nil {
 		logger.Warn("sip media keepalive unavailable", "remote", remote.String(), "error", err)
 
@@ -174,7 +196,28 @@ func startDialogKeepalive(ctx context.Context, logger *slog.Logger, remoteSDP st
 	logger.Debug("sip media keepalive started",
 		"remote", remote.String(),
 		"local_port", localPort,
-		"interval", interval)
+		"interval", interval,
+		"srtp", protect != nil)
+}
+
+// keepaliveSRTP returns the context that encrypts the keepalive, nil when the
+// far end's audio carries no SRTP key and so expects plain RTP.
+func keepaliveSRTP(remoteSDP, localSDP string) (*srtp.Context, error) {
+	if _, ok := parseAudioCrypto(remoteSDP); !ok {
+		return nil, nil
+	}
+
+	key, ok := parseAudioCrypto(localSDP)
+	if !ok {
+		return nil, errors.New("the far end negotiated SRTP but our SDP has no audio key")
+	}
+
+	context, err := srtp.CreateContext(key[:16], key[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+	if err != nil {
+		return nil, fmt.Errorf("create keepalive SRTP context: %w", err)
+	}
+
+	return context, nil
 }
 
 // randomUint returns a uniform value in [0, limit), or 0 if the system's

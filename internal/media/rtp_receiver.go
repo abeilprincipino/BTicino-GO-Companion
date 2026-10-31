@@ -17,6 +17,11 @@ const (
 	AudioPayloadType    = 110
 	packetStatsInterval = 30 * time.Second
 	invalidLogInterval  = 10 * time.Second
+	// rtpReadBufferSize is asked for every RTP socket. A keyframe arrives as ~45
+	// packets in ~30 ms, while the consumers run on the reading goroutine. The
+	// kernel caps it at net.core.rmem_max and doubles it: 320 KiB on the C100X,
+	// against the 160 KiB of rmem_default.
+	rtpReadBufferSize = 1 << 20
 )
 
 var ErrRTPReceiverStarted = errors.New("media: rtp receiver already started")
@@ -88,6 +93,10 @@ func (r *RTPReceiver) Start(ctx context.Context) error {
 	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		return fmt.Errorf("listen rtp: %w", err)
+	}
+
+	if err := conn.SetReadBuffer(rtpReadBufferSize); err != nil {
+		r.logger.WarnContext(ctx, "set rtp read buffer", "error", err)
 	}
 
 	r.conn = conn

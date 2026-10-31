@@ -138,7 +138,9 @@ func run(
 	// The ring holder sits inside routeRingingPreview, so on the answer the
 	// preview is promoted before the holder leaves the stream. See
 	// docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(entrypointID string) ringClip { return runtime.ringClips.Start(entrypointID) }, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
+	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(entrypointID string) ringClip {
+		return runtime.ringWatch.clip(runtime.ringClips.Start(entrypointID))
+	}, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
 	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
 
 	if runtime.inboundSIP {
@@ -155,6 +157,8 @@ func run(
 		if strings.HasPrefix(frame, "*7*") {
 			logger.Debug("openwebnet av frame", "frame", frame)
 		}
+
+		runtime.ringWatch.observeFrame(frame)
 
 		switch {
 		case openwebnet.IsStreamStartVideo(frame):
@@ -282,6 +286,7 @@ type applicationRuntime struct {
 	homeKit           *homekit.Manager
 	server            *api.Server
 	ringClips         *media.RingClipRecorder
+	ringWatch         *ringVideoWatch
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
 	dialer            interface {
@@ -397,9 +402,10 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	control := openwebnet.NewControl(initialConfig.Companion.Entrypoints, trace)
 	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
 	ringClips := media.NewRingClipRecorder(system.CompanionDataDir, logger)
+	ringWatch := newRingVideoWatch(logger)
 
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots)
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots, ringWatch)
 	})
 	if err != nil {
 		_ = dialer.Close()
@@ -417,6 +423,9 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// HomeKit wait for the answer. See
 	// docs/superpowers/specs/2026-10-15-ringing-preview-design.md.
 	rtspServer.Coordinator().SetRingingCallProbe(calls.HasRingingInboundCall)
+	// A hangup from any client ends the stream for every consumer, not only for
+	// the one whose user pressed it.
+	calls.SetHangupObserver(rtspServer.Coordinator().EndCall)
 
 	if err := rtspServer.Start(ctx); err != nil {
 		_ = dialer.Close()
@@ -492,6 +501,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	return &applicationRuntime{
 		projector:         projector,
 		ringClips:         ringClips,
+		ringWatch:         ringWatch,
 		trace:             trace,
 		control:           control,
 		rtspServer:        rtspServer,
@@ -624,7 +634,7 @@ func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Even
 	}
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager, ringWatch *ringVideoWatch) (media.ManagedSource, func(), error) {
 	backchannel, err := media.NewUDPBackchannel("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
@@ -634,7 +644,7 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 
 	var bridge *media.AudioBridge
 
-	source, closeSource, err := newSource(cfg, logger, dialer, calls, entrypoint, func(packet *rtp.Packet) {
+	source, closeSource, err := newSource(cfg, logger, dialer, calls, entrypoint, ringWatch, func(packet *rtp.Packet) {
 		if attempt != nil {
 			attempt.Consume(packet)
 		}
@@ -748,7 +758,7 @@ func (s *bridgeSource) WriteBackchannelRTP(packet *rtp.Packet) error {
 	return s.bridge.WriteBackchannelOpus(packet)
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, ringWatch *ringVideoWatch, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -790,7 +800,7 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		sourceConfig,
 		core.EntrypointID(entrypoint.ID),
 		calls,
-		openwebnet.NewAVClient(logger),
+		ringWatch.sourceAV(openwebnet.NewAVClient(logger)),
 		// Video flows from the first packet, before the AV activation reports
 		// the stream started: the intercom opens it with its only keyframe for
 		// about a second, and the snapshot and the ring clip need that one.

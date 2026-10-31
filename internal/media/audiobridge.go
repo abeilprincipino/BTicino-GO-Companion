@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -557,8 +558,10 @@ func (p *gstreamerAudioPipeline) read(conn *net.UDPConn, payloadType uint8, outp
 			return
 		}
 
+		// Unmarshal keeps the payload in the slice it is given, and a queued
+		// packet must survive the next read into buffer.
 		packet := &rtp.Packet{}
-		if packet.Unmarshal(buffer[:n]) == nil && packet.PayloadType == payloadType {
+		if packet.Unmarshal(bytes.Clone(buffer[:n])) == nil && packet.PayloadType == payloadType {
 			select {
 			case output <- packet:
 			case <-p.stop:

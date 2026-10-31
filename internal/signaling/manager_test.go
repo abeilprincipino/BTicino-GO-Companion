@@ -1695,6 +1695,87 @@ func TestManager_HangupCallOnIdleIsANoop(t *testing.T) {
 	}
 }
 
+func TestManager_HangupTellsTheObserverAfterTheBye(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	byesSeen := -1
+	manager.SetHangupObserver(func() { byesSeen = dialog.byes })
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatalf("Hangup() error = %v", err)
+	}
+
+	if byesSeen != 1 {
+		t.Fatalf("observer saw %d BYEs, want it called once, after the BYE", byesSeen)
+	}
+}
+
+func TestManager_HangupTellsTheObserverAfterTheDecline(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	responsesSeen := -1
+	manager.SetHangupObserver(func() { responsesSeen = len(dialog.responses) })
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatalf("Hangup() error = %v", err)
+	}
+
+	if responsesSeen != 2 {
+		t.Fatalf("observer saw %d responses, want it called after the 180 and the 603", responsesSeen)
+	}
+}
+
+// The observer stops the stream for every consumer, so it must run only when
+// Hangup ended a call: a hangup with nothing up, or the media path's own
+// HangupCall, must leave whatever stream is running alone.
+func TestManager_HangupObserverIgnoresHangupsThatEndNothing(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+
+	calls := 0
+	manager.SetHangupObserver(func() { calls++ })
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if calls != 0 {
+		t.Fatalf("observer calls = %d, want 0", calls)
+	}
+}
+
 func TestManager_AdoptRingingCallFollowsTheInboundCall(t *testing.T) {
 	t.Parallel()
 

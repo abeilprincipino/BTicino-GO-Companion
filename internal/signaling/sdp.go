@@ -1,6 +1,8 @@
 package signaling
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -18,6 +20,12 @@ const (
 	// advertised for the far end to accept it as our stream.
 	AudioSDPPort = 65000
 	VideoSDPPort = 65002
+
+	// sdesSuite is the only SRTP suite we offer and answer with: the intercom
+	// offers it first, and the media keepalive encrypts with it.
+	sdesSuite = "AES_CM_128_HMAC_SHA1_80"
+	// sdesKeyLength is its master key and master salt, 16 and 14 bytes.
+	sdesKeyLength = 30
 )
 
 var errNoRemoteAudioTarget = errors.New("sip: remote sdp has no usable audio target")
@@ -148,15 +156,70 @@ func sessionLines(host, sessionID, sessionVersion string) []string {
 	}
 }
 
+// mediaLines declares SRTP with a fresh key per media line. The intercom
+// accepts SRTP and drops what it cannot authenticate: with a placeholder key it
+// counted no RTP from us and hung up 30 s into every call (nortp_timeout).
 func mediaLines() []string {
 	return []string{
 		fmt.Sprintf("m=audio %d RTP/SAVP 110", AudioSDPPort),
 		"a=rtpmap:110 speex/8000",
-		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:dummykey",
+		cryptoLine(),
 		fmt.Sprintf("m=video %d RTP/SAVP 96", VideoSDPPort),
 		"a=rtpmap:96 H264/90000",
 		"a=fmtp:96 profile-level-id=42801F",
-		"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:dummykey",
+		cryptoLine(),
 		"a=recvonly",
 	}
+}
+
+func cryptoLine() string {
+	key := make([]byte, sdesKeyLength)
+	_, _ = rand.Read(key) // never fails since Go 1.24
+
+	return "a=crypto:1 " + sdesSuite + " inline:" + base64.StdEncoding.EncodeToString(key)
+}
+
+// parseAudioCrypto returns the SRTP master key and salt of the first audio
+// section, when it declares our suite with key material of the right length.
+func parseAudioCrypto(sdp string) ([]byte, bool) {
+	inAudio := false
+
+	for _, raw := range strings.Split(sdp, "\n") {
+		line := strings.TrimSpace(raw)
+
+		if strings.HasPrefix(line, "m=") {
+			if inAudio {
+				return nil, false
+			}
+
+			fields := strings.Fields(line[2:])
+			inAudio = len(fields) >= 1 && fields[0] == "audio"
+
+			continue
+		}
+
+		if !inAudio || !strings.HasPrefix(line, "a=crypto:") {
+			continue
+		}
+
+		// a=crypto:<tag> <suite> inline:<key||salt>[|lifetime][|MKI:length]
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != sdesSuite {
+			continue
+		}
+
+		inline, ok := strings.CutPrefix(fields[2], "inline:")
+		if !ok {
+			continue
+		}
+
+		inline, _, _ = strings.Cut(inline, "|")
+
+		key, err := base64.StdEncoding.DecodeString(inline)
+		if err == nil && len(key) == sdesKeyLength {
+			return key, true
+		}
+	}
+
+	return nil, false
 }

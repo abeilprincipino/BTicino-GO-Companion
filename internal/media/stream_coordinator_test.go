@@ -1257,6 +1257,81 @@ func TestStreamCoordinatorStopRingingTellsEveryConsumer(t *testing.T) {
 	}
 }
 
+func TestStreamCoordinatorEndCallStopsTheAnsweredCallForEveryConsumer(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	var told [2]error
+
+	for i := range told {
+		if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+			Failed: func(err error) { told[i] = err },
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ringing = false
+	c.PromoteRinging()
+	waitSignal(t, source.answeredCh, "Answered")
+
+	c.EndCall()
+
+	// The hangup already sent the BYE: the teardown must not try again.
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0", closes, endCalls)
+	}
+
+	for i, err := range told {
+		if !errors.Is(err, ErrCallEnded) {
+			t.Fatalf("consumer %d told %v, want ErrCallEnded", i, err)
+		}
+	}
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", owner)
+	}
+}
+
+func TestStreamCoordinatorEndCallEndsARingingPreviewAsTheRingEnds(t *testing.T) {
+	ringing := true
+	source := newRingingPreviewSource()
+	c := ringingCoordinator(source, &ringing)
+
+	var failed error
+
+	if _, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{
+		Failed: func(err error) { failed = err },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.EndCall()
+
+	if !errors.Is(failed, ErrRingingEnded) {
+		t.Fatalf("consumer told %v, want ErrRingingEnded", failed)
+	}
+
+	// The StopRinging that follows the CallHungUp event finds nothing to do.
+	c.StopRinging()
+
+	if _, _, closes, endCalls := source.counts(); closes != 1 || endCalls != 0 {
+		t.Fatalf("closes=%d endCalls=%d, want 1 and 0", closes, endCalls)
+	}
+}
+
+func TestStreamCoordinatorEndCallWithoutAStreamIsANoop(t *testing.T) {
+	ringing := false
+	c := ringingCoordinator(newRingingPreviewSource(), &ringing)
+
+	c.EndCall()
+
+	if owner := c.Snapshot().Owner; owner != StreamOwnerIdle {
+		t.Fatalf("owner = %q, want idle", owner)
+	}
+}
+
 func TestStreamCoordinatorRemoteBYEReachesEveryConsumer(t *testing.T) {
 	shared := &sharedFactory{build: func() ManagedSource { return &fakeManagedSource{} }}
 	c := NewStreamCoordinator(nil, shared.factory())

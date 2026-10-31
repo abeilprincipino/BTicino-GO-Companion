@@ -50,8 +50,14 @@ var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 // the first keyframe on, as Annex-B access units on stdin, then takes the first
 // JPEG from stdout: no frame before the keyframe is decoded, nothing is lost to
 // a decoder not yet listening, and the picture is read the moment it is
-// written. The decoder keeps getting frames after the keyframe, so one that
-// holds a picture back until more input arrives still gives it.
+// written. The GStreamer decoder gets the keyframe alone and then the end of
+// its input, which makes it drain the picture at once instead of holding it
+// until more frames arrive.
+//
+// A published picture is served from memory and written to disk in the
+// background: the intercom mounts its data partition sync with data=journal,
+// and the two writes of a ring picture would hold back the announcement by
+// ~40 ms. The files only bring the pictures back after a restart.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -60,6 +66,18 @@ type SnapshotManager struct {
 	active     *snapshotAttempt
 	nextID     uint64
 	onCaptured func()
+	// pictures holds the pictures published since the start, by file path.
+	pictures map[string]snapshotPicture
+	// writeMu runs the file writes one at a time, each with the newest picture
+	// of its path, so a file always ends with the newest one.
+	writeMu sync.Mutex
+	// writes tracks the writes still running, for the tests to wait them out.
+	writes sync.WaitGroup
+}
+
+type snapshotPicture struct {
+	image   []byte
+	takenAt time.Time
 }
 
 type snapshotRunner interface {
@@ -90,6 +108,9 @@ type snapshotAttempt struct {
 	// ring marks a capture from a stream born as a ringing preview: its picture
 	// is also the doorbell picture.
 	ring atomic.Bool
+	// done is set when the capture ends. The source keeps calling Consume for
+	// the whole stream, and nothing reads the packets any more.
+	done atomic.Bool
 }
 
 // NewSnapshotManager stores the latest valid JPEG for each entrypoint below dir.
@@ -106,7 +127,7 @@ func newSnapshotManager(dir string, logger *slog.Logger, runner snapshotRunner) 
 		logger = slog.Default()
 	}
 
-	return &SnapshotManager{dir: dir, logger: logger, runner: runner}
+	return &SnapshotManager{dir: dir, logger: logger, runner: runner, pictures: make(map[string]snapshotPicture)}
 }
 
 // SetOnCaptured registers a notification emitted after a JPEG is atomically published.
@@ -158,14 +179,36 @@ func (s *SnapshotManager) LatestRing(entrypointID string) ([]byte, error) {
 }
 
 // UpdatedAt returns when the latest and the latest doorbell snapshot were
-// taken, zero when there is none. It reads the files' modification times, so it
-// survives a restart.
+// taken, zero when there is none. Before the first capture since the start it
+// reads the files' modification times, which are the capture times.
 func (s *SnapshotManager) UpdatedAt(entrypointID string) (latest, ring time.Time) {
 	if s == nil || s.dir == "" {
 		return time.Time{}, time.Time{}
 	}
 
-	return modTime(s.path(entrypointID)), modTime(s.ringPath(entrypointID))
+	return s.takenAt(s.path(entrypointID)), s.takenAt(s.ringPath(entrypointID))
+}
+
+func (s *SnapshotManager) takenAt(path string, ok bool) time.Time {
+	if picture, published := s.published(path, ok); published {
+		return picture.takenAt
+	}
+
+	return modTime(path, ok)
+}
+
+// published returns the picture published at path since the start.
+func (s *SnapshotManager) published(path string, ok bool) (snapshotPicture, bool) {
+	if !ok {
+		return snapshotPicture{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	picture, published := s.pictures[path]
+
+	return picture, published
 }
 
 func (s *SnapshotManager) read(entrypointID string, locate func(string) (string, bool)) ([]byte, error) {
@@ -176,6 +219,10 @@ func (s *SnapshotManager) read(entrypointID string, locate func(string) (string,
 	path, ok := locate(entrypointID)
 	if !ok {
 		return nil, ErrSnapshotUnavailable
+	}
+
+	if picture, published := s.published(path, ok); published {
+		return picture.image, nil
 	}
 
 	image, err := os.ReadFile(path)
@@ -209,7 +256,7 @@ func modTime(path string, ok bool) time.Time {
 
 // Consume queues a best-effort RTP copy without blocking source delivery.
 func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
-	if a == nil || packet == nil {
+	if a == nil || packet == nil || a.done.Load() {
 		return
 	}
 
@@ -409,6 +456,17 @@ func (u *snapshotAccessUnits) restart() {
 }
 
 func (a *snapshotAttempt) finish() {
+	a.done.Store(true)
+
+	// Release the copies still queued: the attempt lives as long as the stream.
+	for draining := true; draining; {
+		select {
+		case <-a.packets:
+		default:
+			draining = false
+		}
+	}
+
 	a.manager.mu.Lock()
 	if a.manager.active == a {
 		a.manager.active = nil
@@ -431,25 +489,24 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 		return false
 	}
 
-	if err := writeSnapshot(path, image); err != nil {
-		s.mu.Unlock()
-		s.logger.Warn("publish snapshot", "error", err)
-
-		return false
-	}
+	// Round strips the monotonic reading: the time is compared with the files'.
+	picture := snapshotPicture{image: image, takenAt: time.Now().Round(0)}
+	s.pictures[path] = picture
+	paths := []string{path}
 
 	// The doorbell picture has its own file, written only by a stream born as a
 	// ringing preview, so a live view never looks like a new ring.
 	if attempt.ring.Load() {
 		if ringPath, ok := s.ringPath(attempt.entrypointID); ok {
-			if err := writeSnapshot(ringPath, image); err != nil {
-				s.logger.Warn("publish ring snapshot", "error", err)
-			}
+			s.pictures[ringPath] = picture
+			paths = append(paths, ringPath)
 		}
 	}
 
 	callback := s.onCaptured
 	s.mu.Unlock()
+
+	s.writes.Go(func() { s.persist(paths) })
 
 	if callback != nil {
 		callback()
@@ -458,17 +515,26 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	return true
 }
 
-// writeSnapshot publishes image at path atomically: a reader sees the old file
-// or the new one, never a partial JPEG.
-func writeSnapshot(path string, image []byte) error {
-	return writeFileAtomic(path, ".snapshot-*.jpg", image)
+// persist writes the newest picture of each path to its file, dated with the
+// time it was taken.
+func (s *SnapshotManager) persist(paths []string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for _, path := range paths {
+		picture, _ := s.published(path, true)
+
+		if err := writeSnapshot(path, picture); err != nil {
+			s.logger.Warn("write snapshot", "file", filepath.Base(path), "error", err)
+		}
+	}
 }
 
-// writeFileAtomic writes data to a temporary file named after pattern next to
-// path and renames it over path.
-func writeFileAtomic(path, pattern string, data []byte) error {
-	return writeFileAtomicFunc(path, pattern, time.Time{}, func(w io.Writer) error {
-		_, err := w.Write(data)
+// writeSnapshot writes picture at path atomically: a reader sees the old file
+// or the new one, never a partial JPEG.
+func writeSnapshot(path string, picture snapshotPicture) error {
+	return writeFileAtomicFunc(path, ".snapshot-*.jpg", picture.takenAt, func(w io.Writer) error {
+		_, err := w.Write(picture.image)
 		return err
 	})
 }
@@ -563,8 +629,15 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 		// No caps filter after fdsrc: GStreamer 1.12 on the intercom refuses
 		// partial caps there ("Filter caps do not completely specify the
 		// output format"), and h264parse detects the byte-stream itself.
+		//
+		// The JPEG is encoded on the CPU, not with imxvpuenc_mjpeg: idle, the
+		// VPU encoder is ~20 ms quicker, but during a ring the intercom opens
+		// its own decoders at the same instant, and four rings took ~140 ms
+		// against ~115 with jpegenc. Quality 80 keeps a 640x480 picture at
+		// ~40 KB instead of ~58 at 90. The VPU library prints its logs on
+		// stdout after the picture; readFirstJPEG skips them.
 		"fdsrc", "fd=0", "!", "h264parse", "!", "imxvpudec", "!",
-		"jpegenc", "quality=90", "!", "fdsink", "fd=1",
+		"jpegenc", "quality=80", "!", "fdsink", "fd=1",
 	)
 
 	stdin, err := command.StdinPipe()
@@ -611,13 +684,28 @@ type gstreamerSnapshotProcess struct {
 	stdin   io.WriteCloser
 	picture chan []byte
 	once    sync.Once
+	// ended is set once the keyframe is written and stdin closed.
+	ended bool
 	// err is set before picture is closed.
 	err error
 }
 
+var errSnapshotInputEnded = errors.New("snapshot decoder input already ended")
+
+// Write feeds the decoder the keyframe and closes its input: the end of stream
+// makes imxvpudec drain the picture now rather than after more frames. Writes
+// after the first fail, and the capture ignores them. A decoder that exits
+// without a picture is replaced on the next keyframe.
 func (p *gstreamerSnapshotProcess) Write(accessUnit []byte) error {
+	if p.ended {
+		return errSnapshotInputEnded
+	}
+
+	p.ended = true
+
 	_, err := p.stdin.Write(accessUnit)
-	return err
+
+	return errors.Join(err, p.stdin.Close())
 }
 
 func (p *gstreamerSnapshotProcess) Picture() <-chan []byte { return p.picture }
