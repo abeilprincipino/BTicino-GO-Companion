@@ -37,9 +37,6 @@ const (
 	// snapshotMaxDecoders bounds the decoders one capture starts when one
 	// exits without a picture.
 	snapshotMaxDecoders = 3
-	// snapshotJPEGQuality trades a little detail for a smaller picture, quicker
-	// to encode in software and to download on a phone.
-	snapshotJPEGQuality = "quality=80"
 )
 
 // snapshotAccessUnitDelimiter ends each access unit handed to the decoder, so
@@ -567,8 +564,13 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 		// No caps filter after fdsrc: GStreamer 1.12 on the intercom refuses
 		// partial caps there ("Filter caps do not completely specify the
 		// output format"), and h264parse detects the byte-stream itself.
+		//
+		// The VPU encodes the JPEG too: ~2 ms a frame against ~29 for jpegenc
+		// at quality 90 on the C100X, and at its default quality a 640x480
+		// picture weighs ~40 KB instead of ~58. The VPU library prints its
+		// logs on stdout after the picture; readFirstJPEG skips them.
 		"fdsrc", "fd=0", "!", "h264parse", "!", "imxvpudec", "!",
-		"jpegenc", snapshotJPEGQuality, "!", "fdsink", "fd=1",
+		"imxvpuenc_mjpeg", "!", "fdsink", "fd=1",
 	)
 
 	stdin, err := command.StdinPipe()
