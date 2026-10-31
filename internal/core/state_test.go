@@ -335,6 +335,27 @@ func TestProjector_HangupAfterAnswerGoesIdleNotRinging(t *testing.T) {
 	}
 }
 
+func TestProjector_HangingUpARingingCallGoesIdle(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, RingStarted{EntrypointID: testEntrypoint})
+	applyEvent(t, projector, IncomingCallStarted{DialogID: testDialogID, EntrypointID: testEntrypoint})
+
+	// The bus stop frame is still pending when the user refuses the call.
+	applyEvent(t, projector, CallHungUp{DialogID: testDialogID})
+
+	if state := projector.Snapshot().CallState; state != CallStateIdle {
+		t.Fatalf("call state = %q, want %q", state, CallStateIdle)
+	}
+
+	applyEvent(t, projector, RingCleared{EntrypointID: testEntrypoint})
+
+	if state := projector.Snapshot().CallState; state != CallStateIdle {
+		t.Fatalf("call state after the stop frame = %q, want %q", state, CallStateIdle)
+	}
+}
+
 func TestProjector_AnswerKeepsAnotherEntrypointsRing(t *testing.T) {
 	t.Parallel()
 
