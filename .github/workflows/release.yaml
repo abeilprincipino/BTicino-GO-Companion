@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create on the selected branch (beta from develop: v0.12.0-beta.1, release from main: v0.12.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,10 +22,29 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Check the tag's branch
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Resolve the tag
+        id: meta
         env:
-          TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$(printf '%s' "$INPUT_TAG" | tr -d '[:space:]')"
+            if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+              echo "::error::Tag '$TAG' must look like v0.12.0 or v0.12.0-beta.1."
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              echo "::error::Tag $TAG already exists. Choose the next number."
+              exit 1
+            fi
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Check the tag's branch
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -eu
           git fetch --no-tags origin main develop
@@ -48,7 +72,7 @@ jobs:
         run: go test ./...
       - name: Build static ARMv7 binary
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ steps.meta.outputs.tag }}
           RELEASE_REPO: ${{ github.repository }}
         run: |
           set -eu
@@ -66,17 +90,29 @@ jobs:
           cp -a gst dist/bundle/companion/gst
           chmod 755 dist/bundle/companion/companion dist/bundle/companion/init.d/companion
           tar -C dist/bundle -czf dist/companion.tar.gz companion
+      - name: Create the tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -eu
+          # Pushed only after the tests and the build pass, so a failed run leaves no tag behind.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG" -m "Created by $ACTOR from $GITHUB_REF_NAME." "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
           files: |
             dist/companion.tar.gz
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
           body: |
             ## Install
 
             ```sh
-            curl -fsSL -o /tmp/install.sh "https://github.com/${{ github.repository }}/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=${{ github.ref_name }} sh /tmp/install.sh
+            curl -fsSL -o /tmp/install.sh "https://github.com/${{ github.repository }}/raw/main/scripts/install.sh" && COMPANION_RELEASE_TAG=${{ steps.meta.outputs.tag }} sh /tmp/install.sh
             ```
           generate_release_notes: true

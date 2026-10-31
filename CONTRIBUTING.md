@@ -23,12 +23,19 @@ Feature branches are created from `develop`, for example `feat/auxiliary-unlock`
 
 ## Releases
 
-Releases are published by the **Release** workflow when a `v*` tag is pushed. It runs the tests,
-builds the ARMv7 bundle and publishes `companion.tar.gz` on GitHub Releases.
+Releases are published by the **Release** workflow. It runs the tests, builds the ARMv7 bundle and
+publishes `companion.tar.gz` on GitHub Releases. There are two ways to start it:
+
+- **From GitHub:** open **Actions > Release > Run workflow**, pick the branch in **Use workflow from**
+  and type the new tag. The workflow creates the tag on the head of that branch, but only after the
+  tests and the build pass, so a failed run leaves no tag behind. A tag that already exists is
+  refused.
+- **From a clone:** push the tag yourself, as shown below.
 
 ### Beta
 
-A beta is a tag with a pre-release suffix on a commit of `develop`:
+A beta is a tag with a pre-release suffix on a commit of `develop`. From GitHub, run the workflow
+from `develop` with a tag such as `v0.12.0-beta.1`. From a clone:
 
 ```sh
 git checkout develop && git pull
@@ -46,7 +53,8 @@ Once a beta has been validated on real hardware:
 
 1. Open a pull request from `develop` to `main` and merge it with **Create a merge commit**, so the
    two branches keep a shared history.
-2. Tag the merge commit on `main` without a suffix:
+2. Tag the merge commit on `main` without a suffix: run the workflow from `main` with a tag such
+   as `v0.12.0`, or from a clone:
 
    ```sh
    git checkout main && git pull
