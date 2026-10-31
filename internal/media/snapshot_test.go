@@ -324,3 +324,33 @@ func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 		t.Fatalf("ringPath() = %q, %v, want a file under snapshots/ring", path, ok)
 	}
 }
+
+// The GStreamer decoder gets the keyframe and then the end of its input, which
+// makes it drain the picture without waiting for more frames.
+func TestGStreamerSnapshotProcessEndsItsInputAfterTheKeyframe(t *testing.T) {
+	reader, writer := io.Pipe()
+	process := &gstreamerSnapshotProcess{stdin: writer}
+
+	received := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(reader)
+		received <- data
+	}()
+
+	if err := process.Write([]byte{1, 2, 3}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	select {
+	case data := <-received:
+		if !bytes.Equal(data, []byte{1, 2, 3}) {
+			t.Fatalf("decoder input = %v, want the keyframe alone", data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the decoder input did not end after the keyframe")
+	}
+
+	if err := process.Write([]byte{4}); !errors.Is(err, errSnapshotInputEnded) {
+		t.Fatalf("second Write() error = %v, want %v", err, errSnapshotInputEnded)
+	}
+}

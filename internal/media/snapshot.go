@@ -37,6 +37,9 @@ const (
 	// snapshotMaxDecoders bounds the decoders one capture starts when one
 	// exits without a picture.
 	snapshotMaxDecoders = 3
+	// snapshotJPEGQuality trades a little detail for a smaller picture, quicker
+	// to encode in software and to download on a phone.
+	snapshotJPEGQuality = "quality=80"
 )
 
 // snapshotAccessUnitDelimiter ends each access unit handed to the decoder, so
@@ -50,8 +53,9 @@ var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 // the first keyframe on, as Annex-B access units on stdin, then takes the first
 // JPEG from stdout: no frame before the keyframe is decoded, nothing is lost to
 // a decoder not yet listening, and the picture is read the moment it is
-// written. The decoder keeps getting frames after the keyframe, so one that
-// holds a picture back until more input arrives still gives it.
+// written. The GStreamer decoder gets the keyframe alone and then the end of
+// its input, which makes it drain the picture at once instead of holding it
+// until more frames arrive.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -564,7 +568,7 @@ func (gstreamerSnapshotRunner) Start(ctx context.Context) (snapshotProcess, erro
 		// partial caps there ("Filter caps do not completely specify the
 		// output format"), and h264parse detects the byte-stream itself.
 		"fdsrc", "fd=0", "!", "h264parse", "!", "imxvpudec", "!",
-		"jpegenc", "quality=90", "!", "fdsink", "fd=1",
+		"jpegenc", snapshotJPEGQuality, "!", "fdsink", "fd=1",
 	)
 
 	stdin, err := command.StdinPipe()
@@ -611,13 +615,28 @@ type gstreamerSnapshotProcess struct {
 	stdin   io.WriteCloser
 	picture chan []byte
 	once    sync.Once
+	// ended is set once the keyframe is written and stdin closed.
+	ended bool
 	// err is set before picture is closed.
 	err error
 }
 
+var errSnapshotInputEnded = errors.New("snapshot decoder input already ended")
+
+// Write feeds the decoder the keyframe and closes its input: the end of stream
+// makes imxvpudec drain the picture now rather than after more frames. Writes
+// after the first fail, and the capture ignores them. A decoder that exits
+// without a picture is replaced on the next keyframe.
 func (p *gstreamerSnapshotProcess) Write(accessUnit []byte) error {
+	if p.ended {
+		return errSnapshotInputEnded
+	}
+
+	p.ended = true
+
 	_, err := p.stdin.Write(accessUnit)
-	return err
+
+	return errors.Join(err, p.stdin.Close())
 }
 
 func (p *gstreamerSnapshotProcess) Picture() <-chan []byte { return p.picture }
