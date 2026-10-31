@@ -71,6 +71,8 @@ type SnapshotManager struct {
 	// writeMu runs the file writes one at a time, each with the newest picture
 	// of its path, so a file always ends with the newest one.
 	writeMu sync.Mutex
+	// writes tracks the writes still running, for the tests to wait them out.
+	writes sync.WaitGroup
 }
 
 type snapshotPicture struct {
@@ -504,7 +506,7 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	callback := s.onCaptured
 	s.mu.Unlock()
 
-	go s.persist(paths)
+	s.writes.Go(func() { s.persist(paths) })
 
 	if callback != nil {
 		callback()
