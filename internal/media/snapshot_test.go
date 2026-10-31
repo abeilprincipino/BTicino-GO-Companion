@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -322,6 +323,74 @@ func TestSnapshotManagerWritesTheRingFileOnlyForARingCapture(t *testing.T) {
 
 	if path, ok := manager.ringPath("front-door"); !ok || filepath.Base(filepath.Dir(path)) != "ring" {
 		t.Fatalf("ringPath() = %q, %v, want a file under snapshots/ring", path, ok)
+	}
+}
+
+// The picture is announced and served from memory without waiting for the
+// disk, which on the intercom is mounted sync: a failing write takes nothing
+// away from it.
+func TestSnapshotManagerServesThePictureWithoutTheDisk(t *testing.T) {
+	image := []byte{0xff, 0xd8, 3, 0xff, 0xd9}
+	notADirectory := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADirectory, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newSnapshotManager(notADirectory, nil, &fakeSnapshotRunner{output: image})
+	captured := make(chan struct{}, 1)
+
+	manager.SetOnCaptured(func() { captured <- struct{}{} })
+
+	attempt := manager.Arm("front-door")
+	attempt.MarkRing()
+	feedSnapshotKeyframe(attempt, 0, 0)
+
+	select {
+	case <-captured:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot capture callback was not invoked")
+	}
+
+	if got, err := manager.LatestRing("front-door"); err != nil || !bytes.Equal(got, image) {
+		t.Fatalf("LatestRing() = %v, %v, want %v", got, err, image)
+	}
+
+	if latest, ring := manager.UpdatedAt("front-door"); latest.IsZero() || !ring.Equal(latest) {
+		t.Fatalf("UpdatedAt() = %v, %v, want the same capture time", latest, ring)
+	}
+}
+
+// The files carry the capture time, so after a restart Home Assistant reads
+// the same ring_snapshot_updated_at and sees no new ring.
+func TestSnapshotManagerDatesTheFilesWithTheCaptureTime(t *testing.T) {
+	image := []byte{0xff, 0xd8, 4, 0xff, 0xd9}
+	dir := t.TempDir()
+	manager := newSnapshotManager(dir, nil, &fakeSnapshotRunner{output: image})
+
+	attempt := manager.Arm("front-door")
+	attempt.MarkRing()
+	feedSnapshotKeyframe(attempt, 0, 0)
+	waitForRingSnapshot(t, manager, "front-door")
+
+	latest, ring := manager.UpdatedAt("front-door")
+	restarted := newSnapshotManager(dir, nil, &fakeSnapshotRunner{})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		restartedLatest, restartedRing := restarted.UpdatedAt("front-door")
+		if restartedLatest.Equal(latest) && restartedRing.Equal(ring) {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("UpdatedAt() after a restart = %v, %v, want %v, %v", restartedLatest, restartedRing, latest, ring)
+		}
+
+		time.Sleep(snapshotTestPoll)
+	}
+
+	if got, err := restarted.LatestRing("front-door"); err != nil || !bytes.Equal(got, image) {
+		t.Fatalf("LatestRing() after a restart = %v, %v, want %v", got, err, image)
 	}
 }
 

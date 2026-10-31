@@ -53,6 +53,11 @@ var snapshotAccessUnitDelimiter = []byte{0x09, 0xf0}
 // written. The GStreamer decoder gets the keyframe alone and then the end of
 // its input, which makes it drain the picture at once instead of holding it
 // until more frames arrive.
+//
+// A published picture is served from memory and written to disk in the
+// background: the intercom mounts its data partition sync with data=journal,
+// and the two writes of a ring picture would hold back the announcement by
+// ~40 ms. The files only bring the pictures back after a restart.
 type SnapshotManager struct {
 	mu         sync.Mutex
 	logger     *slog.Logger
@@ -61,6 +66,16 @@ type SnapshotManager struct {
 	active     *snapshotAttempt
 	nextID     uint64
 	onCaptured func()
+	// pictures holds the pictures published since the start, by file path.
+	pictures map[string]snapshotPicture
+	// writeMu runs the file writes one at a time, each with the newest picture
+	// of its path, so a file always ends with the newest one.
+	writeMu sync.Mutex
+}
+
+type snapshotPicture struct {
+	image   []byte
+	takenAt time.Time
 }
 
 type snapshotRunner interface {
@@ -110,7 +125,7 @@ func newSnapshotManager(dir string, logger *slog.Logger, runner snapshotRunner) 
 		logger = slog.Default()
 	}
 
-	return &SnapshotManager{dir: dir, logger: logger, runner: runner}
+	return &SnapshotManager{dir: dir, logger: logger, runner: runner, pictures: make(map[string]snapshotPicture)}
 }
 
 // SetOnCaptured registers a notification emitted after a JPEG is atomically published.
@@ -162,14 +177,36 @@ func (s *SnapshotManager) LatestRing(entrypointID string) ([]byte, error) {
 }
 
 // UpdatedAt returns when the latest and the latest doorbell snapshot were
-// taken, zero when there is none. It reads the files' modification times, so it
-// survives a restart.
+// taken, zero when there is none. Before the first capture since the start it
+// reads the files' modification times, which are the capture times.
 func (s *SnapshotManager) UpdatedAt(entrypointID string) (latest, ring time.Time) {
 	if s == nil || s.dir == "" {
 		return time.Time{}, time.Time{}
 	}
 
-	return modTime(s.path(entrypointID)), modTime(s.ringPath(entrypointID))
+	return s.takenAt(s.path(entrypointID)), s.takenAt(s.ringPath(entrypointID))
+}
+
+func (s *SnapshotManager) takenAt(path string, ok bool) time.Time {
+	if picture, published := s.published(path, ok); published {
+		return picture.takenAt
+	}
+
+	return modTime(path, ok)
+}
+
+// published returns the picture published at path since the start.
+func (s *SnapshotManager) published(path string, ok bool) (snapshotPicture, bool) {
+	if !ok {
+		return snapshotPicture{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	picture, published := s.pictures[path]
+
+	return picture, published
 }
 
 func (s *SnapshotManager) read(entrypointID string, locate func(string) (string, bool)) ([]byte, error) {
@@ -180,6 +217,10 @@ func (s *SnapshotManager) read(entrypointID string, locate func(string) (string,
 	path, ok := locate(entrypointID)
 	if !ok {
 		return nil, ErrSnapshotUnavailable
+	}
+
+	if picture, published := s.published(path, ok); published {
+		return picture.image, nil
 	}
 
 	image, err := os.ReadFile(path)
@@ -446,25 +487,24 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 		return false
 	}
 
-	if err := writeSnapshot(path, image); err != nil {
-		s.mu.Unlock()
-		s.logger.Warn("publish snapshot", "error", err)
-
-		return false
-	}
+	// Round strips the monotonic reading: the time is compared with the files'.
+	picture := snapshotPicture{image: image, takenAt: time.Now().Round(0)}
+	s.pictures[path] = picture
+	paths := []string{path}
 
 	// The doorbell picture has its own file, written only by a stream born as a
 	// ringing preview, so a live view never looks like a new ring.
 	if attempt.ring.Load() {
 		if ringPath, ok := s.ringPath(attempt.entrypointID); ok {
-			if err := writeSnapshot(ringPath, image); err != nil {
-				s.logger.Warn("publish ring snapshot", "error", err)
-			}
+			s.pictures[ringPath] = picture
+			paths = append(paths, ringPath)
 		}
 	}
 
 	callback := s.onCaptured
 	s.mu.Unlock()
+
+	go s.persist(paths)
 
 	if callback != nil {
 		callback()
@@ -473,17 +513,26 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	return true
 }
 
-// writeSnapshot publishes image at path atomically: a reader sees the old file
-// or the new one, never a partial JPEG.
-func writeSnapshot(path string, image []byte) error {
-	return writeFileAtomic(path, ".snapshot-*.jpg", image)
+// persist writes the newest picture of each path to its file, dated with the
+// time it was taken.
+func (s *SnapshotManager) persist(paths []string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	for _, path := range paths {
+		picture, _ := s.published(path, true)
+
+		if err := writeSnapshot(path, picture); err != nil {
+			s.logger.Warn("write snapshot", "file", filepath.Base(path), "error", err)
+		}
+	}
 }
 
-// writeFileAtomic writes data to a temporary file named after pattern next to
-// path and renames it over path.
-func writeFileAtomic(path, pattern string, data []byte) error {
-	return writeFileAtomicFunc(path, pattern, time.Time{}, func(w io.Writer) error {
-		_, err := w.Write(data)
+// writeSnapshot writes picture at path atomically: a reader sees the old file
+// or the new one, never a partial JPEG.
+func writeSnapshot(path string, picture snapshotPicture) error {
+	return writeFileAtomicFunc(path, ".snapshot-*.jpg", picture.takenAt, func(w io.Writer) error {
+		_, err := w.Write(picture.image)
 		return err
 	})
 }
