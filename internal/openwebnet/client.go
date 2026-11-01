@@ -118,6 +118,16 @@ func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
 	})
 }
 
+// EndCall sends the bus call end for the address a ring frame called; see
+// BuildCallEnd.
+func (c *Control) EndCall(ctx context.Context, where string) error {
+	if strings.TrimSpace(where) == "" {
+		return errors.New("call end: no called address")
+	}
+
+	return c.command(ctx, BuildCallEnd(where), FrameACK)
+}
+
 func (c *Control) Stream(context.Context, core.EntrypointID) error {
 	return errors.New("stream control is unavailable")
 }

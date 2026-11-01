@@ -1701,8 +1701,8 @@ func TestManager_HangupTellsTheObserverAfterTheBye(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
-	byesSeen := -1
-	manager.SetHangupObserver(func() { byesSeen = dialog.byes })
+	byesSeen, declined := -1, true
+	manager.SetHangupObserver(func(d bool) { byesSeen, declined = dialog.byes, d })
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
@@ -1716,8 +1716,8 @@ func TestManager_HangupTellsTheObserverAfterTheBye(t *testing.T) {
 		t.Fatalf("Hangup() error = %v", err)
 	}
 
-	if byesSeen != 1 {
-		t.Fatalf("observer saw %d BYEs, want it called once, after the BYE", byesSeen)
+	if byesSeen != 1 || declined {
+		t.Fatalf("observer saw %d BYEs, declined=%t, want it called once after the BYE, not declined", byesSeen, declined)
 	}
 }
 
@@ -1727,8 +1727,8 @@ func TestManager_HangupTellsTheObserverAfterTheDecline(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
-	responsesSeen := -1
-	manager.SetHangupObserver(func() { responsesSeen = len(dialog.responses) })
+	responsesSeen, declined := -1, false
+	manager.SetHangupObserver(func(d bool) { responsesSeen, declined = len(dialog.responses), d })
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
@@ -1738,8 +1738,8 @@ func TestManager_HangupTellsTheObserverAfterTheDecline(t *testing.T) {
 		t.Fatalf("Hangup() error = %v", err)
 	}
 
-	if responsesSeen != 2 {
-		t.Fatalf("observer saw %d responses, want it called after the 180 and the 603", responsesSeen)
+	if responsesSeen != 2 || !declined {
+		t.Fatalf("observer saw %d responses, declined=%t, want it called after the 180 and the 603, declined", responsesSeen, declined)
 	}
 }
 
@@ -1753,7 +1753,7 @@ func TestManager_HangupObserverIgnoresHangupsThatEndNothing(t *testing.T) {
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
 	calls := 0
-	manager.SetHangupObserver(func() { calls++ })
+	manager.SetHangupObserver(func(bool) { calls++ })
 
 	if err := manager.Hangup(context.Background()); err != nil {
 		t.Fatal(err)

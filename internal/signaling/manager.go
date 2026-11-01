@@ -89,7 +89,7 @@ type Manager struct {
 	activeEntrypoint core.EntrypointID
 
 	// hungUp runs after Hangup has ended a call; see SetHangupObserver.
-	hungUp func()
+	hungUp func(declined bool)
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -116,7 +116,8 @@ func (m *Manager) SetEvents(events EventSink) {
 
 // SetHangupObserver installs fn, which Hangup runs after it has ended a call —
 // the BYE or the 603 sent, error or not — and never when there was nothing to
-// end. HangupCall, the media path's hangup, never runs it.
+// end. HangupCall, the media path's hangup, never runs it. declined says the
+// call was still ringing and got the 603.
 //
 // The application stops the media stream from it, for every consumer: the
 // consumer whose user hung up closes its own session, but the others would keep
@@ -125,7 +126,7 @@ func (m *Manager) SetEvents(events EventSink) {
 // goroutine, and the media teardown publishes CallHungUp too: a late one would
 // stop whatever stream started after it. See
 // docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-func (m *Manager) SetHangupObserver(fn func()) {
+func (m *Manager) SetHangupObserver(fn func(declined bool)) {
 	m.mu.Lock()
 	m.hungUp = fn
 	m.mu.Unlock()
@@ -311,7 +312,7 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	if m.active != nil {
 		err := m.byeActiveLocked(ctx)
 		if hungUp != nil {
-			hungUp()
+			hungUp(false)
 		}
 
 		return err
@@ -328,7 +329,7 @@ func (m *Manager) Hangup(ctx context.Context) error {
 
 	err := dialog.Respond(ctx, 603, "Decline", "")
 	if hungUp != nil {
-		hungUp()
+		hungUp(true)
 	}
 
 	if err != nil {
