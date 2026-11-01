@@ -193,7 +193,7 @@ func TestControlEndCallSendsTheCallEndFrame(t *testing.T) {
 		t.Fatalf("EndCall() error = %v", err)
 	}
 
-	if frame := <-command; frame != "*8*3#1#4*11##" {
+	if frame := <-command; frame != "*8*3#1#4*411##" {
 		t.Fatalf("command = %q, want the call end frame", frame)
 	}
 

@@ -98,10 +98,12 @@ func ParseRingCalledAddress(frame string) (string, bool) {
 }
 
 // BuildCallEnd closes the door-entry call on the bus, which a SIP 603 does not
-// do: the indoor unit keeps ringing until the intercom's own timeout. The frame
-// is the call end ha-bticino-c300x recognises; sending it is a beta experiment.
+// do: the indoor unit keeps ringing until the intercom's own timeout. where is
+// the ring's called address, and the frame carries it behind a 4: the indoor
+// unit's decline button sends *8*3#1#4*411## for the ring *8*1#1#4#21*11##.
+// Sending it from the companion is a beta experiment.
 func BuildCallEnd(where string) string {
-	return fmt.Sprintf("*8*3#1#4*%s##", strings.TrimSpace(where))
+	return fmt.Sprintf("*8*3#1#4*4%s##", strings.TrimSpace(where))
 }
 
 func IsViewRequest(frame string) bool {

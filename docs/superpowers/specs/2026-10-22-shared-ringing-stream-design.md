@@ -230,9 +230,11 @@ from `active` to `idle`.
   `CallHungUp` as well, so an event-driven stop could hit a newer stream.
 - **Decline on the bus** (beta experiment, 2026-10-31): the 603 ends only the companion's SIP
   fork; on the device the indoor unit kept ringing until the intercom's own ~27 s timeout. When
-  the observer reports a decline, the companion also sends `*8*3#1#4*<where>##` (the call end
-  ha-bticino-c300x recognises), `<where>` being the called address of the last ring frame
-  `*8*1#1#4#<a>*<where>##`. Every `*8*` frame is now logged at debug to confirm or correct it.
+  the observer reports a decline, the companion also sends `*8*3#1#4*4<where>##`, `<where>` being
+  the called address of the last ring frame `*8*1#1#4#<a>*<where>##`. That is the frame the indoor
+  unit's own decline button sends (captured 2026-11-01: ring `*8*1#1#4#21*11##`, decline
+  `*8*3#1#4*411##` from qtdevices; another install hung up an answered call with
+  `*8*3#1#4*416##` after answering with `*8*2#1#4*16##`). Every `*8*` frame is logged at debug.
 
 ## 6. Error handling
 
