@@ -228,13 +228,18 @@ from `active` to `idle`.
   the other consumers kept a stream whose call was gone. The observer is called directly, not from
   `CallHungUp`: events arrive later, on the drain goroutine, and the media teardown publishes
   `CallHungUp` as well, so an event-driven stop could hit a newer stream.
-- **Decline on the bus** (beta experiment, 2026-10-31): the 603 ends only the companion's SIP
-  fork; on the device the indoor unit kept ringing until the intercom's own ~27 s timeout. When
-  the observer reports a decline, the companion also sends `*8*3#1#4*4<where>##`, `<where>` being
-  the called address of the last ring frame `*8*1#1#4#<a>*<where>##`. That is the frame the indoor
-  unit's own decline button sends (captured 2026-11-01: ring `*8*1#1#4#21*11##`, decline
-  `*8*3#1#4*411##` from qtdevices; another install hung up an answered call with
-  `*8*3#1#4*416##` after answering with `*8*2#1#4*16##`). Every `*8*` frame is logged at debug.
+- **Call end on the bus** (beta experiment, 2026-10-31, widened 2026-11-01): a BYE or a 603 ends
+  only the companion's SIP leg. On the device the indoor unit kept a declined ring ringing until
+  the intercom's own ~27 s timeout, and a view the card closed stayed up on the bus for 37 s after
+  the BYE, until the view timeout. `Manager.SetCallEndObserver` runs whenever the companion ends a
+  call itself — Hangup's 603 or BYE, or the media path's BYE — and the companion then sends
+  `*8*3#<type>#4*4<called>##` for the call still open on the bus, read from the last
+  `*8*1#<type>#4#<a>*<called>##` (type 1 ring, 5 view). A call the bus has already ended
+  (`*8*3#…`, reopened by a later `*8*2#…`, since a view start sends a transient end) is left alone.
+  The frames are the ones the device sends itself (captured 2026-11-01): ring `*8*1#1#4#21*11##`
+  declined with `*8*3#1#4*411##` from qtdevices; view `*8*1#5#4#20*11##` ended by the intercom
+  with `*8*3#5#4*411##`; another install hung up an answered call with `*8*3#1#4*416##` after
+  answering with `*8*2#1#4*16##`. Every `*8*` frame is logged at debug.
 
 ## 6. Error handling
 

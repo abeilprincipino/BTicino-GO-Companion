@@ -189,7 +189,7 @@ func TestControlEndCallSendsTheCallEndFrame(t *testing.T) {
 	control.port = port
 	control.timeout = time.Second
 
-	if err := control.EndCall(context.Background(), "11"); err != nil {
+	if err := control.EndCall(context.Background(), "1", "11"); err != nil {
 		t.Fatalf("EndCall() error = %v", err)
 	}
 

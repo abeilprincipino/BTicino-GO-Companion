@@ -1701,8 +1701,8 @@ func TestManager_HangupTellsTheObserverAfterTheBye(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
-	byesSeen, declined := -1, true
-	manager.SetHangupObserver(func(d bool) { byesSeen, declined = dialog.byes, d })
+	byesSeen := -1
+	manager.SetHangupObserver(func() { byesSeen = dialog.byes })
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
@@ -1716,8 +1716,8 @@ func TestManager_HangupTellsTheObserverAfterTheBye(t *testing.T) {
 		t.Fatalf("Hangup() error = %v", err)
 	}
 
-	if byesSeen != 1 || declined {
-		t.Fatalf("observer saw %d BYEs, declined=%t, want it called once after the BYE, not declined", byesSeen, declined)
+	if byesSeen != 1 {
+		t.Fatalf("observer saw %d BYEs, want it called once, after the BYE", byesSeen)
 	}
 }
 
@@ -1727,8 +1727,8 @@ func TestManager_HangupTellsTheObserverAfterTheDecline(t *testing.T) {
 	dialog := &fakeIncomingDialog{id: testDialogID}
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
-	responsesSeen, declined := -1, false
-	manager.SetHangupObserver(func(d bool) { responsesSeen, declined = len(dialog.responses), d })
+	responsesSeen := -1
+	manager.SetHangupObserver(func() { responsesSeen = len(dialog.responses) })
 
 	if err := manager.OnInvite(context.Background(), dialog); err != nil {
 		t.Fatal(err)
@@ -1738,8 +1738,8 @@ func TestManager_HangupTellsTheObserverAfterTheDecline(t *testing.T) {
 		t.Fatalf("Hangup() error = %v", err)
 	}
 
-	if responsesSeen != 2 || !declined {
-		t.Fatalf("observer saw %d responses, declined=%t, want it called after the 180 and the 603, declined", responsesSeen, declined)
+	if responsesSeen != 2 {
+		t.Fatalf("observer saw %d responses, want it called after the 180 and the 603", responsesSeen)
 	}
 }
 
@@ -1753,7 +1753,7 @@ func TestManager_HangupObserverIgnoresHangupsThatEndNothing(t *testing.T) {
 	manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
 
 	calls := 0
-	manager.SetHangupObserver(func(bool) { calls++ })
+	manager.SetHangupObserver(func() { calls++ })
 
 	if err := manager.Hangup(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1766,6 +1766,100 @@ func TestManager_HangupObserverIgnoresHangupsThatEndNothing(t *testing.T) {
 	if err := manager.Answer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if calls != 0 {
+		t.Fatalf("observer calls = %d, want 0", calls)
+	}
+}
+
+// The call end observer closes the call on the bus, so it runs whenever the
+// companion ends its own leg: the media path's BYE of an outbound view, the
+// API's BYE of an answered call and the API's 603 of a ringing one.
+func TestManager_CallEndObserverRunsAfterTheCompanionEndsACall(t *testing.T) {
+	t.Parallel()
+
+	dialer := &fakeDialer{}
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
+
+	byesSeen := -1
+	manager.SetCallEndObserver(func() { byesSeen = dialer.dialogs[0].byeCount() })
+
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if byesSeen != 1 {
+		t.Fatalf("observer saw %d BYEs, want it called once, after the BYE", byesSeen)
+	}
+
+	answered := &fakeIncomingDialog{id: testDialogID}
+	manager.SetCallEndObserver(func() { byesSeen = answered.byes })
+
+	if err := manager.OnInvite(context.Background(), answered); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if byesSeen != 1 {
+		t.Fatalf("observer saw %d BYEs on the answered call, want it called once, after the BYE", byesSeen)
+	}
+
+	ringing := &fakeIncomingDialog{id: "dialog-ringing"}
+	responsesSeen := -1
+	manager.SetCallEndObserver(func() { responsesSeen = len(ringing.responses) })
+
+	if err := manager.OnInvite(context.Background(), ringing); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if responsesSeen != 2 {
+		t.Fatalf("observer saw %d responses, want it called after the 180 and the 603", responsesSeen)
+	}
+}
+
+// A call the peer ended, or no call at all, leaves the bus alone: there is
+// nothing of the companion's to close.
+func TestManager_CallEndObserverIgnoresCallsTheCompanionDidNotEnd(t *testing.T) {
+	t.Parallel()
+
+	dialer := &fakeDialer{}
+	manager := NewManager("192.0.2.10", dialer, &syncEventSink{}, testResolver("main", "21"))
+
+	calls := 0
+	manager.SetCallEndObserver(func() { calls++ })
+
+	if err := manager.Hangup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.StartStream(context.Background(), "21"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.RemoteDialogEnded()
 
 	if err := manager.HangupCall(context.Background()); err != nil {
 		t.Fatal(err)

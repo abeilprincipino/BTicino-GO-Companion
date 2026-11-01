@@ -89,7 +89,10 @@ type Manager struct {
 	activeEntrypoint core.EntrypointID
 
 	// hungUp runs after Hangup has ended a call; see SetHangupObserver.
-	hungUp func(declined bool)
+	hungUp func()
+	// callEnded runs after the companion has ended a call itself; see
+	// SetCallEndObserver.
+	callEnded func()
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -116,8 +119,7 @@ func (m *Manager) SetEvents(events EventSink) {
 
 // SetHangupObserver installs fn, which Hangup runs after it has ended a call —
 // the BYE or the 603 sent, error or not — and never when there was nothing to
-// end. HangupCall, the media path's hangup, never runs it. declined says the
-// call was still ringing and got the 603.
+// end. HangupCall, the media path's hangup, never runs it.
 //
 // The application stops the media stream from it, for every consumer: the
 // consumer whose user hung up closes its own session, but the others would keep
@@ -126,9 +128,23 @@ func (m *Manager) SetEvents(events EventSink) {
 // goroutine, and the media teardown publishes CallHungUp too: a late one would
 // stop whatever stream started after it. See
 // docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-func (m *Manager) SetHangupObserver(fn func(declined bool)) {
+func (m *Manager) SetHangupObserver(fn func()) {
 	m.mu.Lock()
 	m.hungUp = fn
+	m.mu.Unlock()
+}
+
+// SetCallEndObserver installs fn, which runs after the companion has ended a
+// call on its own side — a BYE from Hangup or HangupCall, or Hangup's 603,
+// error or not — and never when the peer ended it or nothing was up.
+//
+// The application closes the call on the bus from it: the BYE or the 603 ends
+// only the companion's SIP leg, and the indoor unit kept the door-entry call
+// up until the intercom's own timeout. Unlike SetHangupObserver it runs on the
+// media path too, because a media teardown that hangs up still ends the call.
+func (m *Manager) SetCallEndObserver(fn func()) {
+	m.mu.Lock()
+	m.callEnded = fn
 	m.mu.Unlock()
 }
 
@@ -308,11 +324,12 @@ func (m *Manager) Decline(ctx context.Context) error {
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 	hungUp := m.hungUp
+	callEnded := m.callEnded
 
 	if m.active != nil {
 		err := m.byeActiveLocked(ctx)
 		if hungUp != nil {
-			hungUp(false)
+			hungUp()
 		}
 
 		return err
@@ -329,7 +346,11 @@ func (m *Manager) Hangup(ctx context.Context) error {
 
 	err := dialog.Respond(ctx, 603, "Decline", "")
 	if hungUp != nil {
-		hungUp(true)
+		hungUp()
+	}
+
+	if callEnded != nil {
+		callEnded()
 	}
 
 	if err != nil {
@@ -362,11 +383,13 @@ func (m *Manager) HangupCall(ctx context.Context) error {
 	return m.byeActiveLocked(ctx)
 }
 
-// byeActiveLocked drops the active dialog and sends its BYE. m.mu must be held
-// and m.active must be set; it releases m.mu, like publishLocked.
+// byeActiveLocked drops the active dialog, sends its BYE and runs the call end
+// observer. m.mu must be held and m.active must be set; it releases m.mu, like
+// publishLocked.
 func (m *Manager) byeActiveLocked(ctx context.Context) error {
 	active := m.active
 	dialogID := m.activeID
+	callEnded := m.callEnded
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
@@ -382,7 +405,12 @@ func (m *Manager) byeActiveLocked(ctx context.Context) error {
 
 	m.publishLocked(event)
 
-	if err := active.Bye(ctx); err != nil {
+	err := active.Bye(ctx)
+	if callEnded != nil {
+		callEnded()
+	}
+
+	if err != nil {
 		return fmt.Errorf("sip bye: %w", err)
 	}
 
