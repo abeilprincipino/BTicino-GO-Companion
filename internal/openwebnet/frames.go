@@ -78,6 +78,49 @@ func IsRingStart(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#1#4#")
 }
 
+// ParseCallStart reads a door-entry call start *8*1#<type>#4#<a>*<called>##:
+// type 1 is a ring, type 5 a view (autoaccensione). BuildCallEnd closes it.
+func ParseCallStart(frame string) (callType, called string, ok bool) {
+	trimmed := strings.TrimSpace(frame)
+	if !strings.HasPrefix(trimmed, "*8*1#") || !strings.HasSuffix(trimmed, "##") {
+		return "", "", false
+	}
+
+	fields := strings.TrimSuffix(strings.TrimPrefix(trimmed, "*8*1#"), "##")
+
+	callType, rest, found := strings.Cut(fields, "#4#")
+	if !found || callType == "" || strings.ContainsAny(callType, "#*") {
+		return "", "", false
+	}
+
+	_, called, found = strings.Cut(rest, "*")
+	if !found || called == "" {
+		return "", "", false
+	}
+
+	return callType, called, true
+}
+
+// IsCallAnswer reports a door-entry call answer *8*2#<type>#4*<called>##.
+func IsCallAnswer(frame string) bool {
+	return strings.HasPrefix(strings.TrimSpace(frame), "*8*2#")
+}
+
+// IsCallEnd reports a door-entry call end *8*3#<type>#4*4<called>##.
+func IsCallEnd(frame string) bool {
+	return strings.HasPrefix(strings.TrimSpace(frame), "*8*3#")
+}
+
+// BuildCallEnd closes the door-entry call on the bus, which a SIP BYE or 603
+// does not do: the indoor unit keeps the call up until the intercom's own
+// timeout. callType and called come from ParseCallStart, and the frame carries
+// called behind a 4: the indoor unit's decline button sends *8*3#1#4*411## for
+// the ring *8*1#1#4#21*11##, and a view *8*1#5#4#20*11## ends with
+// *8*3#5#4*411##. Sending it from the companion is a beta experiment.
+func BuildCallEnd(callType, called string) string {
+	return fmt.Sprintf("*8*3#%s#4*4%s##", strings.TrimSpace(callType), strings.TrimSpace(called))
+}
+
 func IsViewRequest(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#5#4#")
 }

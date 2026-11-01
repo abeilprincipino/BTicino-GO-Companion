@@ -90,6 +90,9 @@ type Manager struct {
 
 	// hungUp runs after Hangup has ended a call; see SetHangupObserver.
 	hungUp func()
+	// callEnded runs after the companion has ended a call itself; see
+	// SetCallEndObserver.
+	callEnded func()
 }
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
@@ -128,6 +131,20 @@ func (m *Manager) SetEvents(events EventSink) {
 func (m *Manager) SetHangupObserver(fn func()) {
 	m.mu.Lock()
 	m.hungUp = fn
+	m.mu.Unlock()
+}
+
+// SetCallEndObserver installs fn, which runs after the companion has ended a
+// call on its own side — a BYE from Hangup or HangupCall, or Hangup's 603,
+// error or not — and never when the peer ended it or nothing was up.
+//
+// The application closes the call on the bus from it: the BYE or the 603 ends
+// only the companion's SIP leg, and the indoor unit kept the door-entry call
+// up until the intercom's own timeout. Unlike SetHangupObserver it runs on the
+// media path too, because a media teardown that hangs up still ends the call.
+func (m *Manager) SetCallEndObserver(fn func()) {
+	m.mu.Lock()
+	m.callEnded = fn
 	m.mu.Unlock()
 }
 
@@ -307,6 +324,7 @@ func (m *Manager) Decline(ctx context.Context) error {
 func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 	hungUp := m.hungUp
+	callEnded := m.callEnded
 
 	if m.active != nil {
 		err := m.byeActiveLocked(ctx)
@@ -329,6 +347,10 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	err := dialog.Respond(ctx, 603, "Decline", "")
 	if hungUp != nil {
 		hungUp()
+	}
+
+	if callEnded != nil {
+		callEnded()
 	}
 
 	if err != nil {
@@ -361,11 +383,13 @@ func (m *Manager) HangupCall(ctx context.Context) error {
 	return m.byeActiveLocked(ctx)
 }
 
-// byeActiveLocked drops the active dialog and sends its BYE. m.mu must be held
-// and m.active must be set; it releases m.mu, like publishLocked.
+// byeActiveLocked drops the active dialog, sends its BYE and runs the call end
+// observer. m.mu must be held and m.active must be set; it releases m.mu, like
+// publishLocked.
 func (m *Manager) byeActiveLocked(ctx context.Context) error {
 	active := m.active
 	dialogID := m.activeID
+	callEnded := m.callEnded
 	m.active = nil
 	m.activeID = ""
 	m.activeIncoming = false
@@ -381,7 +405,12 @@ func (m *Manager) byeActiveLocked(ctx context.Context) error {
 
 	m.publishLocked(event)
 
-	if err := active.Bye(ctx); err != nil {
+	err := active.Bye(ctx)
+	if callEnded != nil {
+		callEnded()
+	}
+
+	if err != nil {
 		return fmt.Errorf("sip bye: %w", err)
 	}
 

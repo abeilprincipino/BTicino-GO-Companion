@@ -118,6 +118,16 @@ func (c *Control) Unlock(ctx context.Context, id core.EntrypointID) error {
 	})
 }
 
+// EndCall sends the bus call end for a call ParseCallStart read; see
+// BuildCallEnd.
+func (c *Control) EndCall(ctx context.Context, callType, called string) error {
+	if strings.TrimSpace(callType) == "" || strings.TrimSpace(called) == "" {
+		return errors.New("call end: no call type or called address")
+	}
+
+	return c.command(ctx, BuildCallEnd(callType, called), FrameACK)
+}
+
 func (c *Control) Stream(context.Context, core.EntrypointID) error {
 	return errors.New("stream control is unavailable")
 }

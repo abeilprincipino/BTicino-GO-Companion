@@ -1,6 +1,9 @@
 package openwebnet
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFrameBuilders(t *testing.T) {
 	t.Parallel()
@@ -17,6 +20,8 @@ func TestFrameBuilders(t *testing.T) {
 		{name: "high resolution video", got: BuildStreamStartVideo(5007), want: "*7*300#127#0#0#1#5007#0*##"},
 		{name: "low resolution video", got: BuildAVAddStreamVideo("192.168.1.5", 10002, false), want: "*7*300#192#168#1#5#10002#1*##"},
 		{name: "audio", got: BuildStreamStartAudio(5000), want: "*7*300#127#0#0#1#5000#2*##"},
+		{name: "ring call end trims address", got: BuildCallEnd("1", " 11 "), want: "*8*3#1#4*411##"},
+		{name: "view call end", got: BuildCallEnd("5", "11"), want: "*8*3#5#4*411##"},
 	}
 
 	for _, test := range tests {
@@ -75,6 +80,29 @@ func TestFramePredicatesAndExtractors(t *testing.T) {
 
 	if address, ok := ParseRingIdentityAddress("*8*9#1#4*22#2##"); !ok || address != "22" {
 		t.Fatalf("unexpected ring identity parse: address=%q ok=%t", address, ok)
+	}
+
+	for frame, want := range map[string]string{
+		"*8*1#1#4#21*11##":   "1 11",
+		" *8*1#1#4#21*11## ": "1 11",
+		"*8*1#5#4#20*11##":   "5 11",
+		"*8*1#1#4#21##":      "",
+		"*8*1#1#4#21*##":     "",
+		"*8*2#1#4*11##":      "",
+		"*8*1#1#21*11##":     "",
+	} {
+		callType, called, ok := ParseCallStart(frame)
+		if got := strings.TrimSpace(callType + " " + called); got != want || ok != (want != "") {
+			t.Fatalf("ParseCallStart(%q) = %q, %t, want %q", frame, got, ok, want)
+		}
+	}
+
+	if !IsCallAnswer("*8*2#5#4*11##") || IsCallAnswer("*8*20*20##") {
+		t.Fatal("IsCallAnswer mismatch")
+	}
+
+	if !IsCallEnd("*8*3#5#4*411##") || IsCallEnd("*8*35*0##") {
+		t.Fatal("IsCallEnd mismatch")
 	}
 }
 

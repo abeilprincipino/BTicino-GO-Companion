@@ -151,13 +151,23 @@ func run(
 	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))
 
+	// A call the companion ends, a BYE or a 603, is closed on the bus too.
+	call := &busCall{}
+	runtime.calls.SetCallEndObserver(func() {
+		go endBusCall(openWebNetControl, call, logger)
+	})
+
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
 	listener.SetFrameObserver(func(frame string) {
 		// Who starts which stream, to where, and when: the AV frames say it.
+		// The door-entry frames are logged too, to learn how the bus ends a call.
 		if strings.HasPrefix(frame, "*7*") {
 			logger.Debug("openwebnet av frame", "frame", frame)
+		} else if strings.HasPrefix(frame, "*8*") {
+			logger.Debug("openwebnet door entry frame", "frame", frame)
 		}
 
+		call.observeFrame(frame)
 		runtime.ringWatch.observeFrame(frame)
 
 		switch {
