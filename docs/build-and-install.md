@@ -309,10 +309,13 @@ Sul firmware C100X esaminato, il terzo argomento di `flexisipsh start` alimenta
 `--p12-passphrase-file` e il firmware usa `/var/tmp/bt_answering_machine.fifo`.
 Il precedente avvio del companion ometteva questo argomento, e avveniva solo se
 il proxy locale non ascoltava e un IP LAN era disponibile; senza IP non veniva eseguito.
-È stato osservato un proxy con SIP locale attivo ma TLS 5061 non disponibile; un
-riavvio manuale con la FIFO ha ripristinato TLS. **Non è una prova causale isolata:**
-il riavvio ha cambiato anche lo stato del processo e la tempistica del firmware.
-L'errore `Not a directory` non è stato attribuito con certezza alla passphrase mancante.
+In un confronto sul dispositivo già avviato, con watchdog del companion fermo,
+un avvio senza l'argomento FIFO ha riprodotto TLS 5061 non disponibile, `Not a directory`
+e registrazioni di dominio 503. Un successivo avvio con FIFO si è invece bloccato:
+la disponibilità del writer è anch'essa necessaria. Dopo un reboot il guasto si è
+ripresentato; un avvio manuale con FIFO ha ripristinato 5061 e interrotto i 503.
+Questi risultati escludono un problema limitato al solo timing iniziale del boot,
+ma non provano che la rimozione dell'avvio anticipato risolva tutti i casi sul campo.
 
 Nel [codice upstream](https://github.com/BelledonneCommunications/flexisip/blob/32852e4cef4615a283273373ca9b19e146953348/src/main/flexisip.cc#L403-L415),
 l'opzione legge il file in modo sincrono (o restituisce una passphrase vuota se

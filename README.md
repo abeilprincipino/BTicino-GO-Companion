@@ -89,8 +89,8 @@ In order:
    previous one as `gst.previous`.
 5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S45companion` and
    `S99zzcompanion` in runlevels `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
-   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`), so Flexisip is up
-   before it registers; `S99zz` is a second start at the end of boot that retries a failed one.
+   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`), without starting
+   Flexisip; `S99zz` is a second start at the end of boot that retries a failed one.
 6. Persists firewall access in `/etc/network/if-pre-up.d/iptables`:
 
    | Protocol | Port | Purpose |
@@ -223,8 +223,11 @@ Home Assistant shows the ring but no Answer button.
 The init script starts a watchdog that checks the process and the health endpoint every 15 seconds
 and restarts the companion if it is dead or not responding. `stop` also stops the watchdog.
 
-At boot the init script waits up to 60 seconds for `/home/bticino/cfg/extra` to be mounted and up to
-30 seconds for the LAN address, and starts Flexisip if the local SIP proxy is not already listening.
+At boot the init script waits up to 60 seconds for the companion binary on
+`/home/bticino/cfg/extra` to become executable. Flexisip startup and TLS credential handoff are
+left to the BTicino firmware; the companion watchdog only supervises the companion process.
+This avoids racing the firmware or blocking on an unserviced passphrase FIFO. Forced early
+Flexisip startup for cloudless/local-only operation is no longer provided.
 
 ## Updates and Rollback
 
