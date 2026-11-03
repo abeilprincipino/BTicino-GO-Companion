@@ -1503,3 +1503,31 @@ func TestStreamDialerAnsweredInboundByeReleasesTheMediaLease(t *testing.T) {
 	recorder.Terminate()
 	waitClosed(t, returned, "onInvite() did not return once its INVITE transaction had retired")
 }
+
+// A CANCEL or a BYE that ends the ringing call tells the manager waiting on a
+// bus decline that the far end withdrew it.
+func TestIncomingDialogWithdrawnClosesWhenTheRingingCallEnds(t *testing.T) {
+	t.Parallel()
+
+	dialog := &incomingDialog{session: &fakeServerSession{}, id: "call-1"}
+
+	if err := dialog.Respond(context.Background(), 180, "Ringing", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-dialog.Withdrawn():
+		t.Fatal("Withdrawn() closed before the call ended")
+	default:
+	}
+
+	if !dialog.endPending() {
+		t.Fatal("endPending() = false for a ringing call")
+	}
+
+	select {
+	case <-dialog.Withdrawn():
+	default:
+		t.Fatal("Withdrawn() still open after endPending()")
+	}
+}

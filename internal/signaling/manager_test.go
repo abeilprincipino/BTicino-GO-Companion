@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1975,5 +1976,81 @@ func TestManager_HasRingingInboundCallTracksTheRing(t *testing.T) {
 
 	if manager.HasRingingInboundCall() {
 		t.Fatal("HasRingingInboundCall() = true after Answer, want false")
+	}
+}
+
+// withdrawingIncomingDialog is a fakeIncomingDialog the far end can withdraw,
+// as the intercom does with a CANCEL after the bus declined the call.
+type withdrawingIncomingDialog struct {
+	fakeIncomingDialog
+
+	withdrawn chan struct{}
+}
+
+func (d *withdrawingIncomingDialog) Withdrawn() <-chan struct{} { return d.withdrawn }
+
+// A ringing call is closed on the bus first, like the indoor unit's decline
+// button: when the intercom cancels the call, no 603 is sent, and the 603 is
+// left for a bus that refused the frame or an intercom that stayed silent.
+func TestManager_HangupDeclinesARingingCallOnTheBusFirst(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		busTook      bool
+		cancelled    bool
+		wantStatuses []int
+	}{
+		{name: "intercom cancels", busTook: true, cancelled: true, wantStatuses: []int{180}},
+		{name: "intercom stays silent", busTook: true, wantStatuses: []int{180, 603}},
+		{name: "bus refuses the frame", cancelled: true, wantStatuses: []int{180, 603}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			dialog := &withdrawingIncomingDialog{
+				fakeIncomingDialog: fakeIncomingDialog{id: testDialogID},
+				withdrawn:          make(chan struct{}),
+			}
+			manager := NewManager("192.0.2.10", &fakeDialer{}, &syncEventSink{}, testResolver("main", "21"))
+			manager.busDeclineGrace = 10 * time.Millisecond
+
+			hangups := 0
+			manager.SetHangupObserver(func() { hangups++ })
+
+			declines := 0
+			manager.SetBusDecline(func(context.Context) bool {
+				declines++
+
+				if test.cancelled {
+					close(dialog.withdrawn)
+				}
+
+				return test.busTook
+			})
+
+			if err := manager.OnInvite(context.Background(), dialog); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := manager.Hangup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			statuses := make([]int, 0, len(dialog.responses))
+			for _, response := range dialog.responses {
+				statuses = append(statuses, response.status)
+			}
+
+			if !slices.Equal(statuses, test.wantStatuses) {
+				t.Fatalf("responses = %v, want %v", statuses, test.wantStatuses)
+			}
+
+			if declines != 1 || hangups != 1 {
+				t.Fatalf("bus declines = %d, hangup observer calls = %d, want 1 and 1", declines, hangups)
+			}
+		})
 	}
 }

@@ -93,14 +93,31 @@ type Manager struct {
 	// callEnded runs after the companion has ended a call itself; see
 	// SetCallEndObserver.
 	callEnded func()
+	// busDecline closes a ringing call on the bus before Hangup declines it,
+	// and busDeclineGrace bounds the wait for the intercom's CANCEL; see
+	// SetBusDecline.
+	busDecline      func(context.Context) bool
+	busDeclineGrace time.Duration
 }
+
+// defaultBusDeclineGrace is how long Hangup waits for the intercom to cancel a
+// call the bus has declined. The indoor unit's decline button gets the CANCEL
+// in about 0.4 s.
+const defaultBusDeclineGrace = 2 * time.Second
 
 func NewManager(host string, dialer StreamDialer, events EventSink, resolve EntrypointResolver) *Manager {
 	if resolve == nil {
 		resolve = func() (core.EntrypointID, string) { return "", "" }
 	}
 
-	return &Manager{host: host, dialer: dialer, events: events, resolve: resolve, incomingTimeout: defaultIncomingTimeout}
+	return &Manager{
+		host:            host,
+		dialer:          dialer,
+		events:          events,
+		resolve:         resolve,
+		incomingTimeout: defaultIncomingTimeout,
+		busDeclineGrace: defaultBusDeclineGrace,
+	}
 }
 
 // SetEvents assigns the sink after construction, because the projector-backed
@@ -145,6 +162,21 @@ func (m *Manager) SetHangupObserver(fn func()) {
 func (m *Manager) SetCallEndObserver(fn func()) {
 	m.mu.Lock()
 	m.callEnded = fn
+	m.mu.Unlock()
+}
+
+// SetBusDecline installs fn, which Hangup runs before it declines a ringing
+// call: fn closes the call on the bus, as the indoor unit's decline button
+// does, and reports whether the bus took the frame. Hangup then waits for the
+// intercom to CANCEL the call, and sends the 603 only when that does not come.
+//
+// The order matters for the official app. On the decline button the intercom
+// cancels every fork itself, and the app stops ringing. A 603 from the
+// companion ends the call too, but the app's fork kept ringing until the
+// intercom's own timeout.
+func (m *Manager) SetBusDecline(fn func(context.Context) bool) {
+	m.mu.Lock()
+	m.busDecline = fn
 	m.mu.Unlock()
 }
 
@@ -316,7 +348,8 @@ func (m *Manager) Decline(ctx context.Context) error {
 // error.
 //
 // It ends whatever call is up, a ringing one included, which it answers 603
-// Decline. That is right for POST /api/v3/call/hangup, where the user is
+// Decline unless the bus decline (SetBusDecline) got the intercom to cancel it
+// first. That is right for POST /api/v3/call/hangup, where the user is
 // rejecting the call, and wrong for anything a media teardown does: a 6xx ends
 // every fork of the doorbell call, the indoor unit's included. The media path
 // therefore uses HangupCall, never this. See
@@ -325,6 +358,8 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	m.mu.Lock()
 	hungUp := m.hungUp
 	callEnded := m.callEnded
+	busDecline := m.busDecline
+	grace := m.busDeclineGrace
 
 	if m.active != nil {
 		err := m.byeActiveLocked(ctx)
@@ -344,6 +379,15 @@ func (m *Manager) Hangup(ctx context.Context) error {
 
 	m.publishLocked(core.CallHungUp{DialogID: dialog.ID()})
 
+	declinedOnBus := busDecline != nil && busDecline(ctx)
+	if declinedOnBus && waitWithdrawn(ctx, dialog, grace) {
+		if hungUp != nil {
+			hungUp()
+		}
+
+		return nil
+	}
+
 	err := dialog.Respond(ctx, 603, "Decline", "")
 	if hungUp != nil {
 		hungUp()
@@ -353,11 +397,44 @@ func (m *Manager) Hangup(ctx context.Context) error {
 		callEnded()
 	}
 
+	// The intercom's CANCEL can still win against the 603 that followed the
+	// wait, and then the call is over all the same.
+	if declinedOnBus && errors.Is(err, ErrDialogConcluded) {
+		return nil
+	}
+
 	if err != nil {
 		return fmt.Errorf("sip decline response: %w", err)
 	}
 
 	return nil
+}
+
+// withdrawable is an IncomingDialog that reports the far end withdrawing the
+// ringing call.
+type withdrawable interface {
+	Withdrawn() <-chan struct{}
+}
+
+// waitWithdrawn reports whether the far end withdrew dialog within grace. A
+// dialog that cannot report it is never withdrawn.
+func waitWithdrawn(ctx context.Context, dialog IncomingDialog, grace time.Duration) bool {
+	w, ok := dialog.(withdrawable)
+	if !ok {
+		return false
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case <-w.Withdrawn():
+		return true
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+
+	return false
 }
 
 // HangupCall ends the active dialog with a BYE and does nothing else: a call
