@@ -247,6 +247,10 @@ type webrtcOfferPayload struct {
 	Origin       string            `json:"origin"`
 	OfferSDP     string            `json:"offer_sdp"`
 	ICEServers   []media.ICEServer `json:"ice_servers"`
+	// Trickle asks for the answer at once and for local candidates as "candidate"
+	// messages on this socket. Without it a client gets exactly one response per
+	// request, with the candidates inside the answer.
+	Trickle bool `json:"trickle"`
 }
 
 type webrtcCandidatePayload struct {
@@ -358,14 +362,29 @@ func (s *Server) webrtcWebsocket(w http.ResponseWriter, r *http.Request) {
 
 		var response Message
 
-		sessionID, response = s.webrtcResponse(r.Context(), message, sessionID)
+		sessionID, response = s.webrtcResponse(r.Context(), client, message, sessionID)
 		if client.write(response) != nil {
 			return
 		}
 	}
 }
 
-func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID string) (string, Message) {
+// webrtcLocalCandidates sends a trickling client its local candidates. They can
+// reach it before the answer, and the end of gathering is not told.
+func (s *Server) webrtcLocalCandidates(c *client, sessionID string) func(*media.ICECandidate) {
+	return func(candidate *media.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+
+		message := Message{Type: "candidate", ID: sessionID, Payload: mustJSON(webrtcCandidatePayload{SessionID: sessionID, Candidate: *candidate})}
+		if err := c.write(message); err != nil {
+			s.logger.Debug("webrtc local candidate not sent", "session_id", sessionID, "error", err)
+		}
+	}
+}
+
+func (s *Server) webrtcResponse(ctx context.Context, c *client, message Message, sessionID string) (string, Message) {
 	var response Message
 
 	switch message.Type {
@@ -379,10 +398,13 @@ func (s *Server) webrtcResponse(ctx context.Context, message Message, sessionID 
 			break
 		}
 
+		var onLocalCandidate func(*media.ICECandidate)
+		if payload.Trickle {
+			onLocalCandidate = s.webrtcLocalCandidates(c, payload.SessionID)
+		}
+
 		offerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		// Home Assistant's signaling client expects one response for every
-		// request, so server candidates must be part of the SDP answer.
-		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, payload.ICEServers, nil)
+		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, payload.ICEServers, onLocalCandidate)
 
 		cancel()
 

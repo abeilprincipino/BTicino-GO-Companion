@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+const (
+	// stopBurstBeforeRing is how close to a stop frame a ring start has to come
+	// to be a ring restarted by a second press of the doorbell. The intercom ends
+	// the first ring with a burst of stop frames, still arriving after the new
+	// ring start: about 0.5 s of them on a C100X.
+	stopBurstBeforeRing = time.Second
+	// staleStopWindow is how long after such a ring start a stop frame is taken
+	// for the tail of that burst rather than for the end of the new ring.
+	staleStopWindow = 1500 * time.Millisecond
+)
+
 // Mapper keeps enough device context to correlate ring start and stop frames.
 type Mapper struct {
 	mu               sync.Mutex
@@ -17,10 +28,15 @@ type Mapper struct {
 	// doorbell is config.DoorbellEntrypoint, if the configuration names one:
 	// every ring is its, whatever address the frame carries.
 	doorbell core.EntrypointID
+	// lastStop is the latest stop frame, duplicates included.
+	lastStop time.Time
+	// ignoreStopsUntil is the end of the stale stop window of a restarted ring.
+	ignoreStopsUntil time.Time
+	now              func() time.Time
 }
 
 func NewMapper(entrypoints []config.Entrypoint) *Mapper {
-	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time)}
+	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time), now: time.Now}
 	for _, entrypoint := range entrypoints {
 		m.entrypoints[entrypoint.DevAddr] = core.EntrypointID(entrypoint.ID)
 	}
@@ -45,7 +61,15 @@ func (m *Mapper) Map(message Message) []core.Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	now := time.Now()
+	now := m.now()
+	isStop := IsStreamStop(raw) || IsFreeAVResources(raw)
+
+	// Before the duplicate check: the burst is mostly duplicates, and its last
+	// frame is what dates it.
+	if isStop {
+		m.lastStop = now
+	}
+
 	if m.duplicate(raw, now) {
 		return nil
 	}
@@ -61,6 +85,10 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		m.activeEntrypoint = id
+
+		if !m.lastStop.IsZero() && now.Sub(m.lastStop) <= stopBurstBeforeRing {
+			m.ignoreStopsUntil = now.Add(staleStopWindow)
+		}
 
 		return []core.Event{core.RingStarted{EntrypointID: id}}
 	}
@@ -81,8 +109,8 @@ func (m *Mapper) Map(message Message) []core.Event {
 		return []core.Event{core.VoicemailDisabled{}}
 	}
 
-	if IsStreamStop(raw) || IsFreeAVResources(raw) {
-		if m.activeEntrypoint == "" {
+	if isStop {
+		if m.activeEntrypoint == "" || now.Before(m.ignoreStopsUntil) {
 			return nil
 		}
 
