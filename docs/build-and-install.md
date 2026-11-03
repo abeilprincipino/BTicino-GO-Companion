@@ -196,8 +196,8 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
 3. installa `gst/` in `.../companion/gst`, salvando il precedente come `gst.previous`;
 4. copia l'init script in `/etc/init.d/companion` e crea i symlink di boot:
    `S45companion` e `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`.
-   `S45` parte prima di `S98-bt_daemon-apps.sh`, così flexisip è su prima che lo stack BTicino si
-   registri; `S99zz` è un secondo avvio a fine boot che riprova se il primo è fallito;
+   `S45` avvia presto il companion, senza avviare Flexisip (gestito dal firmware);
+   `S99zz` è un secondo avvio a fine boot che riprova se il primo è fallito;
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);
@@ -253,7 +253,8 @@ pairing compresi). Delle porte TCP chiude solo quelle che l'installer ha aggiunt
 `.companion.bak` di Flexisip: annullerebbero le modifiche fatte da BTicino dopo l'installazione.
 Usa lo stesso lock dell'installer. Poi va riavviato Flexisip, o il citofono.
 
-I test di logica di `install.sh` e `uninstall.sh` girano senza root su qualsiasi `sh` POSIX:
+I test di logica di `install.sh`, `uninstall.sh` e dell'init script girano senza root
+su Linux con `sh` POSIX e `timeout`:
 
 ```sh
 sh scripts/tests/run.sh
@@ -298,16 +299,38 @@ riprovare finché il binario compare.
 
 ### Sequenza di boot
 
-`start` prima di lanciare il companion:
+`start` attende fino a 60 s che `companion` (o `companion.new`) sia eseguibile su
+`/home/bticino/cfg/extra` — quella partizione può essere montata dopo l'init script.
+Override con `COMPANION_BINARY_WAIT_SECONDS`. Non attende l'IP LAN per avviare Flexisip:
+l'avvio e il watchdog del companion lasciano il proxy interamente al firmware e non
+riavviano un proxy già attivo, nemmeno se ascolta solo sulla porta locale 5060.
 
-1. attende fino a 60 s che `companion` (o `companion.new`) sia eseguibile su
-   `/home/bticino/cfg/extra` — quella partizione può essere montata dopo l'init script.
-   Override con `COMPANION_BINARY_WAIT_SECONDS`;
-2. attende fino a 30 s l'IP LAN (`wlan0`, poi `eth0`) e avvia `flexisipsh` se il proxy SIP
-   locale non è già in ascolto su `127.0.0.1:5060`. Serve che flexisip sia su **prima** che
-   lo stack BTicino registri, così il c100x registra localmente e il path SIP della camera
-   funziona senza cloud; l'attesa dell'IP ritarda anche `bt_daemon` quanto basta a vincere
-   la race. Il watchdog ripete il controllo flexisip a ogni ciclo.
+Sul firmware C100X esaminato, il terzo argomento di `flexisipsh start` alimenta
+`--p12-passphrase-file` e il firmware usa `/var/tmp/bt_answering_machine.fifo`.
+Il precedente avvio del companion ometteva questo argomento, e avveniva solo se
+il proxy locale non ascoltava e un IP LAN era disponibile; senza IP non veniva eseguito.
+È stato osservato un proxy con SIP locale attivo ma TLS 5061 non disponibile; un
+riavvio manuale con la FIFO ha ripristinato TLS. **Non è una prova causale isolata:**
+il riavvio ha cambiato anche lo stato del processo e la tempistica del firmware.
+L'errore `Not a directory` non è stato attribuito con certezza alla passphrase mancante.
+
+Nel [codice upstream](https://github.com/BelledonneCommunications/flexisip/blob/32852e4cef4615a283273373ca9b19e146953348/src/main/flexisip.cc#L403-L415),
+l'opzione legge il file in modo sincrono (o restituisce una passphrase vuota se
+non specificata); la passphrase viene poi passata al
+[trasporto TLS](https://github.com/BelledonneCommunications/flexisip/blob/32852e4cef4615a283273373ca9b19e146953348/src/agent.cc#L519-L548).
+Questo rende plausibile l'ipotesi della passphrase, ma non dimostra il comportamento
+della versione sul dispositivo. Passare soltanto il nome della FIFO non basta:
+senza un writer pronto la lettura può bloccarsi, anche durante il boot. Il companion
+quindi lascia al firmware l'avvio e la sincronizzazione, senza tentare riparazioni
+automatiche. Aggiungere l'argomento senza una garanzia di disponibilità del writer,
+oppure riavviare il proxy quando manca 5061, non sono alternative sicure per il watchdog.
+
+**Limite per installazioni solo locali:** non viene più forzato l'avvio anticipato
+di Flexisip per far registrare localmente il c100x prima dello stack BTicino.
+Se il firmware non avvia il proxy, le funzioni SIP del companion restano indisponibili;
+questa modifica non garantisce il precedente comportamento senza cloud. Un proxy già
+avviato senza TLS non viene riparato automaticamente: l'eventuale ripristino tramite
+firmware va pianificato dall'operatore, senza interrompere chiamate attive.
 
 ---
 

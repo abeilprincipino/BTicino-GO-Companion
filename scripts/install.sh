@@ -253,8 +253,7 @@ install_init_script() { cp -f "$1" "${INIT_SCRIPT}"; chmod 755 "${INIT_SCRIPT}";
 register_service() {
 	remount_root_rw
 	install_init_script "$1"
-	# S45 starts the companion before S98-bt_daemon-apps.sh, so flexisip is up
-	# before the BTicino stack registers (see do_start in the init script).
+	# S45 starts the companion early; firmware remains responsible for Flexisip.
 	# S99zz is a second start at the end of boot: a no-op when S45 succeeded, a
 	# retry when it ran before the companion partition was mounted.
 	for runlevel in 2 3 4 5; do

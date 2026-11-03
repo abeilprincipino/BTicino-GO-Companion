@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Logic tests for install.sh and uninstall.sh. Each case runs a copy of the
+# Logic tests for install.sh, uninstall.sh and the Companion init script.
+# Installer/uninstaller cases run a copy of the
 # script with its absolute paths moved under a scratch root and with fake id,
 # mount and init script, so it runs unprivileged under any POSIX sh:
 #   sh scripts/tests/run.sh
@@ -262,4 +263,5 @@ test_uninstall_removes_the_legacy_static_route
 test_uninstall_with_an_empty_port_record_prints_no_ports_message
 
 printf '%s passed, %s failed\n' "${PASSED}" "${FAILED}"
+sh "${HERE}/flexisip.sh" || exit 1
 [ "${FAILED}" -eq 0 ]
