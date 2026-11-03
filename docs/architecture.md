@@ -391,7 +391,7 @@ Everything else requires the bearer token:
 | System | `GET system/update/status`, `POST system/update/{check,stage,install}`, `POST system/reboot`, `POST system/services/{name}/restart` |
 | Control | `POST entrypoints/{id}/unlock`, `POST audio/{mute,unmute}`, `POST voicemail/{enable,disable,refresh}` |
 | Calls | `POST call/answer`, `POST call/hangup` (registered only with inbound SIP) |
-| Streams | `GET ws` (state + events), `GET webrtc/ws` (`offer`, `candidate`, `close` with optional `leave`) |
+| Streams | `GET ws` (state + events), `GET webrtc/ws` (`offer` with optional `trickle`, which sends local candidates as `candidate` messages; `candidate`; `close` with optional `leave`) |
 | Media files | `GET entrypoints/{id}/snapshot/{latest,ring}.jpg`, `GET entrypoints/{id}/clip/ring.mp4` |
 
 Unknown `/api/v3/` paths return an explicit 404.

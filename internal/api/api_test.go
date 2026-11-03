@@ -619,6 +619,71 @@ func TestServer_WebRTCDoesNotSendLocalCandidatesOutOfBand(t *testing.T) {
 	}
 }
 
+func TestServer_WebRTCTrickleSendsLocalCandidates(t *testing.T) {
+	server, _ := newTestServer(t)
+	server.SetWebRTC(&webRTCRecorder{answer: "answer-sdp", localCandidates: []*media.ICECandidate{{Candidate: "candidate:1"}, nil}})
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/webrtc/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+
+	reader := io.Reader(connection)
+	if bufferedReader != nil {
+		reader = bufferedReader
+	}
+
+	transport := struct {
+		io.Reader
+		io.Writer
+	}{Reader: reader, Writer: connection}
+
+	if err := wsutil.WriteClientText(connection, []byte(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"bticino_card","offer_sdp":"offer-sdp","trickle":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	read := func() Message {
+		t.Helper()
+
+		data, err := wsutil.ReadServerText(transport)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var message Message
+		if err := json.Unmarshal(data, &message); err != nil {
+			t.Fatal(err)
+		}
+
+		return message
+	}
+
+	candidate := read()
+
+	var payload webrtcCandidatePayload
+	if err := json.Unmarshal(candidate.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	if candidate.Type != "candidate" || candidate.ID != "session-1" || payload.SessionID != "session-1" || payload.Candidate.Candidate != "candidate:1" {
+		t.Fatalf("candidate message = %#v, payload = %#v", candidate, payload)
+	}
+
+	// The end of gathering, a nil candidate, sends nothing: the answer is next.
+	if answer := read(); answer.Type != "answer" {
+		t.Fatalf("message after the candidate = %#v, want the answer", answer)
+	}
+}
+
 func TestServer_VoicemailRefresh(t *testing.T) {
 	server, _ := newTestServer(t)
 	called := false
