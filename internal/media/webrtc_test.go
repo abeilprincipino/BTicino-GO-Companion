@@ -305,6 +305,28 @@ func TestWebRTCSessionTracksRTCPFeedback(t *testing.T) {
 	}
 }
 
+func TestWaitForGathering(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan struct{})
+	close(done)
+
+	if complete, err := waitForGathering(context.Background(), done, time.Hour); !complete || err != nil {
+		t.Fatalf("completed gathering = %v, %v; want true, nil", complete, err)
+	}
+
+	if complete, err := waitForGathering(context.Background(), make(chan struct{}), time.Millisecond); complete || err != nil {
+		t.Fatalf("stalled gathering = %v, %v; want false, nil", complete, err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := waitForGathering(cancelled, make(chan struct{}), time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait error = %v, want context.Canceled", err)
+	}
+}
+
 func newTestWebRTCService(t *testing.T, coordinator *StreamCoordinator, entrypoints []config.Entrypoint) *WebRTCService {
 	t.Helper()
 
