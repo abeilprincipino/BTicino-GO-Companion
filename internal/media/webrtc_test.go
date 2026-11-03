@@ -322,6 +322,27 @@ func TestWebRTCSessionTracksRTCPFeedback(t *testing.T) {
 	}
 }
 
+func TestDescribeCandidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		candidate, candidateType, protocol string
+		mdns                               bool
+	}{
+		{candidate: "candidate:1 1 UDP 2130706431 192.0.2.1 12345 typ host", candidateType: "host", protocol: "udp"},
+		{candidate: "candidate:2 1 udp 2130706431 a1b2.local 12345 typ host generation 0", candidateType: "host", protocol: "udp", mdns: true},
+		{candidate: "candidate:3 1 udp 1 192.0.2.2 3478 typ relay raddr 0.0.0.0 rport 0", candidateType: "relay", protocol: "udp"},
+		{candidate: "candidate:4 1"},
+	}
+
+	for _, test := range tests {
+		candidateType, protocol, mdns := describeCandidate(test.candidate)
+		if candidateType != test.candidateType || protocol != test.protocol || mdns != test.mdns {
+			t.Errorf("describeCandidate(%q) = %q, %q, %v", test.candidate, candidateType, protocol, mdns)
+		}
+	}
+}
+
 func TestWaitForGathering(t *testing.T) {
 	t.Parallel()
 

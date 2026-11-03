@@ -284,6 +284,8 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 			if lease != nil {
 				go s.coordinator.ReplayKeyframe(lease)
 			}
+
+			go s.logSelectedCandidatePair(pc, sessionID, entrypointID)
 		}
 
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
@@ -312,6 +314,10 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 		go s.forwardBackchannel(session, track)
 	})
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String())
+		}
+
 		if session.onLocalCandidate == nil {
 			return
 		}
@@ -688,8 +694,39 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 	}
 
 	session.appliedCandidates.Add(1)
+	s.logRemoteCandidate(session, candidate.Candidate)
 
 	return nil
+}
+
+// logRemoteCandidate dates a browser's candidate, without its address: a slow
+// connection is either candidates that come late or checks that take long.
+func (s *WebRTCService) logRemoteCandidate(session *webRTCSession, candidate string) {
+	candidateType, protocol, mdns := describeCandidate(candidate)
+	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", candidateType, "protocol", protocol, "mdns", mdns)
+}
+
+// describeCandidate reads a candidate line, "candidate:<foundation> <component>
+// <protocol> <priority> <address> <port> typ <type> ...".
+func describeCandidate(candidate string) (candidateType, protocol string, mdns bool) {
+	fields := strings.Fields(candidate)
+	if len(fields) < 8 {
+		return "", "", false
+	}
+
+	return fields[7], strings.ToLower(fields[2]), strings.HasSuffix(fields[4], ".local")
+}
+
+// logSelectedCandidatePair says which path the connection took: host for a LAN,
+// srflx for a path through NAT, relay for one through TURN.
+func (s *WebRTCService) logSelectedCandidatePair(pc *webrtc.PeerConnection, sessionID, entrypointID string) {
+	pair, err := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Local == nil || pair.Remote == nil {
+		s.logger.Debug("webrtc selected candidate pair unavailable", "session_id", sessionID, "entrypoint_id", entrypointID, "error", err)
+		return
+	}
+
+	s.logger.Info("webrtc candidate pair selected", "session_id", sessionID, "entrypoint_id", entrypointID, "local_type", pair.Local.Typ.String(), "remote_type", pair.Remote.Typ.String(), "protocol", pair.Local.Protocol.String())
 }
 
 func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) error {
@@ -706,6 +743,7 @@ func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) err
 		}
 
 		session.appliedCandidates.Add(1)
+		s.logRemoteCandidate(session, candidate.Candidate)
 	}
 
 	return nil
