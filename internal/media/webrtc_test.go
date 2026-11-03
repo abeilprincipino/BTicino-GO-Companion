@@ -56,10 +56,8 @@ func TestWebRTCServiceOfferUsesCoordinatorLeaseAndCloseIsIdempotent(t *testing.T
 		t.Fatal("answer is empty")
 	}
 
-	if !strings.Contains(answer, "a=candidate:") {
-		t.Fatalf("answer does not contain a local ICE candidate: %q", answer)
-	}
-
+	// A trickling client does not wait for gathering: its candidates come through
+	// the callback, whether or not some are already in the answer.
 	select {
 	case candidate := <-candidates:
 		if candidate.Candidate == "" {
@@ -147,6 +145,25 @@ func TestWebRTCServiceSecondOfferJoinsTheStream(t *testing.T) {
 
 	if source.closes != 1 || source.endCallCalls != 1 {
 		t.Fatalf("after the last close closes=%d endCalls=%d, want 1 and 1", source.closes, source.endCallCalls)
+	}
+}
+
+func TestWebRTCServiceOfferWithoutTrickleAnswersWithCandidates(t *testing.T) {
+	coordinator := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return &callEndingSource{}, nil, nil
+	})
+	service := newTestWebRTCService(t, coordinator, []config.Entrypoint{{ID: "main", Capabilities: config.Capabilities{Stream: true}}})
+
+	offer, client := testWebRTCOffer(t)
+	defer client.Close()
+
+	answer, err := service.Offer(context.Background(), "session-1", "main", offer, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(answer, "a=candidate:") {
+		t.Fatalf("answer does not contain a local ICE candidate: %q", answer)
 	}
 }
 
