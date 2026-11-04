@@ -60,6 +60,74 @@ func TestStreamDialerSetRemoteDialogEndedReplacesActiveStreamCallback(t *testing
 	}
 }
 
+// The 100 Trying comes from the proxy within milliseconds, and the 200 OK when the
+// intercom is done: only a provisional from the intercom says it has the call.
+func TestStreamDialerReportsRingingOnlyOnTheFarEndsProvisional(t *testing.T) {
+	dialer := testDialer(nil)
+	rang := make(chan int, 4)
+	statuses := map[int]string{sip.StatusTrying: "Trying", sip.StatusOK: "OK", sip.StatusRinging: "Ringing"}
+	observe := dialer.observeStreamResponses(context.Background(), time.Now())
+	invite := testInviteRequest()
+
+	dialer.SetStreamRinging(func() { rang <- 1 })
+
+	for _, status := range []int{sip.StatusTrying, sip.StatusOK} {
+		if err := observe(sip.NewResponseFromRequest(invite, status, statuses[status], nil)); err != nil {
+			t.Fatalf("observe(%d) error = %v", status, err)
+		}
+	}
+
+	select {
+	case <-rang:
+		t.Fatal("a 100 Trying or a 200 OK reported the intercom ringing")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := observe(sip.NewResponseFromRequest(invite, sip.StatusRinging, statuses[sip.StatusRinging], nil)); err != nil {
+		t.Fatalf("observe(180) error = %v", err)
+	}
+
+	select {
+	case <-rang:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the 180 Ringing was not reported")
+	}
+}
+
+// What runs at the 180 can take a while, and the 200 OK must still get through.
+func TestStreamDialerRingingCallbackDoesNotHoldTheResponses(t *testing.T) {
+	dialer := testDialer(nil)
+	release := make(chan struct{})
+
+	defer close(release)
+
+	dialer.SetStreamRinging(func() { <-release })
+
+	observed := make(chan error, 1)
+	response := sip.NewResponseFromRequest(testInviteRequest(), sip.StatusRinging, "Ringing", nil)
+
+	go func() {
+		observed <- dialer.observeStreamResponses(context.Background(), time.Now())(response)
+	}()
+
+	select {
+	case err := <-observed:
+		if err != nil {
+			t.Fatalf("observe(180) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the response path waited for the ringing callback")
+	}
+}
+
+func TestStreamDialerRingingWithoutCallback(t *testing.T) {
+	response := sip.NewResponseFromRequest(testInviteRequest(), sip.StatusRinging, "Ringing", nil)
+
+	if err := testDialer(nil).observeStreamResponses(context.Background(), time.Now())(response); err != nil {
+		t.Fatalf("observe(180) error = %v", err)
+	}
+}
+
 func TestRegistrationLoopRefreshesAndStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

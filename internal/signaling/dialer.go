@@ -72,6 +72,7 @@ type streamDialer struct {
 	transport         string
 	logger            *slog.Logger
 	remoteDialogEnded func()
+	streamRinging     func()
 	keepalivePort     int
 	keepaliveInterval time.Duration
 	callbackMu        sync.RWMutex
@@ -370,6 +371,14 @@ func (d *streamDialer) SetRemoteDialogEnded(callback func()) {
 	d.callbackMu.Unlock()
 }
 
+// SetStreamRinging assigns what runs when the far end of the sole outgoing stream
+// says it has the call: on a fresh goroutine, as the responses must keep coming.
+func (d *streamDialer) SetStreamRinging(callback func()) {
+	d.callbackMu.Lock()
+	d.streamRinging = callback
+	d.callbackMu.Unlock()
+}
+
 // Register announces this persistent Companion SIP endpoint to Flexisip.
 // Registration failure is non-fatal so media startup can report its own failure.
 func (d *streamDialer) Register(ctx context.Context) error {
@@ -514,19 +523,7 @@ func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (Outgoi
 		return nil, fmt.Errorf("outgoing invite: %w", err)
 	}
 
-	onResponse := func(res *sip.Response) error {
-		d.logger.InfoContext(ctx, "sip stream response",
-			"status", res.StatusCode,
-			"reason", res.Reason,
-			"elapsed", time.Since(sentAt),
-			"server", responseAgent(res),
-			"reason_header", headerValue(res, "Reason"),
-			"warning", headerValue(res, "Warning"))
-
-		return nil
-	}
-
-	if err := dialog.WaitAnswer(callCtx, sipgo.AnswerOptions{OnResponse: onResponse, Username: d.authUser, Password: d.authPass}); err != nil {
+	if err := dialog.WaitAnswer(callCtx, sipgo.AnswerOptions{OnResponse: d.observeStreamResponses(ctx, sentAt), Username: d.authUser, Password: d.authPass}); err != nil {
 		_ = dialog.Close()
 		return nil, fmt.Errorf("wait for invite answer: %w", err)
 	}
@@ -546,6 +543,35 @@ func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (Outgoi
 	d.logger.InfoContext(ctx, "sip stream established", "elapsed", time.Since(sentAt))
 
 	return outgoingDialog{dialog: dialog, logger: d.logger}, nil
+}
+
+// observeStreamResponses returns what sees every response to a stream's INVITE.
+func (d *streamDialer) observeStreamResponses(ctx context.Context, sentAt time.Time) func(*sip.Response) error {
+	return func(res *sip.Response) error {
+		d.logger.InfoContext(ctx, "sip stream response",
+			"status", res.StatusCode,
+			"reason", res.Reason,
+			"elapsed", time.Since(sentAt),
+			"server", responseAgent(res),
+			"reason_header", headerValue(res, "Reason"),
+			"warning", headerValue(res, "Warning"))
+
+		if res.IsProvisional() && res.StatusCode != sip.StatusTrying {
+			d.notifyStreamRinging()
+		}
+
+		return nil
+	}
+}
+
+func (d *streamDialer) notifyStreamRinging() {
+	d.callbackMu.RLock()
+	callback := d.streamRinging
+	d.callbackMu.RUnlock()
+
+	if callback != nil {
+		go callback()
+	}
 }
 
 // responseAgent names the software that sent a response, so a log can tell the
