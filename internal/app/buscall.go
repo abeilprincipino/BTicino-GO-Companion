@@ -61,21 +61,24 @@ func (b *busCall) take() (callType, called string, ok bool) {
 }
 
 // endBusCall closes the call still open on the bus, for every device, the
-// indoor unit included. It does nothing when the bus has already ended it.
-func endBusCall(control *openwebnet.Control, call *busCall, logger *slog.Logger) {
+// indoor unit included, and reports whether the bus took the frame. It does
+// nothing when the bus has already ended the call.
+func endBusCall(ctx context.Context, control *openwebnet.Control, call *busCall, logger *slog.Logger) bool {
 	callType, called, ok := call.take()
 	if !ok {
 		logger.Debug("bus call end skipped; no call open on the bus")
-		return
+		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), busCallEndTimeout)
+	ctx, cancel := context.WithTimeout(ctx, busCallEndTimeout)
 	defer cancel()
 
 	if err := control.EndCall(ctx, callType, called); err != nil {
 		logger.Warn("bus call end failed", "call_type", callType, "called", called, "error", err)
-		return
+		return false
 	}
 
 	logger.Info("bus call end sent", "call_type", callType, "called", called)
+
+	return true
 }
