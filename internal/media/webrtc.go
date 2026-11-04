@@ -24,6 +24,10 @@ const (
 	maxPendingSessionCandidates = 64
 	webrtcICEPort               = 8555
 	webrtcSourceStartupTimeout  = 15 * time.Second
+	// webrtcAnswerGatheringWait bounds how long the answer waits for local ICE
+	// candidates. Host candidates take milliseconds; a lost STUN reply or a slow
+	// DNS lookup takes 5 s, with the card showing a black picture all along.
+	webrtcAnswerGatheringWait = 1500 * time.Millisecond
 )
 
 var (
@@ -280,6 +284,8 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 			if lease != nil {
 				go s.coordinator.ReplayKeyframe(lease)
 			}
+
+			go s.logSelectedCandidatePair(pc, sessionID, entrypointID)
 		}
 
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
@@ -308,6 +314,10 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 		go s.forwardBackchannel(session, track)
 	})
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String())
+		}
+
 		if session.onLocalCandidate == nil {
 			return
 		}
@@ -369,10 +379,13 @@ func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSes
 	lifecycleCtx := context.WithoutCancel(ctx)
 	startupCtx, startupCancel := context.WithTimeout(ctx, webrtcSourceStartupTimeout)
 	lease, err := s.coordinator.AcquireRingingPreview(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
-		VideoRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
-		AudioRTP:  func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
-		RemoteBYE: func() { s.closeSession(session.id, "remote SIP BYE") },
-		Failed:    func(error) { s.closeSession(session.id, "source failure") },
+		VideoRTP: func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
+		AudioRTP: func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
+		// Both run on the path that delivers the call events, and closing a peer
+		// connection waits for its ICE gathering: closing inline would hold back
+		// every later event, such as the INVITE of a ring restarted meanwhile.
+		RemoteBYE: func() { go s.closeSession(session.id, "remote SIP BYE") },
+		Failed:    func(error) { go s.closeSession(session.id, "source failure") },
 	})
 
 	startupCancel()
@@ -405,11 +418,18 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 		return "", err
 	}
 
-	select {
-	case <-gatheringComplete:
-	case <-ctx.Done():
-		s.closeSession(sessionID, "local ICE gathering timed out")
-		return "", ctx.Err()
+	// A trickling client gets every candidate through the callback, so its answer
+	// needs no wait. Any other client only gets those in the answer.
+	if session.onLocalCandidate == nil {
+		complete, err := waitForGathering(ctx, gatheringComplete, webrtcAnswerGatheringWait)
+		if err != nil {
+			s.closeSession(sessionID, "local ICE gathering timed out")
+			return "", err
+		}
+
+		if !complete {
+			s.logger.DebugContext(ctx, "webrtc answer sent before ICE gathering completed", "session_id", sessionID, "entrypoint_id", entrypointID, "waited", webrtcAnswerGatheringWait)
+		}
 	}
 
 	local := session.pc.LocalDescription()
@@ -422,6 +442,24 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 
 	return local.SDP, nil
+}
+
+// waitForGathering reports whether ICE gathering completed within limit. When it
+// did not, the local description holds the candidates gathered so far and later
+// ones never reach a client that does not trickle: off the LAN it can then fail
+// to connect, which on the LAN the host candidates prevent.
+func waitForGathering(ctx context.Context, complete <-chan struct{}, limit time.Duration) (bool, error) {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+
+	select {
+	case <-complete:
+		return true, nil
+	case <-timer.C:
+		return false, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 // Shutdown closes every active peer and releases the shared ICE UDP socket.
@@ -656,8 +694,39 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 	}
 
 	session.appliedCandidates.Add(1)
+	s.logRemoteCandidate(session, candidate.Candidate)
 
 	return nil
+}
+
+// logRemoteCandidate dates a browser's candidate, without its address: a slow
+// connection is either candidates that come late or checks that take long.
+func (s *WebRTCService) logRemoteCandidate(session *webRTCSession, candidate string) {
+	candidateType, protocol, mdns := describeCandidate(candidate)
+	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", candidateType, "protocol", protocol, "mdns", mdns)
+}
+
+// describeCandidate reads a candidate line, "candidate:<foundation> <component>
+// <protocol> <priority> <address> <port> typ <type> ...".
+func describeCandidate(candidate string) (candidateType, protocol string, mdns bool) {
+	fields := strings.Fields(candidate)
+	if len(fields) < 8 {
+		return "", "", false
+	}
+
+	return fields[7], strings.ToLower(fields[2]), strings.HasSuffix(fields[4], ".local")
+}
+
+// logSelectedCandidatePair says which path the connection took: host for a LAN,
+// srflx for a path through NAT, relay for one through TURN.
+func (s *WebRTCService) logSelectedCandidatePair(pc *webrtc.PeerConnection, sessionID, entrypointID string) {
+	pair, err := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Local == nil || pair.Remote == nil {
+		s.logger.Debug("webrtc selected candidate pair unavailable", "session_id", sessionID, "entrypoint_id", entrypointID, "error", err)
+		return
+	}
+
+	s.logger.Info("webrtc candidate pair selected", "session_id", sessionID, "entrypoint_id", entrypointID, "local_type", pair.Local.Typ.String(), "remote_type", pair.Remote.Typ.String(), "protocol", pair.Local.Protocol.String())
 }
 
 func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) error {
@@ -674,6 +743,7 @@ func (s *WebRTCService) flushPendingRemoteCandidates(session *webRTCSession) err
 		}
 
 		session.appliedCandidates.Add(1)
+		s.logRemoteCandidate(session, candidate.Candidate)
 	}
 
 	return nil

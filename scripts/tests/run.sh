@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Logic tests for install.sh and uninstall.sh. Each case runs a copy of the
+# Logic tests for install.sh, uninstall.sh and the Companion init script.
+# Installer/uninstaller cases run a copy of the
 # script with its absolute paths moved under a scratch root and with fake id,
 # mount and init script, so it runs unprivileged under any POSIX sh:
 #   sh scripts/tests/run.sh
@@ -163,7 +164,7 @@ test_uninstall_removes_the_companion() {
 	write_installed_companion
 	run_script
 	check "uninstall exits 0" rc_is 0
-	check "uninstall ends with the OK line" out_has "OK: Companion removed. Restart Flexisip or reboot the intercom."
+	check "uninstall ends with the OK line" out_has "OK: Companion removed. Reboot the intercom."
 	check "uninstall stops the service" grep -qx "init stop" "${R}/init.log"
 	check "uninstall removes the init script" [ ! -e "${R}/etc/init.d/companion" ]
 	check "uninstall removes the boot links" [ ! -e "${R}/etc/rc5.d/S45companion" ] && [ ! -e "${R}/etc/rc5.d/S99zzcompanion" ] && [ ! -e "${R}/etc/rc6.d/K55companion" ]
@@ -262,4 +263,5 @@ test_uninstall_removes_the_legacy_static_route
 test_uninstall_with_an_empty_port_record_prints_no_ports_message
 
 printf '%s passed, %s failed\n' "${PASSED}" "${FAILED}"
+sh "${HERE}/flexisip.sh" || exit 1
 [ "${FAILED}" -eq 0 ]

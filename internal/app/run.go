@@ -151,10 +151,15 @@ func run(
 	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))
 
-	// A call the companion ends, a BYE or a 603, is closed on the bus too.
+	// A call the companion ends, a BYE or a 603, is closed on the bus too. A
+	// ringing call is closed on the bus first, the way the indoor unit's
+	// decline button does, so the intercom cancels every fork itself.
 	call := &busCall{}
 	runtime.calls.SetCallEndObserver(func() {
-		go endBusCall(openWebNetControl, call, logger)
+		go endBusCall(context.Background(), openWebNetControl, call, logger)
+	})
+	runtime.calls.SetBusDecline(func(ctx context.Context) bool {
+		return endBusCall(ctx, openWebNetControl, call, logger)
 	})
 
 	listener := openwebnet.NewListener(configStore.Snapshot().Companion.Entrypoints, logger, openWebNetTrace)
@@ -374,6 +379,9 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	if domain == "" {
 		domain = signaling.DiscoverFlexisipDomain()
 	}
+
+	// Every SIP message goes to the log at debug, to follow how a call ends.
+	signaling.EnableSIPTrace(logger)
 
 	dialer, err := signaling.NewStreamDialer(signaling.StreamDialerConfig{
 		Target:    mediaConfig.Target,

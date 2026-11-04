@@ -996,6 +996,8 @@ type incomingDialog struct {
 	concluded bool
 	// sdp is the body of our 2xx, whose audio key the media keepalive uses.
 	sdp string
+	// withdrawn is closed when endPending claims the dialog; see Withdrawn.
+	withdrawn chan struct{}
 }
 
 var _ IncomingDialog = (*incomingDialog)(nil)
@@ -1219,8 +1221,28 @@ func (d *incomingDialog) endPending() bool {
 	}
 
 	d.concluded = true
+	close(d.withdrawnLocked())
 
 	return true
+}
+
+// Withdrawn is closed once the far end has withdrawn the ringing call, with a
+// CANCEL or a BYE that endPending claimed.
+func (d *incomingDialog) Withdrawn() <-chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.withdrawnLocked()
+}
+
+// withdrawnLocked creates the channel on first use, so a dialog built without
+// it still works. d.mu must be held.
+func (d *incomingDialog) withdrawnLocked() chan struct{} {
+	if d.withdrawn == nil {
+		d.withdrawn = make(chan struct{})
+	}
+
+	return d.withdrawn
 }
 
 // cancelReason reads why the far end withdrew the call. Flexisip forks a

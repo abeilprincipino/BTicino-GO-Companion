@@ -253,8 +253,8 @@ install_init_script() { cp -f "$1" "${INIT_SCRIPT}"; chmod 755 "${INIT_SCRIPT}";
 register_service() {
 	remount_root_rw
 	install_init_script "$1"
-	# S45 starts the companion before S98-bt_daemon-apps.sh, so flexisip is up
-	# before the BTicino stack registers (see do_start in the init script).
+	# S45 starts the companion early; Flexisip is left to the firmware (see
+	# flexisip_fallback in the init script).
 	# S99zz is a second start at the end of boot: a no-op when S45 succeeded, a
 	# retry when it ran before the companion partition was mounted.
 	for runlevel in 2 3 4 5; do
@@ -457,7 +457,7 @@ setup_sip_inbound() {
 			start_service || warn "Could not restart ${SERVICE_NAME}; restart it manually to pick up companion.sip.inbound."
 		fi
 
-		ok "SIP inbound is provisioned. Flexisip may need to be restarted, or the intercom rebooted, before incoming calls reach the companion."
+		ok "SIP inbound is provisioned. The intercom may need a reboot before incoming calls reach the companion."
 	fi
 
 	return 0
