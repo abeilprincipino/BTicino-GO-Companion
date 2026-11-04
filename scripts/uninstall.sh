@@ -251,7 +251,7 @@ main() {
 
 	RUN_FINISHED=1
 	[ "${FAILURES}" -eq 0 ] || { log "Removal finished with ${FAILURES} failure(s)."; exit 1; }
-	ok "Companion removed. Restart Flexisip or reboot the intercom."
+	ok "Companion removed. Reboot the intercom."
 }
 
 main "$@"

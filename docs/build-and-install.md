@@ -196,8 +196,8 @@ Cosa fa, in ordine ([install.sh:395-402](../scripts/install.sh#L395-L402)):
 3. installa `gst/` in `.../companion/gst`, salvando il precedente come `gst.previous`;
 4. copia l'init script in `/etc/init.d/companion` e crea i symlink di boot:
    `S45companion` e `S99zzcompanion` in `rc{2,3,4,5}.d`, `K55companion` in `rc{0,1,6}.d`.
-   `S45` parte prima di `S98-bt_daemon-apps.sh`, così flexisip è su prima che lo stack BTicino si
-   registri; `S99zz` è un secondo avvio a fine boot che riprova se il primo è fallito;
+   `S45` avvia presto il companion; `S99zz` è un secondo avvio a fine boot che riprova se il
+   primo è fallito;
 5. apre il firewall — TCP `8080 80 8554 51826`, UDP `5353 8555` — e prova a rendere le regole
    persistenti patchando `/etc/network/if-pre-up.d/iptables` (se il marker non c'è, `warn` e
    prosegue: le regole resteranno solo fino al reboot);
@@ -251,9 +251,10 @@ SIP `companion` da Flexisip e la cartella `/home/bticino/cfg/extra/companion` (c
 pairing compresi). Delle porte TCP chiude solo quelle che l'installer ha aggiunto e annotato in
 `firewall-added`; sulle installazioni precedenti le lascia aperte con un `WARN:`. Non ripristina i
 `.companion.bak` di Flexisip: annullerebbero le modifiche fatte da BTicino dopo l'installazione.
-Usa lo stesso lock dell'installer. Poi va riavviato Flexisip, o il citofono.
+Usa lo stesso lock dell'installer. Poi va riavviato il citofono.
 
-I test di logica di `install.sh` e `uninstall.sh` girano senza root su qualsiasi `sh` POSIX:
+I test di logica di `install.sh`, `uninstall.sh` e dell'init script girano senza root
+su Linux con `sh` POSIX e `timeout`:
 
 ```sh
 sh scripts/tests/run.sh
@@ -298,16 +299,49 @@ riprovare finché il binario compare.
 
 ### Sequenza di boot
 
-`start` prima di lanciare il companion:
+`start`, prima di lanciare il companion:
 
 1. attende fino a 60 s che `companion` (o `companion.new`) sia eseguibile su
    `/home/bticino/cfg/extra` — quella partizione può essere montata dopo l'init script.
    Override con `COMPANION_BINARY_WAIT_SECONDS`;
-2. attende fino a 30 s l'IP LAN (`wlan0`, poi `eth0`) e avvia `flexisipsh` se il proxy SIP
-   locale non è già in ascolto su `127.0.0.1:5060`. Serve che flexisip sia su **prima** che
-   lo stack BTicino registri, così il c100x registra localmente e il path SIP della camera
-   funziona senza cloud; l'attesa dell'IP ritarda anche `bt_daemon` quanto basta a vincere
-   la race. Il watchdog ripete il controllo flexisip a ogni ciclo.
+2. attende fino a 30 s l'IP LAN (`wlan0`, poi `eth0`): senza una rotta il companion esce subito
+   ([webrtc.go](../internal/media/webrtc.go) sceglie lì l'interfaccia) e ogni tentativo fallito
+   costa circa 16 s.
+
+### Flexisip
+
+Flexisip è del firmware: solo lui può dargli la passphrase del certificato TLS. Il terzo argomento
+di `flexisipsh start` diventa `--p12-passphrase-file`, il firmware passa
+`/var/tmp/bt_answering_machine.fifo` e `bt_answering_machine` vi scrive la passphrase. Il primo
+avvio vince: un Flexisip avviato senza FIFO ascolta su 5060 ma non su 5061, e la registrazione verso
+il cloud fallisce con `Domain registration error … : 503`.
+
+Il watchdog aspetta quindi 60 s dalla comparsa dell'IP LAN, conteggiati su `/proc/uptime` così un
+riavvio del companion non li azzera. A quel punto decide una sola volta per boot, e registra la
+scelta in `/var/run/companion-flexisip-decision`:
+
+- `firmware`: qualcosa ascolta già su `127.0.0.1:5060`, il companion non tocca più Flexisip;
+- `fallback`: non ascolta nessuno, il companion avvia Flexisip senza FIFO perché il SIP locale
+  funzioni. La FIFO non va passata da qui: il
+  [codice di Flexisip](https://github.com/BelledonneCommunications/flexisip/blob/32852e4cef4615a283273373ca9b19e146953348/src/main/flexisip.cc#L403-L415)
+  la legge in modo sincrono e, senza un writer pronto, l'avvio si blocca.
+
+La decisione è unica anche per non anticipare il firmware quando ferma e riavvia Flexisip più
+tardi. Di conseguenza il companion non rialza un Flexisip caduto dopo quel momento.
+
+**Non riavviare Flexisip a mano:** senza FIFO si riproduce il guasto, con la FIFO può bloccarsi.
+Per ricaricare i file di Flexisip va riavviato il citofono.
+
+**Limiti.** Dopo un `fallback` l'app ufficiale torna solo con un reboot, quando il firmware può di
+nuovo avviare Flexisip. L'init script si aggiorna solo rilanciando l'installer, non con
+l'auto-update.
+
+**Evidenze (C100X, 2026-11-03).** Un Flexisip avviato il 25/10 girava come `root`, senza
+`--p12-passphrase-file` e senza 5061. Cinque thread di `bt_answering_machine` erano bloccati su
+`open("/var/tmp/bt_answering_machine.fifo", O_WRONLY)`: il primo era nato nello stesso secondo di
+Flexisip, 3 s dopo `wpa_supplicant`, un altro 8 s dopo un riavvio di `connmand`. Fa pensare che il
+firmware reagisca agli eventi di rete, ma non è stato provato su un boot senza cloud. Un nuovo
+lettore potrebbe sbloccare più thread insieme: anche per questo non c'è una riparazione automatica.
 
 ---
 
@@ -439,7 +473,7 @@ rewritten once the section is on disk.
 
 **Flexisip is not restarted by the installer.** It reads
 `/etc/flexisip/users/*` at startup, so after a successful provisioning run
-(`OK: SIP inbound is provisioned.`) restart Flexisip or reboot the intercom
+(`OK: SIP inbound is provisioned.`) reboot the intercom
 before the forked INVITE reaches the companion. Until then the card shows the
 ring but no Answer button, exactly as if provisioning had not run.
 
