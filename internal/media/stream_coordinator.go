@@ -139,6 +139,8 @@ type acquireMode struct {
 	shareable    bool
 }
 
+var ringingPreviewMode = acquireMode{allowRinging: true, shareable: true}
+
 // streamStart tells consumers joining a stream that its startup is over, and
 // how it went.
 type streamStart struct {
@@ -334,7 +336,14 @@ func (c *StreamCoordinator) AcquireWithStartup(lifecycleCtx, startupCtx context.
 // instead of the second closing the first. See
 // docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
 func (c *StreamCoordinator) AcquireRingingPreview(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
-	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, acquireMode{allowRinging: true, shareable: true})
+	return c.acquire(lifecycleCtx, startupCtx, entrypoint, events, ringingPreviewMode)
+}
+
+// reserveRingingPreview is the first half of AcquireRingingPreview: it decides at
+// once whether the stream can be had, without waiting for the source. The caller
+// must go on with acquireReserved, which is what releases the reservation.
+func (c *StreamCoordinator) reserveRingingPreview(ctx context.Context, entrypoint config.Entrypoint) (reservation, error) {
+	return c.reserve(ctx, entrypoint, ringingPreviewMode)
 }
 
 func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events SourceEvents, mode acquireMode) (*StreamLease, error) {
@@ -343,6 +352,10 @@ func (c *StreamCoordinator) acquire(lifecycleCtx, startupCtx context.Context, en
 		return nil, err
 	}
 
+	return c.acquireReserved(lifecycleCtx, startupCtx, r, entrypoint, events)
+}
+
+func (c *StreamCoordinator) acquireReserved(lifecycleCtx, startupCtx context.Context, r reservation, entrypoint config.Entrypoint, events SourceEvents) (*StreamLease, error) {
 	if r.join {
 		return c.join(lifecycleCtx, startupCtx, r, entrypoint, events)
 	}
