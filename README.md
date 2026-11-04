@@ -89,8 +89,8 @@ In order:
    previous one as `gst.previous`.
 5. Installs `/etc/init.d/companion` and registers the boot symlinks: `S45companion` and
    `S99zzcompanion` in runlevels `2`, `3`, `4`, `5` and `K55companion` in runlevels `0`, `1`, `6`.
-   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`), without starting
-   Flexisip; `S99zz` is a second start at the end of boot that retries a failed one.
+   `S45` starts the companion before the BTicino stack (`S98-bt_daemon-apps.sh`); `S99zz` is a second
+   start at the end of boot that retries a failed one.
 6. Persists firewall access in `/etc/network/if-pre-up.d/iptables`:
 
    | Protocol | Port | Purpose |
@@ -204,7 +204,7 @@ it), so the intercom forks incoming calls to the companion, and enables `compani
 `config.yaml`. Backups of the modified files are kept next to them with a `.companion.bak` suffix.
 
 **Flexisip is not restarted by the installer.** It reads `/etc/flexisip/users/*` at startup, so
-after `OK: SIP inbound is provisioned.` restart Flexisip or reboot the intercom. Until then
+after `OK: SIP inbound is provisioned.` reboot the intercom. Until then
 Home Assistant shows the ring but no Answer button.
 
 > **Known limitation.** Logging out and back in from the BTicino Door Entry app rewrites
@@ -224,10 +224,13 @@ The init script starts a watchdog that checks the process and the health endpoin
 and restarts the companion if it is dead or not responding. `stop` also stops the watchdog.
 
 At boot the init script waits up to 60 seconds for the companion binary on
-`/home/bticino/cfg/extra` to become executable. Flexisip startup and TLS credential handoff are
-left to the BTicino firmware; the companion watchdog only supervises the companion process.
-This avoids racing the firmware or blocking on an unserviced passphrase FIFO. Forced early
-Flexisip startup for cloudless/local-only operation is no longer provided.
+`/home/bticino/cfg/extra` to become executable and up to 30 seconds for the LAN address.
+
+Flexisip is left to the BTicino firmware, the only one that can hand it the TLS passphrase. If
+nothing is listening on the local SIP port 60 seconds after the LAN address appears, the watchdog
+starts Flexisip itself, once per boot, so local SIP keeps working. That proxy has no TLS, so the
+official app needs a reboot to recover once the firmware can start Flexisip again. The choice made
+on this boot is in `/var/run/companion-flexisip-decision` (`firmware` or `fallback`).
 
 ## Updates and Rollback
 
@@ -272,7 +275,7 @@ rules from `/etc/network/if-pre-up.d/iptables`, removes the `companion` SIP user
 deletes `/home/bticino/cfg/extra/companion`, configuration and pairing included. Only the TCP ports
 the installer added are closed: installations made before the installer recorded them keep their TCP
 ports, and the uninstaller says so with a `WARN:` line. It ends with
-`OK: Companion removed. Restart Flexisip or reboot the intercom.` and exits with code `1` if any step
+`OK: Companion removed. Reboot the intercom.` and exits with code `1` if any step
 failed.
 
 ## Contributing

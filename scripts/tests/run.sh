@@ -164,7 +164,7 @@ test_uninstall_removes_the_companion() {
 	write_installed_companion
 	run_script
 	check "uninstall exits 0" rc_is 0
-	check "uninstall ends with the OK line" out_has "OK: Companion removed. Restart Flexisip or reboot the intercom."
+	check "uninstall ends with the OK line" out_has "OK: Companion removed. Reboot the intercom."
 	check "uninstall stops the service" grep -qx "init stop" "${R}/init.log"
 	check "uninstall removes the init script" [ ! -e "${R}/etc/init.d/companion" ]
 	check "uninstall removes the boot links" [ ! -e "${R}/etc/rc5.d/S45companion" ] && [ ! -e "${R}/etc/rc5.d/S99zzcompanion" ] && [ ! -e "${R}/etc/rc6.d/K55companion" ]
