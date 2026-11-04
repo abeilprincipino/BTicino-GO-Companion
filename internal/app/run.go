@@ -421,9 +421,10 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	snapshots := media.NewSnapshotManager(system.CompanionDataDir, logger)
 	ringClips := media.NewRingClipRecorder(system.CompanionDataDir, logger)
 	ringWatch := newRingVideoWatch(logger)
+	gstreamer := media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger)
 
 	rtspServer, err := media.NewRTSPServer(logger, media.DefaultRTSPAddress, initialConfig.Companion.Entrypoints, func(entrypoint config.Entrypoint, events media.SourceEvents) (media.ManagedSource, func(), error) {
-		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, entrypoint, events, snapshots, ringWatch)
+		return newBridgeSource(configStore.Snapshot(), logger, dialer, calls, gstreamer, entrypoint, events, snapshots, ringWatch)
 	})
 	if err != nil {
 		_ = dialer.Close()
@@ -652,7 +653,7 @@ func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Even
 	}
 }
 
-func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager, ringWatch *ringVideoWatch) (media.ManagedSource, func(), error) {
+func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, gstreamer media.GStreamerAudio, entrypoint config.Entrypoint, events media.SourceEvents, snapshots *media.SnapshotManager, ringWatch *ringVideoWatch) (media.ManagedSource, func(), error) {
 	backchannel, err := media.NewUDPBackchannel("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create udp backchannel: %w", err)
@@ -662,7 +663,17 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 
 	var bridge *media.AudioBridge
 
-	source, closeSource, err := newSource(cfg, logger, dialer, calls, entrypoint, ringWatch, func(packet *rtp.Packet) {
+	pipelines := newStreamPipelines(func(ctx context.Context) error {
+		attempt.Start()
+
+		if err := bridge.Start(ctx); err != nil {
+			return fmt.Errorf("start audio bridge: %w", err)
+		}
+
+		return nil
+	})
+
+	source, closeSource, err := newSource(cfg, logger, dialer, calls, entrypoint, ringWatch, pipelines, func(packet *rtp.Packet) {
 		if attempt != nil {
 			attempt.Consume(packet)
 		}
@@ -685,13 +696,17 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 		return nil, nil, err
 	}
 
-	bridge = media.NewAudioBridge(media.NewGStreamerAudioBridge(filepath.Join(system.CompanionDataDir, "gst"), logger), events.AudioRTP, backchannel, logger, events.Failed)
+	bridge = media.NewAudioBridge(gstreamer, events.AudioRTP, backchannel, logger, events.Failed)
 
-	return &bridgeSource{source: source, bridge: bridge, markRing: func() {
+	markRing := func() {
 		if attempt != nil {
 			attempt.MarkRing()
 		}
-	}}, func() {
+	}
+
+	return &bridgeSource{source: source, bridge: bridge, pipelines: pipelines, markRing: markRing}, func() {
+		pipelines.close()
+
 		if attempt != nil {
 			attempt.Close()
 		}
@@ -705,8 +720,9 @@ func newBridgeSource(cfg config.Config, logger *slog.Logger, dialer signaling.St
 }
 
 type bridgeSource struct {
-	source *media.SourceSession
-	bridge *media.AudioBridge
+	source    *media.SourceSession
+	bridge    *media.AudioBridge
+	pipelines *streamPipelines
 	// markRing makes the snapshot taken from this source the doorbell picture.
 	markRing func()
 }
@@ -751,12 +767,13 @@ func (s *bridgeSource) Answered(ctx context.Context) error {
 }
 
 func (s *bridgeSource) Start(ctx context.Context) error {
-	if err := s.bridge.Start(ctx); err != nil {
-		return fmt.Errorf("start audio bridge: %w", err)
-	}
+	s.pipelines.arm(ctx)
 
 	if err := s.source.Start(ctx); err != nil {
+		s.pipelines.close()
+
 		_ = s.bridge.StopContext(ctx)
+
 		return err
 	}
 
@@ -764,6 +781,8 @@ func (s *bridgeSource) Start(ctx context.Context) error {
 }
 
 func (s *bridgeSource) Close(ctx context.Context) error {
+	s.pipelines.close()
+
 	err := s.source.Close(ctx)
 	if bridgeErr := s.bridge.StopContext(ctx); bridgeErr != nil && err == nil {
 		err = bridgeErr
@@ -776,7 +795,7 @@ func (s *bridgeSource) WriteBackchannelRTP(packet *rtp.Packet) error {
 	return s.bridge.WriteBackchannelOpus(packet)
 }
 
-func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, ringWatch *ringVideoWatch, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
+func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDialer, calls *signaling.Manager, entrypoint config.Entrypoint, ringWatch *ringVideoWatch, pipelines *streamPipelines, videoPacket, audioPacket func(*rtp.Packet), remoteBYE func()) (*media.SourceSession, func(), error) {
 	sourceConfig, err := media.ResolveSourceConfig(cfg.Companion.Model, entrypoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve media source: %w", err)
@@ -813,12 +832,17 @@ func newSource(cfg config.Config, logger *slog.Logger, dialer signaling.StreamDi
 		return nil, nil, errors.New("sip runtime does not support remote bye callback")
 	}
 
+	// A failure here comes back from the AV request, which ends the call properly.
+	if callbackSetter, ok := dialer.(interface{ SetStreamRinging(func()) }); ok {
+		callbackSetter.SetStreamRinging(func() { _ = pipelines.start() })
+	}
+
 	source = media.NewSourceSession(
 		logger,
 		sourceConfig,
 		core.EntrypointID(entrypoint.ID),
 		calls,
-		ringWatch.sourceAV(openwebnet.NewAVClient(logger)),
+		pipelineAV{SourceAV: ringWatch.sourceAV(openwebnet.NewAVClient(logger)), pipelines: pipelines},
 		// Video flows from the first packet, before the AV activation reports
 		// the stream started: the intercom opens it with its only keyframe for
 		// about a second, and the snapshot and the ring clip need that one.

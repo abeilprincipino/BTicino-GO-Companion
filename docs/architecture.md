@@ -297,6 +297,10 @@ reports ownership back as `preview.started` / `preview.stopped`.
   connected by loopback UDP. Downlink: Speex → L16 with the system GStreamer, L16 → Opus 48 kHz with
   the bundled one. Uplink: Opus → L16 (bundle), L16 → Speex (system), then
   [`UDPBackchannel`](../internal/media/backchannel.go) sends it to the intercom on `127.0.0.1:4000`.
+- **When they start** ([`pipelines.go`](../internal/app/pipelines.go)): the intercom has one core, so
+  the audio bridge and the snapshot decoder wait for the intercom's 180 on an on-demand stream, or for
+  the AV request if no 180 comes. Started before the INVITE, they held the firmware back by ~0.9 s. A
+  ringing preview dials nothing and starts them at its video request.
 - **Snapshot** ([`snapshot.go`](../internal/media/snapshot.go)): passive — it never takes a lease. It
   depacketizes H.264, feeds the first keyframe to `/usr/bin/gst-launch-1.0 … h264parse ! imxvpudec !
   jpegenc` and writes `snapshots/<id>.jpg`, plus `snapshots/ring/<id>.jpg` when the stream was born
