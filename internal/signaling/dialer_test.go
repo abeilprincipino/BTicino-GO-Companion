@@ -128,40 +128,113 @@ func TestStreamDialerRingingWithoutCallback(t *testing.T) {
 	}
 }
 
-func TestRegistrationLoopRefreshesAndStopsOnCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// testRegistration runs a registration whose REGISTERs land on calls, and
+// returns a stop that waits for it to end.
+func testRegistration(t *testing.T, refresh time.Duration, connected func() bool, fail func(int) error) (calls chan int, stop func()) {
+	t.Helper()
 
-	calls := make(chan struct{}, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	calls = make(chan int, 16)
 	done := make(chan struct{})
+	count := 0
 
 	go func() {
-		registrationLoop(ctx, time.Millisecond, time.Millisecond, time.Second, func(context.Context) error {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
+		defer close(done)
 
-			return nil
-		})
-		close(done)
+		registration{
+			register: func(context.Context) error {
+				count++
+				calls <- count
+
+				if fail != nil {
+					return fail(count)
+				}
+
+				return nil
+			},
+			connected: connected,
+			refresh:   refresh,
+			check:     5 * time.Millisecond,
+			timeout:   time.Second,
+			retryMax:  20 * time.Millisecond,
+			logger:    slog.New(slog.DiscardHandler),
+		}.run(ctx)
 	}()
 
-	for range 2 {
+	return calls, func() {
+		cancel()
+
 		select {
-		case <-calls:
+		case <-done:
 		case <-time.After(time.Second):
-			t.Fatal("registration was not refreshed")
+			t.Fatal("registration did not stop after cancellation")
 		}
 	}
+}
 
-	cancel()
+func waitRegister(t *testing.T, calls chan int, within time.Duration, why string) {
+	t.Helper()
 
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("registration loop did not stop after cancellation")
+	case <-calls:
+	case <-time.After(within):
+		t.Fatal(why)
 	}
+}
+
+func TestRegistrationRefreshesAndStopsOnCancellation(t *testing.T) {
+	calls, stop := testRegistration(t, 10*time.Millisecond, nil, nil)
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+	waitRegister(t, calls, time.Second, "registration was not refreshed")
+}
+
+// Flexisip keeps its registrations in memory: when the firmware restarts it,
+// the companion is unknown until it registers again. Seen on a C100X on
+// 2026-11-05: Flexisip closed the connection at 20:38:30 and the companion
+// registered again only at its 590 s refresh, 20:41:43.
+func TestRegistrationRegistersAgainWhenTheConnectionCloses(t *testing.T) {
+	var mu sync.Mutex
+
+	open := true
+	connected := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return open
+	}
+
+	calls, stop := testRegistration(t, time.Hour, connected, nil)
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+
+	select {
+	case <-calls:
+		t.Fatal("registered again with the connection still open")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mu.Lock()
+	open = false
+	mu.Unlock()
+
+	waitRegister(t, calls, time.Second, "did not register again after the connection closed")
+}
+
+func TestRegistrationRetriesAFailure(t *testing.T) {
+	calls, stop := testRegistration(t, time.Hour, nil, func(count int) error {
+		if count == 1 {
+			return errors.New("flexisip not up yet")
+		}
+
+		return nil
+	})
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+	waitRegister(t, calls, time.Second, "a failed registration was not retried")
 }
 
 func TestWaitForDialogEnd(t *testing.T) {
