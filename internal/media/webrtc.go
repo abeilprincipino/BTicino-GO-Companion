@@ -360,6 +360,8 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 		s.logger.Debug("webrtc backchannel track received", "session_id", sessionID, "entrypoint_id", entrypointID, "codec", track.Codec().MimeType, "payload_type", track.PayloadType(), "ssrc", track.SSRC())
 		go s.forwardBackchannel(session, track)
 	})
+	publicMux := &publicMuxAnnouncer{}
+
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String())
@@ -381,6 +383,18 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 			SDPMLineIndex:    candidateJSON.SDPMLineIndex,
 			UsernameFragment: candidateJSON.UsernameFragment,
 		})
+
+		// A router forward of the mux port to the intercom makes this one reachable
+		// from outside the LAN; without it, its checks fail and nothing changes.
+		if derived, ok := publicMux.derive(candidateJSON.Candidate); ok {
+			s.logger.Debug("webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "trickle")
+			trickle.Candidate(&ICECandidate{
+				Candidate:        derived,
+				SDPMid:           candidateJSON.SDPMid,
+				SDPMLineIndex:    candidateJSON.SDPMLineIndex,
+				UsernameFragment: candidateJSON.UsernameFragment,
+			})
+		}
 	})
 
 	if err := s.addOutboundTracks(session, entrypointID); err != nil {
@@ -503,10 +517,20 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 		return "", errors.New("media: local WebRTC answer is unavailable")
 	}
 
+	// A trickling client already got every derived candidate through the callback.
+	answerSDP := local.SDP
+
+	if session.trickle == nil {
+		answerSDP = withPublicMuxCandidates(answerSDP)
+		if answerSDP != local.SDP {
+			s.logger.DebugContext(ctx, "webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "answer")
+		}
+	}
+
 	s.logNegotiatedMedia(ctx, session)
 	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 
-	return local.SDP, nil
+	return answerSDP, nil
 }
 
 // waitForGathering reports whether ICE gathering completed within limit. When it
