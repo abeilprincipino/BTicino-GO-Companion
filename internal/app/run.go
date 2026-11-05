@@ -10,6 +10,7 @@ import (
 	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
+	"bticino-go-companion/internal/ringersync"
 	"bticino-go-companion/internal/signaling"
 	"bticino-go-companion/internal/system"
 	"bticino-go-companion/internal/webui"
@@ -494,13 +495,27 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		return nil, fmt.Errorf("create homekit manager: %w", err)
 	}
 
-	homeKit.SetControllers(control, control, control)
+	// The display ignores an unmute it sees on the bus, so an unmute from Home
+	// Assistant or HomeKit is followed by a firmware reload once the intercom is
+	// idle. See internal/ringersync.
+	ringer := ringersync.New(ringersync.Config{
+		Audio:  control,
+		Muted:  func() bool { return projector.Snapshot().Audio.Muted },
+		Busy:   func() bool { return intercomBusy(projector.Snapshot()) },
+		Reload: ringersync.NewFirmwareReloader().Reload,
+		Delay:  ringerReloadDelay,
+		Poll:   ringerReloadPoll,
+		Logger: logger.With("component", "ringersync"),
+	})
+	go ringer.Run(ctx)
+
+	homeKit.SetControllers(control, ringer, control)
 	homeKit.SetStreamCoordinator(rtspServer.Coordinator())
 	homeKit.SetSnapshotProvider(snapshots)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
 	server.SetEntrypoints(control)
-	server.SetAudio(control)
+	server.SetAudio(ringer)
 	server.SetVoicemail(control)
 	server.SetWebRTC(webrtc)
 	server.SetSnapshot(snapshots)
@@ -538,6 +553,19 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		calls:             calls,
 		inboundSIP:        sipConfig.Inbound,
 	}, nil
+}
+
+const (
+	// ringerReloadDelay lets a burst of mute toggles settle into one reload.
+	ringerReloadDelay = 10 * time.Second
+	ringerReloadPoll  = 5 * time.Second
+)
+
+// intercomBusy reports a ring, a call or a stream: a firmware reload would cut
+// it.
+func intercomBusy(state core.State) bool {
+	return state.CallState != core.CallStateIdle || state.PhysicalRing != nil || state.IncomingCall != nil ||
+		state.ActiveCall != nil || state.PreviewStream != nil
 }
 
 func (r *applicationRuntime) close(logger *slog.Logger) {
