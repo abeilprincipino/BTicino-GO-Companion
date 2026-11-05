@@ -517,7 +517,7 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 		return "", errors.New("media: local WebRTC answer is unavailable")
 	}
 
-	// A trickling client already got every derived candidate through the callback.
+	// A trickling client gets every derived candidate through the callback.
 	answerSDP := local.SDP
 
 	if session.trickle == nil {

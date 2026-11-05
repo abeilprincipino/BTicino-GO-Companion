@@ -127,6 +127,11 @@ func TestWithPublicMuxCandidates(t *testing.T) {
 			want: join("\n", header, video, []string{host, "a=end-of-candidates"}),
 		},
 		{
+			name: "attribute without the candidate prefix is unchanged",
+			in:   join("\n", header, video, []string{"a=1 1 udp 1694498815 203.0.113.7 51234 typ srflx"}),
+			want: join("\n", header, video, []string{"a=1 1 udp 1694498815 203.0.113.7 51234 typ srflx"}),
+		},
+		{
 			name: "one srflx",
 			in:   join("\n", header, video, []string{host, srflx, "a=end-of-candidates"}),
 			want: join("\n", header, video, []string{host, srflx, derived, "a=end-of-candidates"}),

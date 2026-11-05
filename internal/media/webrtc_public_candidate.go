@@ -143,8 +143,8 @@ func withPublicMuxCandidates(sdp string) string {
 
 		out = append(out, line)
 
-		attribute, isAttribute := strings.CutPrefix(line, "a=")
-		if !isAttribute {
+		attribute, isCandidate := strings.CutPrefix(line, "a=")
+		if !isCandidate || !strings.HasPrefix(attribute, iceCandidatePrefix) {
 			continue
 		}
 
