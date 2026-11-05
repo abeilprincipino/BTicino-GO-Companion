@@ -33,15 +33,18 @@ type Server struct {
 	audio            AudioControl
 	voicemail        VoicemailControl
 	refreshVoicemail func(context.Context) (bool, error)
-	clients          clientSet
-	webrtcClients    clientSet
-	webrtc           WebRTCControl
-	snapshot         SnapshotControl
-	ringClips        RingClipControl
-	runtime          RuntimeControl
-	update           UpdateControl
-	call             CallControl
-	diagnostics      interface {
+	// applyEvent publishes a change a command has just had confirmed, through
+	// the same path as the bus events; see SetEventSink.
+	applyEvent    func(core.Event)
+	clients       clientSet
+	webrtcClients clientSet
+	webrtc        WebRTCControl
+	snapshot      SnapshotControl
+	ringClips     RingClipControl
+	runtime       RuntimeControl
+	update        UpdateControl
+	call          CallControl
+	diagnostics   interface {
 		Snapshot() diagnostics.Snapshot
 		Refresh(context.Context)
 	}
@@ -62,12 +65,18 @@ func (s *Server) SetVoicemail(v VoicemailControl)    { s.voicemail = v }
 func (s *Server) SetVoicemailRefresh(refresh func(context.Context) (bool, error)) {
 	s.refreshVoicemail = refresh
 }
-func (s *Server) SetWebRTC(v WebRTCControl)      { s.webrtc = v }
-func (s *Server) SetSnapshot(v SnapshotControl)  { s.snapshot = v }
-func (s *Server) SetRingClips(v RingClipControl) { s.ringClips = v }
-func (s *Server) SetRuntime(v RuntimeControl)    { s.runtime = v }
-func (s *Server) SetUpdate(v UpdateControl)      { s.update = v }
-func (s *Server) SetCall(v CallControl)          { s.call = v }
+
+// SetEventSink gives the server the composition root's event applier, which
+// updates the state and broadcasts it. A command's handler applies the change
+// as soon as the intercom confirms it: the bus frame that repeats it can come
+// after the handler's own broadcast, and clients would keep the old state.
+func (s *Server) SetEventSink(apply func(core.Event)) { s.applyEvent = apply }
+func (s *Server) SetWebRTC(v WebRTCControl)           { s.webrtc = v }
+func (s *Server) SetSnapshot(v SnapshotControl)       { s.snapshot = v }
+func (s *Server) SetRingClips(v RingClipControl)      { s.ringClips = v }
+func (s *Server) SetRuntime(v RuntimeControl)         { s.runtime = v }
+func (s *Server) SetUpdate(v UpdateControl)           { s.update = v }
+func (s *Server) SetCall(v CallControl)               { s.call = v }
 func (s *Server) SetDiagnostics(v interface {
 	Snapshot() diagnostics.Snapshot
 	Refresh(context.Context)
