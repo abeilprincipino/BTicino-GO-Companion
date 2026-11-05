@@ -147,6 +147,8 @@ func run(
 		runtime.dialer.SetInboundHandler(runtime.calls)
 	}
 
+	server.SetEventSink(applyEvent)
+
 	refreshVoicemail := newVoicemailRefresher(openWebNetControl, projector, applyEvent)
 	server.SetVoicemailRefresh(refreshVoicemail)
 	rtspServer.Coordinator().SetStateObserver(newStreamStateObserver(projector, applyEvent))

@@ -56,7 +56,7 @@ func (s *Server) muteAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.BroadcastState()
+	s.publishConfirmed(core.AudioMuted{})
 	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
 }
 
@@ -71,8 +71,20 @@ func (s *Server) unmuteAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.BroadcastState()
+	s.publishConfirmed(core.AudioUnmuted{})
 	writeOK(w, http.StatusOK, map[string]any{"state": s.currentPayload()})
+}
+
+// publishConfirmed applies a change the intercom has just confirmed, which
+// also broadcasts the state. Without an event sink it broadcasts the state as
+// it is.
+func (s *Server) publishConfirmed(event core.Event) {
+	if s.applyEvent == nil {
+		s.BroadcastState()
+		return
+	}
+
+	s.applyEvent(event)
 }
 
 func (s *Server) enableVoicemail(w http.ResponseWriter, r *http.Request) { s.setVoicemail(w, r, true) }
