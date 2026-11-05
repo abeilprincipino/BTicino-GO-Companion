@@ -79,8 +79,12 @@ type streamDialer struct {
 	listenerCancel    context.CancelFunc
 	registerCancel    context.CancelFunc
 	registerWG        sync.WaitGroup
-	closeOnce         sync.Once
-	closeErr          error
+	// registrarAddr is where the last successful REGISTER was answered from;
+	// see registrarConnected.
+	registrarMu   sync.Mutex
+	registrarAddr string
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func NewStreamDialer(cfg StreamDialerConfig) (*streamDialer, error) {
@@ -406,96 +410,153 @@ func (d *streamDialer) Register(ctx context.Context) error {
 		return fmt.Errorf("sip: register response status=%d", response.StatusCode)
 	}
 
+	d.registrarMu.Lock()
+	d.registrarAddr = response.Source()
+	d.registrarMu.Unlock()
+
 	return nil
 }
 
 func (d *streamDialer) registrationLoop(ctx context.Context) {
 	defer d.registerWG.Done()
 
-	delay := time.Duration(0)
+	registration{
+		register:  d.Register,
+		connected: d.registrarConnected,
+		refresh:   registerRefreshInterval,
+		check:     registerCheckInterval,
+		timeout:   registerTimeout,
+		retryMax:  registerRetryMaximum,
+		logger:    d.logger,
+	}.run(ctx)
+}
+
+// registrarConnected reports whether the connection the last REGISTER went
+// over is still open. Flexisip keeps its registrations in memory, so when the
+// firmware restarts it — reloading /var/tmp/conf.xml restarts the whole stack —
+// the companion is unknown to it until it registers again, and Flexisip closing
+// that connection is how the restart shows. Over UDP there is no connection to
+// watch, and the refresh alone remains.
+func (d *streamDialer) registrarConnected() bool {
+	if d.ua == nil || (d.transport != "tcp" && d.transport != "tls") {
+		return true
+	}
+
+	d.registrarMu.Lock()
+	addr := d.registrarAddr
+	d.registrarMu.Unlock()
+
+	if addr == "" {
+		return true
+	}
+
+	_, err := d.ua.TransportLayer().GetConnection(d.transport, addr)
+
+	return err == nil
+}
+
+// registration keeps the companion registered: it refreshes before the
+// registration expires, retries a failure with a growing delay, and registers
+// at once when the connection to the registrar has closed.
+type registration struct {
+	register func(context.Context) error
+	// connected reports whether the last registration's connection is still
+	// open; nil means it cannot tell.
+	connected func() bool
+	refresh   time.Duration
+	// check is how often connected is asked, and the first retry delay.
+	check    time.Duration
+	timeout  time.Duration
+	retryMax time.Duration
+	logger   *slog.Logger
+}
+
+func (r registration) run(ctx context.Context) {
+	retry := time.Duration(0)
 	failed := false
 
 	for {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		}
-
-		registerCtx, cancel := context.WithTimeout(ctx, registerTimeout)
-		err := d.Register(registerCtx)
+		registerCtx, cancel := context.WithTimeout(ctx, r.timeout)
+		err := r.register(registerCtx)
 
 		cancel()
 
 		if err != nil {
-			if delay == 0 {
-				delay = registerCheckInterval
+			if retry == 0 {
+				retry = r.check
 			} else {
-				delay = min(delay*2, registerRetryMaximum)
+				retry = min(retry*2, r.retryMax)
 			}
 
-			retryIn := jitter(delay)
-			d.logger.Warn("sip registration failed", "error", err, "retry_in", retryIn)
-
+			retry = jitter(retry, r.retryMax)
+			r.logger.Warn("sip registration failed", "error", err, "retry_in", retry)
 			failed = true
-			delay = retryIn
+
+			if !sleep(ctx, retry) {
+				return
+			}
 
 			continue
 		}
 
 		if failed {
-			d.logger.Info("sip registration recovered")
+			r.logger.Info("sip registration recovered")
 		} else {
-			d.logger.Debug("sip registration succeeded")
+			r.logger.Debug("sip registration succeeded")
 		}
 
+		retry = 0
 		failed = false
-		delay = registerRefreshInterval
+
+		if !r.waitForRenewal(ctx) {
+			return
+		}
 	}
 }
 
-func jitter(delay time.Duration) time.Duration {
+// waitForRenewal returns when the registration is due for a refresh or its
+// connection has closed, and false when ctx ends first.
+func (r registration) waitForRenewal(ctx context.Context) bool {
+	refresh := time.NewTimer(r.refresh)
+	defer refresh.Stop()
+
+	check := time.NewTicker(r.check)
+	defer check.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-refresh.C:
+			return true
+		case <-check.C:
+			if r.connected != nil && !r.connected() {
+				r.logger.Info("sip registrar connection closed, registering again")
+				return true
+			}
+		}
+	}
+}
+
+func sleep(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func jitter(delay, maximum time.Duration) time.Duration {
 	percent := int64(100)
 	if value, err := rand.Int(rand.Reader, big.NewInt(41)); err == nil {
 		percent = 80 + value.Int64()
 	}
 
-	return min(delay*time.Duration(percent)/100, registerRetryMaximum)
-}
-
-func registrationLoop(ctx context.Context, refreshInterval, checkInterval, timeout time.Duration, register func(context.Context) error) {
-	var lastSuccess time.Time
-
-	tryRegister := func() {
-		if !lastSuccess.IsZero() && time.Since(lastSuccess) < refreshInterval {
-			return
-		}
-
-		registerCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		if err := register(registerCtx); err == nil {
-			lastSuccess = time.Now()
-		}
-	}
-
-	tryRegister()
-
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryRegister()
-		}
-	}
+	return min(delay*time.Duration(percent)/100, maximum)
 }
 
 func (d *streamDialer) StartStream(ctx context.Context, _, offer string) (OutgoingDialog, error) {
