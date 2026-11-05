@@ -764,7 +764,16 @@ picks up a new IP by itself when your provider changes it.
 
 This works together with a Cloudflare Tunnel or any other way of reaching Home Assistant: the tunnel
 carries the signaling, the forward carries the video.
+
+The companion learns your public IP from a STUN server in Home Assistant's ICE servers, which
+Home Assistant includes by default. If you replaced them with `web_rtc: ice_servers`, keep at least
+one `stun:` or UDP `turn:` entry.
 ```
+
+In the same edit, from the final review and Task 3 notes:
+- link the "Works when your home line is behind CGNAT" column header to `#is-my-home-line-behind-cgnat`;
+- in the Tailscale bullet, add that the subnet router must advertise the intercom's subnet (on the
+  Home Assistant add-on: its advertise-routes option).
 
 Then commit:
 
