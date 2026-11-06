@@ -287,4 +287,5 @@ before they reach `main` and an official release. See [CONTRIBUTING.md](CONTRIBU
 
 Credits and prior art: this project takes inspiration from the research done in
 [`slyoldfox/c300x-controller`](https://github.com/slyoldfox/c300x-controller) and the BTicino
-community work around it.
+community work around it. The project was originally started by
+[r0bb10](https://github.com/r0bb10).
