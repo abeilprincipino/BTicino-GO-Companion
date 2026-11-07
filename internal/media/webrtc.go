@@ -364,7 +364,8 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String())
+			family, scope := describeAddress(candidate.Address)
+			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String(), "family", family, "scope", scope, "port", candidate.Port)
 		}
 
 		if trickle == nil {
@@ -387,7 +388,8 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 		// A router forward of the mux port to the intercom makes this one reachable
 		// from outside the LAN; without it, its checks fail and nothing changes.
 		if derived, ok := publicMux.derive(candidateJSON.Candidate); ok {
-			s.logger.Debug("webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "trickle")
+			announced := describeCandidate(derived)
+			s.logger.Debug("webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "trickle", "family", announced.family, "scope", announced.scope, "port", announced.port)
 			trickle.Candidate(&ICECandidate{
 				Candidate:        derived,
 				SDPMid:           candidateJSON.SDPMid,
@@ -790,21 +792,11 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 }
 
 // logRemoteCandidate dates a browser's candidate, without its address: a slow
-// connection is either candidates that come late or checks that take long.
+// connection is either candidates that come late or checks that take long, and
+// the family and scope show a path the intercom cannot take (IPv6, for one).
 func (s *WebRTCService) logRemoteCandidate(session *webRTCSession, candidate string) {
-	candidateType, protocol, mdns := describeCandidate(candidate)
-	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", candidateType, "protocol", protocol, "mdns", mdns)
-}
-
-// describeCandidate reads a candidate line, "candidate:<foundation> <component>
-// <protocol> <priority> <address> <port> typ <type> ...".
-func describeCandidate(candidate string) (candidateType, protocol string, mdns bool) {
-	fields := strings.Fields(candidate)
-	if len(fields) < 8 {
-		return "", "", false
-	}
-
-	return fields[7], strings.ToLower(fields[2]), strings.HasSuffix(fields[4], ".local")
+	summary := describeCandidate(candidate)
+	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", summary.typ, "protocol", summary.protocol, "family", summary.family, "scope", summary.scope, "port", summary.port, "mdns", summary.mdns())
 }
 
 // logSelectedCandidatePair says which path the connection took: host for a LAN,
@@ -877,6 +869,7 @@ func (s *WebRTCService) closeSessionWith(sessionID, reason string, dropLease fun
 		audio := session.outboundRTPStats("audio")
 		s.logger.Info("webrtc session closed", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond))
 		s.logger.Debug("webrtc session statistics", "session_id", session.id, "entrypoint_id", session.entrypointID, "peer_connection_state", session.pc.ConnectionState().String(), "ice_connection_state", session.pc.ICEConnectionState().String(), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load(), "video_rtp_packets", video.packets, "video_rtp_payload_bytes", video.payloadBytes, "video_rtp_write_errors", video.writeErrors, "video_rtcp_receiver_reports", video.receiverReports, "video_rtcp_reported_fraction_lost", video.reportedFractionLost, "video_rtcp_reported_total_lost", video.reportedTotalLost, "video_rtcp_reported_last_sequence", video.reportedLastSequence, "video_rtcp_nack_feedback", video.nackFeedback, "video_rtcp_pli_feedback", video.pliFeedback, "audio_rtp_packets", audio.packets, "audio_rtp_payload_bytes", audio.payloadBytes, "audio_rtp_write_errors", audio.writeErrors, "audio_rtcp_receiver_reports", audio.receiverReports, "audio_rtcp_reported_fraction_lost", audio.reportedFractionLost, "audio_rtcp_reported_total_lost", audio.reportedTotalLost, "audio_rtcp_reported_last_sequence", audio.reportedLastSequence, "audio_rtcp_nack_feedback", audio.nackFeedback, "audio_rtcp_pli_feedback", audio.pliFeedback)
+		s.logCandidatePairs(session)
 		_ = session.pc.Close()
 	})
 }
