@@ -60,40 +60,181 @@ func TestStreamDialerSetRemoteDialogEndedReplacesActiveStreamCallback(t *testing
 	}
 }
 
-func TestRegistrationLoopRefreshesAndStopsOnCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// The 100 Trying comes from the proxy within milliseconds, and the 200 OK when the
+// intercom is done: only a provisional from the intercom says it has the call.
+func TestStreamDialerReportsRingingOnlyOnTheFarEndsProvisional(t *testing.T) {
+	dialer := testDialer(nil)
+	rang := make(chan int, 4)
+	statuses := map[int]string{sip.StatusTrying: "Trying", sip.StatusOK: "OK", sip.StatusRinging: "Ringing"}
+	observe := dialer.observeStreamResponses(context.Background(), time.Now())
+	invite := testInviteRequest()
 
-	calls := make(chan struct{}, 2)
-	done := make(chan struct{})
+	dialer.SetStreamRinging(func() { rang <- 1 })
 
-	go func() {
-		registrationLoop(ctx, time.Millisecond, time.Millisecond, time.Second, func(context.Context) error {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
-
-			return nil
-		})
-		close(done)
-	}()
-
-	for range 2 {
-		select {
-		case <-calls:
-		case <-time.After(time.Second):
-			t.Fatal("registration was not refreshed")
+	for _, status := range []int{sip.StatusTrying, sip.StatusOK} {
+		if err := observe(sip.NewResponseFromRequest(invite, status, statuses[status], nil)); err != nil {
+			t.Fatalf("observe(%d) error = %v", status, err)
 		}
 	}
 
-	cancel()
+	select {
+	case <-rang:
+		t.Fatal("a 100 Trying or a 200 OK reported the intercom ringing")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := observe(sip.NewResponseFromRequest(invite, sip.StatusRinging, statuses[sip.StatusRinging], nil)); err != nil {
+		t.Fatalf("observe(180) error = %v", err)
+	}
 
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("registration loop did not stop after cancellation")
+	case <-rang:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the 180 Ringing was not reported")
 	}
+}
+
+// What runs at the 180 can take a while, and the 200 OK must still get through.
+func TestStreamDialerRingingCallbackDoesNotHoldTheResponses(t *testing.T) {
+	dialer := testDialer(nil)
+	release := make(chan struct{})
+
+	defer close(release)
+
+	dialer.SetStreamRinging(func() { <-release })
+
+	observed := make(chan error, 1)
+	response := sip.NewResponseFromRequest(testInviteRequest(), sip.StatusRinging, "Ringing", nil)
+
+	go func() {
+		observed <- dialer.observeStreamResponses(context.Background(), time.Now())(response)
+	}()
+
+	select {
+	case err := <-observed:
+		if err != nil {
+			t.Fatalf("observe(180) error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the response path waited for the ringing callback")
+	}
+}
+
+func TestStreamDialerRingingWithoutCallback(t *testing.T) {
+	response := sip.NewResponseFromRequest(testInviteRequest(), sip.StatusRinging, "Ringing", nil)
+
+	if err := testDialer(nil).observeStreamResponses(context.Background(), time.Now())(response); err != nil {
+		t.Fatalf("observe(180) error = %v", err)
+	}
+}
+
+// testRegistration runs a registration whose REGISTERs land on calls, and
+// returns a stop that waits for it to end.
+func testRegistration(t *testing.T, refresh time.Duration, connected func() bool, fail func(int) error) (calls chan int, stop func()) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls = make(chan int, 16)
+	done := make(chan struct{})
+	count := 0
+
+	go func() {
+		defer close(done)
+
+		registration{
+			register: func(context.Context) error {
+				count++
+				calls <- count
+
+				if fail != nil {
+					return fail(count)
+				}
+
+				return nil
+			},
+			connected: connected,
+			refresh:   refresh,
+			check:     5 * time.Millisecond,
+			timeout:   time.Second,
+			retryMax:  20 * time.Millisecond,
+			logger:    slog.New(slog.DiscardHandler),
+		}.run(ctx)
+	}()
+
+	return calls, func() {
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("registration did not stop after cancellation")
+		}
+	}
+}
+
+func waitRegister(t *testing.T, calls chan int, within time.Duration, why string) {
+	t.Helper()
+
+	select {
+	case <-calls:
+	case <-time.After(within):
+		t.Fatal(why)
+	}
+}
+
+func TestRegistrationRefreshesAndStopsOnCancellation(t *testing.T) {
+	calls, stop := testRegistration(t, 10*time.Millisecond, nil, nil)
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+	waitRegister(t, calls, time.Second, "registration was not refreshed")
+}
+
+// Flexisip keeps its registrations in memory: when the firmware restarts it,
+// the companion is unknown until it registers again. Seen on a C100X on
+// 2026-11-05: Flexisip closed the connection at 20:38:30 and the companion
+// registered again only at its 590 s refresh, 20:41:43.
+func TestRegistrationRegistersAgainWhenTheConnectionCloses(t *testing.T) {
+	var mu sync.Mutex
+
+	open := true
+	connected := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return open
+	}
+
+	calls, stop := testRegistration(t, time.Hour, connected, nil)
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+
+	select {
+	case <-calls:
+		t.Fatal("registered again with the connection still open")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mu.Lock()
+	open = false
+	mu.Unlock()
+
+	waitRegister(t, calls, time.Second, "did not register again after the connection closed")
+}
+
+func TestRegistrationRetriesAFailure(t *testing.T) {
+	calls, stop := testRegistration(t, time.Hour, nil, func(count int) error {
+		if count == 1 {
+			return errors.New("flexisip not up yet")
+		}
+
+		return nil
+	})
+	defer stop()
+
+	waitRegister(t, calls, time.Second, "no first registration")
+	waitRegister(t, calls, time.Second, "a failed registration was not retried")
 }
 
 func TestWaitForDialogEnd(t *testing.T) {

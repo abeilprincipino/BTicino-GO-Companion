@@ -10,7 +10,10 @@ design specs in `docs/superpowers/specs/`, investigations in `docs/analysis/`.
 
 ## Commands
 
-The dev host is Windows; the target is linux/arm. Module path is `bticino-go-companion`, Go 1.26.
+The target is linux/arm. The repo is checked out on both a Windows host and a Linux host; check which
+one you are on before applying the Windows caveats below. Module path is `bticino-go-companion`, Go 1.26.
+On a Linux host the whole suite (`go test ./...`) runs natively, as in CI. If `go` is not on PATH, use
+`docker build --target test .`.
 
 ```sh
 # Build the device binary (auto-updater disabled because BuildReleaseRepo is empty)
@@ -22,7 +25,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -buildvcs=false -trimpath \
 # Type-check the whole tree, tests included, for the real target (works on Windows)
 CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet ./...
 
-# Tests (CI runs go vet ./... and go test ./... on ubuntu-latest)
+# Tests (CI on ubuntu-latest: go vet ./..., go test ./..., scripts/tests/run.sh, ARMv7 build)
 go test ./internal/signaling/...                 # single package
 go test ./internal/core -run TestProjector       # single test
 docker build --target test .                     # full suite in Linux
@@ -54,8 +57,10 @@ restarts the old binary if you replace it any other way). Device log: `/tmp/comp
 
 `internal/app/run.go` is the single composition root: `newRuntime` builds every collaborator and wires
 them through interfaces (e.g. `api.Server.Set*`, see `internal/api/interfaces.go`), `run` starts the
-goroutines. Packages below `app` must not call back up into edge packages; `config`, `core`,
-`openwebnet` and `api` are sink layers.
+goroutines. Only `app` imports `api`; packages below `app` must never import `app` or `api` and reach
+them only through the interfaces `app` wires in. `core` imports nothing internal and `config` only
+`storage`, so both are leaves imported everywhere. Other packages do depend on each other (`api` →
+`media`/`signaling`, `openwebnet` → `media`, `media` → `signaling`); keep new edges acyclic.
 
 **State flow.** OpenWebNet frames (multicast listener) and SIP events become `core.Event`s.
 `core.Projector` is the only state machine and rejects invalid transitions. `newEventApplier` in
@@ -80,6 +85,11 @@ asks for video only, and on answer adds audio via `SourceSession.Answered` witho
 - `fanout` → consumers, with keyframe cache/replay for late joiners; `snapshot` decodes the first IDR
   with a `gst-launch` pipeline; `ringclip` records the ring.
 - `audiobridge`: intercom Speex ↔ Opus via `gst-launch` processes using the bundled GStreamer in `gst/`.
+
+**Ringer sync (`internal/ringersync`).** The display's GUI follows a mute it sees on the bus but ignores
+an unmute, so after an unmute the companion reloads the firmware. That reload stops the whole firmware
+for about 25 s, so it waits until commands have settled and the intercom is idle (no ring, call or
+stream). Treat any change there as able to take down the intercom.
 
 **GStreamer on the device** is 1.12.4: no partial caps filter right after a caps-less `fdsrc`; always
 capture `gst-launch` stderr and exit status in the warning log.

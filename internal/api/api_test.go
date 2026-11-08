@@ -684,6 +684,58 @@ func TestServer_WebRTCTrickleSendsLocalCandidates(t *testing.T) {
 	}
 }
 
+func TestServer_WebRTCTrickleTellsASourceFailure(t *testing.T) {
+	server, _ := newTestServer(t)
+	server.SetWebRTC(&webRTCRecorder{answer: "answer-sdp", sourceFailure: errors.New("sip refused")})
+
+	token, err := server.auth.RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	connection, bufferedReader, _, err := (ws.Dialer{Header: ws.HandshakeHeaderHTTP(http.Header{"Authorization": []string{"Bearer " + token}})}).Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/v3/webrtc/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+
+	reader := io.Reader(connection)
+	if bufferedReader != nil {
+		reader = bufferedReader
+	}
+
+	transport := struct {
+		io.Reader
+		io.Writer
+	}{Reader: reader, Writer: connection}
+
+	if err := wsutil.WriteClientText(connection, []byte(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"bticino_card","offer_sdp":"offer-sdp","trickle":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := wsutil.ReadServerText(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var message Message
+	if err := json.Unmarshal(data, &message); err != nil {
+		t.Fatal(err)
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(message.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	if message.Type != "source_failed" || message.ID != "session-1" || payload["session_id"] != "session-1" || payload["code"] != "source_failed" || payload["message"] != "sip refused" {
+		t.Fatalf("message = %#v, payload = %#v", message, payload)
+	}
+}
+
 func TestServer_VoicemailRefresh(t *testing.T) {
 	server, _ := newTestServer(t)
 	called := false
@@ -1140,14 +1192,19 @@ type webRTCRecorder struct {
 	candidate                         media.ICECandidate
 	localCandidates                   []*media.ICECandidate
 	iceServers                        []media.ICEServer
+	sourceFailure                     error
 }
 
-func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, onLocalCandidate func(*media.ICECandidate)) (string, error) {
+func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, trickle *media.OfferTrickle) (string, error) {
 	r.sessionID, r.entrypointID, r.offerSDP = sessionID, entrypointID, offerSDP
 	r.iceServers = iceServers
-	if onLocalCandidate != nil {
+	if trickle != nil {
 		for _, candidate := range r.localCandidates {
-			onLocalCandidate(candidate)
+			trickle.Candidate(candidate)
+		}
+
+		if r.sourceFailure != nil {
+			trickle.SourceFailed(r.sourceFailure)
 		}
 	}
 

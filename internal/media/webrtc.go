@@ -101,6 +101,7 @@ type WebRTCService struct {
 	sessions          map[string]*webRTCSession
 	pendingCandidates map[string]pendingCandidateBatch
 	closed            bool
+	starts            sync.WaitGroup
 }
 
 type webRTCSession struct {
@@ -119,7 +120,9 @@ type webRTCSession struct {
 	videoRTP             outboundRTPStats
 	audioRTP             outboundRTPStats
 	closeOnce            sync.Once
-	onLocalCandidate     func(*ICECandidate)
+	closed               bool
+	dropLease            func(*StreamLease) bool
+	trickle              *OfferTrickle
 }
 
 type outboundRTPStats struct {
@@ -190,11 +193,26 @@ func NewWebRTCService(coordinator *StreamCoordinator, entrypoints []config.Entry
 	}, nil
 }
 
-// Offer creates an answer that includes every gathered local ICE candidate.
+// OfferTrickle is a client that follows its session on the signaling socket.
+type OfferTrickle struct {
+	// Candidate gets each local candidate, possibly before the answer, and nil
+	// when gathering ends.
+	Candidate func(*ICECandidate)
+	// SourceFailed tells that the stream did not start, possibly before the answer.
+	SourceFailed func(error)
+}
+
+// Offer creates the answer for a session. A client without trickle gets it once
+// the source is up, with the local candidates inside. A trickling client gets it
+// as soon as the stream is reserved: ICE and DTLS run while the intercom starts,
+// and the first frame reaches a connection already up. A stream that cannot be
+// had fails the offer in both cases; a source that fails to start afterwards is
+// told through trickle.SourceFailed.
+//
 // A second session for the same entrypoint joins the stream the first one
 // holds: two devices watch together. See
 // docs/superpowers/specs/2026-10-22-shared-ringing-stream-design.md.
-func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (string, error) {
+func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []ICEServer, trickle *OfferTrickle) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
@@ -211,7 +229,7 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		return "", err
 	}
 
-	session, err := s.newOfferSession(sessionID, entrypointID, iceServers, onLocalCandidate)
+	session, err := s.newOfferSession(sessionID, entrypointID, iceServers, trickle)
 	if err != nil {
 		return "", err
 	}
@@ -221,11 +239,40 @@ func (s *WebRTCService) Offer(ctx context.Context, sessionID, entrypointID, offe
 		return "", err
 	}
 
-	if err := s.startOfferSource(ctx, session, entrypoint, offerSDP); err != nil {
+	reserved, err := s.negotiateOffer(ctx, session, entrypoint, offerSDP)
+	if err != nil {
 		return "", err
 	}
 
+	if trickle == nil {
+		if err := s.startOfferSource(ctx, session, entrypoint, reserved); err != nil {
+			return "", err
+		}
+
+		return s.createOfferAnswer(ctx, session, sessionID, entrypointID)
+	}
+
+	// Started before the answer so that nothing can leave the reservation behind:
+	// a session closed meanwhile drops the lease as soon as the source has one.
+	s.starts.Add(1)
+
+	go func() {
+		defer s.starts.Done()
+
+		s.startTricklingSource(context.WithoutCancel(ctx), session, entrypoint, reserved)
+	}()
+
 	return s.createOfferAnswer(ctx, session, sessionID, entrypointID)
+}
+
+func (s *WebRTCService) startTricklingSource(ctx context.Context, session *webRTCSession, entrypoint config.Entrypoint, reserved reservation) {
+	err := s.startOfferSource(ctx, session, entrypoint, reserved)
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+
+	s.logger.WarnContext(ctx, "webrtc source startup failed", "session_id", session.id, "entrypoint_id", session.entrypointID, "error", err)
+	session.trickle.SourceFailed(err)
 }
 
 func validateOffer(sessionID, entrypointID, offerSDP string, coordinator *StreamCoordinator) error {
@@ -265,13 +312,13 @@ func (s *WebRTCService) prepareOffer(sessionID, entrypointID string) (config.Ent
 	return entrypoint, nil
 }
 
-func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServers []ICEServer, onLocalCandidate func(*ICECandidate)) (*webRTCSession, error) {
+func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServers []ICEServer, trickle *OfferTrickle) (*webRTCSession, error) {
 	pc, err := s.api.NewPeerConnection(rtcConfiguration(iceServers))
 	if err != nil {
 		return nil, err
 	}
 
-	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now(), onLocalCandidate: onLocalCandidate}
+	session := &webRTCSession{id: sessionID, entrypointID: entrypointID, pc: pc, createdAt: time.Now(), trickle: trickle}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.logger.Debug("webrtc peer connection state changed", "session_id", sessionID, "entrypoint_id", entrypointID, "state", state.String())
 
@@ -313,27 +360,43 @@ func (s *WebRTCService) newOfferSession(sessionID, entrypointID string, iceServe
 		s.logger.Debug("webrtc backchannel track received", "session_id", sessionID, "entrypoint_id", entrypointID, "codec", track.Codec().MimeType, "payload_type", track.PayloadType(), "ssrc", track.SSRC())
 		go s.forwardBackchannel(session, track)
 	})
+	publicMux := &publicMuxAnnouncer{}
+
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String())
+			family, scope := describeAddress(candidate.Address)
+			s.logger.Debug("webrtc local candidate gathered", "session_id", sessionID, "entrypoint_id", entrypointID, "type", candidate.Typ.String(), "protocol", candidate.Protocol.String(), "family", family, "scope", scope, "port", candidate.Port)
 		}
 
-		if session.onLocalCandidate == nil {
+		if trickle == nil {
 			return
 		}
 
 		if candidate == nil {
-			session.onLocalCandidate(nil)
+			trickle.Candidate(nil)
 			return
 		}
 
 		candidateJSON := candidate.ToJSON()
-		session.onLocalCandidate(&ICECandidate{
+		trickle.Candidate(&ICECandidate{
 			Candidate:        candidateJSON.Candidate,
 			SDPMid:           candidateJSON.SDPMid,
 			SDPMLineIndex:    candidateJSON.SDPMLineIndex,
 			UsernameFragment: candidateJSON.UsernameFragment,
 		})
+
+		// A router forward of the mux port to the intercom makes this one reachable
+		// from outside the LAN; without it, its checks fail and nothing changes.
+		if derived, ok := publicMux.derive(candidateJSON.Candidate); ok {
+			announced := describeCandidate(derived)
+			s.logger.Debug("webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "trickle", "family", announced.family, "scope", announced.scope, "port", announced.port)
+			trickle.Candidate(&ICECandidate{
+				Candidate:        derived,
+				SDPMid:           candidateJSON.SDPMid,
+				SDPMLineIndex:    candidateJSON.SDPMLineIndex,
+				UsernameFragment: candidateJSON.UsernameFragment,
+			})
+		}
 	})
 
 	if err := s.addOutboundTracks(session, entrypointID); err != nil {
@@ -363,22 +426,34 @@ func (s *WebRTCService) registerSession(session *webRTCSession) error {
 	return nil
 }
 
-func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSession, entrypoint config.Entrypoint, offerSDP string) error {
+// negotiateOffer applies the offer and reserves the stream, all of which takes
+// milliseconds. The source is started by startOfferSource.
+func (s *WebRTCService) negotiateOffer(ctx context.Context, session *webRTCSession, entrypoint config.Entrypoint, offerSDP string) (reservation, error) {
 	if err := session.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}); err != nil {
 		s.closeSession(session.id, "set remote description failed")
-		return err
+		return reservation{}, err
 	}
 
 	if err := s.flushPendingRemoteCandidates(session); err != nil {
 		s.closeSession(session.id, "apply remote candidates failed")
-		return err
+		return reservation{}, err
 	}
 
+	reserved, err := s.coordinator.reserveRingingPreview(context.WithoutCancel(ctx), entrypoint)
+	if err != nil {
+		s.closeSession(session.id, "source startup failed")
+		return reservation{}, err
+	}
+
+	return reserved, nil
+}
+
+func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSession, entrypoint config.Entrypoint, reserved reservation) error {
 	// The signaling request ends after this answer; the source must instead live
 	// until the peer or client explicitly closes the session.
 	lifecycleCtx := context.WithoutCancel(ctx)
 	startupCtx, startupCancel := context.WithTimeout(ctx, webrtcSourceStartupTimeout)
-	lease, err := s.coordinator.AcquireRingingPreview(lifecycleCtx, startupCtx, entrypoint, SourceEvents{
+	lease, err := s.coordinator.acquireReserved(lifecycleCtx, startupCtx, reserved, entrypoint, SourceEvents{
 		VideoRTP: func(packet *rtp.Packet) { s.writeRTP(session, "video", session.videoTrack, packet) },
 		AudioRTP: func(packet *rtp.Packet) { s.writeRTP(session, "audio", session.audioTrack, packet) },
 		// Both run on the path that delivers the call events, and closing a peer
@@ -395,17 +470,23 @@ func (s *WebRTCService) startOfferSource(ctx context.Context, session *webRTCSes
 		return err
 	}
 
-	if !session.setLease(lease) {
-		s.coordinator.Release(lease)
+	if dropLease := session.setLease(lease); dropLease != nil {
+		dropLease(lease)
 		return context.Canceled
+	}
+
+	s.logger.DebugContext(ctx, "webrtc source started", "session_id", session.id, "entrypoint_id", session.entrypointID)
+
+	// The connection came up before the session had this lease, so the replay of
+	// its state change did not happen, and what it sent before was dropped.
+	if session.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+		go s.coordinator.ReplayKeyframe(lease)
 	}
 
 	return nil
 }
 
 func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSession, sessionID, entrypointID string) (string, error) {
-	s.logger.DebugContext(ctx, "webrtc source started", "session_id", sessionID, "entrypoint_id", entrypointID)
-
 	answer, err := session.pc.CreateAnswer(nil)
 	if err != nil {
 		s.closeSession(sessionID, "create answer failed")
@@ -420,7 +501,7 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 
 	// A trickling client gets every candidate through the callback, so its answer
 	// needs no wait. Any other client only gets those in the answer.
-	if session.onLocalCandidate == nil {
+	if session.trickle == nil {
 		complete, err := waitForGathering(ctx, gatheringComplete, webrtcAnswerGatheringWait)
 		if err != nil {
 			s.closeSession(sessionID, "local ICE gathering timed out")
@@ -438,10 +519,20 @@ func (s *WebRTCService) createOfferAnswer(ctx context.Context, session *webRTCSe
 		return "", errors.New("media: local WebRTC answer is unavailable")
 	}
 
+	// A trickling client gets every derived candidate through the callback.
+	answerSDP := local.SDP
+
+	if session.trickle == nil {
+		answerSDP = withPublicMuxCandidates(answerSDP)
+		if answerSDP != local.SDP {
+			s.logger.DebugContext(ctx, "webrtc public mux candidate announced", "session_id", sessionID, "entrypoint_id", entrypointID, "path", "answer")
+		}
+	}
+
 	s.logNegotiatedMedia(ctx, session)
 	s.logger.DebugContext(ctx, "webrtc offer accepted", "session_id", sessionID, "entrypoint_id", entrypointID, "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load())
 
-	return local.SDP, nil
+	return answerSDP, nil
 }
 
 // waitForGathering reports whether ICE gathering completed within limit. When it
@@ -488,6 +579,9 @@ func (s *WebRTCService) Shutdown() error {
 	for _, sessionID := range sessionIDs {
 		s.closeSession(sessionID, "service shutdown")
 	}
+
+	// A startup in progress ends within its budget and then finds its session closed.
+	s.starts.Wait()
 
 	if s.iceConn == nil {
 		return nil
@@ -634,8 +728,6 @@ func (s *WebRTCService) Leave(sessionID string) error {
 }
 
 // AddICECandidate adds a trickled remote candidate to an active session.
-// Offer deliberately remains non-trickle and continues returning a fully
-// gathered answer for existing clients.
 func (s *WebRTCService) AddICECandidate(sessionID string, candidate ICECandidate) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -700,21 +792,11 @@ func (s *WebRTCService) addCandidateToSession(session *webRTCSession, candidate 
 }
 
 // logRemoteCandidate dates a browser's candidate, without its address: a slow
-// connection is either candidates that come late or checks that take long.
+// connection is either candidates that come late or checks that take long, and
+// the family and scope show a path the intercom cannot take (IPv6, for one).
 func (s *WebRTCService) logRemoteCandidate(session *webRTCSession, candidate string) {
-	candidateType, protocol, mdns := describeCandidate(candidate)
-	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", candidateType, "protocol", protocol, "mdns", mdns)
-}
-
-// describeCandidate reads a candidate line, "candidate:<foundation> <component>
-// <protocol> <priority> <address> <port> typ <type> ...".
-func describeCandidate(candidate string) (candidateType, protocol string, mdns bool) {
-	fields := strings.Fields(candidate)
-	if len(fields) < 8 {
-		return "", "", false
-	}
-
-	return fields[7], strings.ToLower(fields[2]), strings.HasSuffix(fields[4], ".local")
+	summary := describeCandidate(candidate)
+	s.logger.Debug("webrtc remote candidate applied", "session_id", session.id, "entrypoint_id", session.entrypointID, "type", summary.typ, "protocol", summary.protocol, "family", summary.family, "scope", summary.scope, "port", summary.port, "mdns", summary.mdns())
 }
 
 // logSelectedCandidatePair says which path the connection took: host for a LAN,
@@ -775,6 +857,8 @@ func (s *WebRTCService) closeSessionWith(sessionID, reason string, dropLease fun
 		session.mu.Lock()
 		lease := session.lease
 		session.lease = nil
+		session.closed = true
+		session.dropLease = dropLease
 		session.mu.Unlock()
 
 		if lease != nil {
@@ -785,6 +869,7 @@ func (s *WebRTCService) closeSessionWith(sessionID, reason string, dropLease fun
 		audio := session.outboundRTPStats("audio")
 		s.logger.Info("webrtc session closed", "session_id", session.id, "entrypoint_id", session.entrypointID, "reason", reason, "duration", time.Since(session.createdAt).Round(time.Millisecond))
 		s.logger.Debug("webrtc session statistics", "session_id", session.id, "entrypoint_id", session.entrypointID, "peer_connection_state", session.pc.ConnectionState().String(), "ice_connection_state", session.pc.ICEConnectionState().String(), "remote_candidates_queued", session.queuedCandidates.Load(), "remote_candidates_applied", session.appliedCandidates.Load(), "video_rtp_packets", video.packets, "video_rtp_payload_bytes", video.payloadBytes, "video_rtp_write_errors", video.writeErrors, "video_rtcp_receiver_reports", video.receiverReports, "video_rtcp_reported_fraction_lost", video.reportedFractionLost, "video_rtcp_reported_total_lost", video.reportedTotalLost, "video_rtcp_reported_last_sequence", video.reportedLastSequence, "video_rtcp_nack_feedback", video.nackFeedback, "video_rtcp_pli_feedback", video.pliFeedback, "audio_rtp_packets", audio.packets, "audio_rtp_payload_bytes", audio.payloadBytes, "audio_rtp_write_errors", audio.writeErrors, "audio_rtcp_receiver_reports", audio.receiverReports, "audio_rtcp_reported_fraction_lost", audio.reportedFractionLost, "audio_rtcp_reported_total_lost", audio.reportedTotalLost, "audio_rtcp_reported_last_sequence", audio.reportedLastSequence, "audio_rtcp_nack_feedback", audio.nackFeedback, "audio_rtcp_pli_feedback", audio.pliFeedback)
+		s.logCandidatePairs(session)
 		_ = session.pc.Close()
 	})
 }
@@ -861,17 +946,20 @@ func (s *WebRTCService) prunePendingCandidatesLocked(now time.Time) {
 	}
 }
 
-func (s *webRTCSession) setLease(lease *StreamLease) bool {
+// setLease gives the session the lease of its started source. A session closed
+// during the startup returns how its close wanted the lease dropped instead: a
+// card that stepped aside must not end the call now that the lease exists.
+func (s *webRTCSession) setLease(lease *StreamLease) func(*StreamLease) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
-		return false
+	if s.closed {
+		return s.dropLease
 	}
 
 	s.lease = lease
 
-	return true
+	return nil
 }
 
 func canonicalizeSDP(raw string) string {

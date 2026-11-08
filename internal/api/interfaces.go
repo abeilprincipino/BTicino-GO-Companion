@@ -39,7 +39,7 @@ type UpdateControl interface {
 }
 
 type WebRTCControl interface {
-	Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, onLocalCandidate func(*media.ICECandidate)) (string, error)
+	Offer(ctx context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, trickle *media.OfferTrickle) (string, error)
 	AddICECandidate(sessionID string, candidate media.ICECandidate) error
 	Close(sessionID string) error
 	Leave(sessionID string) error

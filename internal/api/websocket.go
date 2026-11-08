@@ -247,9 +247,11 @@ type webrtcOfferPayload struct {
 	Origin       string            `json:"origin"`
 	OfferSDP     string            `json:"offer_sdp"`
 	ICEServers   []media.ICEServer `json:"ice_servers"`
-	// Trickle asks for the answer at once and for local candidates as "candidate"
-	// messages on this socket. Without it a client gets exactly one response per
-	// request, with the candidates inside the answer.
+	// Trickle asks for the answer at once, before the source starts, for local
+	// candidates as "candidate" messages on this socket, and for a "source_failed"
+	// message if the source then does not start. Without it a client gets exactly
+	// one response per request, once the source is up, with the candidates inside
+	// the answer.
 	Trickle bool `json:"trickle"`
 }
 
@@ -384,6 +386,17 @@ func (s *Server) webrtcLocalCandidates(c *client, sessionID string) func(*media.
 	}
 }
 
+// webrtcSourceFailed tells a trickling client that its answer will get no stream.
+// The message can come before the answer, and the session is already closed.
+func (s *Server) webrtcSourceFailed(c *client, sessionID string) func(error) {
+	return func(failure error) {
+		message := Message{Type: "source_failed", ID: sessionID, Payload: mustJSON(map[string]string{"session_id": sessionID, "code": "source_failed", "message": failure.Error()})}
+		if err := c.write(message); err != nil {
+			s.logger.Debug("webrtc source failure not sent", "session_id", sessionID, "error", err)
+		}
+	}
+}
+
 func (s *Server) webrtcResponse(ctx context.Context, c *client, message Message, sessionID string) (string, Message) {
 	var response Message
 
@@ -398,13 +411,13 @@ func (s *Server) webrtcResponse(ctx context.Context, c *client, message Message,
 			break
 		}
 
-		var onLocalCandidate func(*media.ICECandidate)
+		var trickle *media.OfferTrickle
 		if payload.Trickle {
-			onLocalCandidate = s.webrtcLocalCandidates(c, payload.SessionID)
+			trickle = &media.OfferTrickle{Candidate: s.webrtcLocalCandidates(c, payload.SessionID), SourceFailed: s.webrtcSourceFailed(c, payload.SessionID)}
 		}
 
 		offerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, payload.ICEServers, onLocalCandidate)
+		answer, offerErr := s.webrtc.Offer(offerCtx, payload.SessionID, payload.EntrypointID, payload.OfferSDP, payload.ICEServers, trickle)
 
 		cancel()
 

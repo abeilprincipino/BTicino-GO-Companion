@@ -104,6 +104,8 @@ type snapshotAttempt struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	packets      chan *rtp.Packet
+	armed        time.Time
+	startOnce    sync.Once
 	closeOnce    sync.Once
 	// ring marks a capture from a stream born as a ringing preview: its picture
 	// is also the doorbell picture.
@@ -141,27 +143,27 @@ func (s *SnapshotManager) SetOnCaptured(callback func()) {
 	s.mu.Unlock()
 }
 
-// Arm starts a background capture for a source that the coordinator already owns.
+// Arm prepares a capture for a source that the coordinator already owns, replacing
+// the one before it. Packets queue from now on, and Start runs the decoder.
 func (s *SnapshotManager) Arm(entrypointID string) *snapshotAttempt {
 	if s == nil || entrypointID == "" || s.runner == nil {
 		return nil
 	}
 
 	s.mu.Lock()
-	if s.active != nil {
-		s.active.Close()
-	}
-
+	previous := s.active
 	s.nextID++
 	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- snapshotAttempt.Close owns cancellation.
 	attempt := &snapshotAttempt{
-		manager: s, entrypointID: entrypointID, id: s.nextID,
+		manager: s, entrypointID: entrypointID, id: s.nextID, armed: time.Now(),
 		ctx: ctx, cancel: cancel, packets: make(chan *rtp.Packet, snapshotPacketBufferSize),
 	}
 	s.active = attempt
 	s.mu.Unlock()
 
-	go attempt.run()
+	// Outside the lock: a capture closed before it started cleans up after itself,
+	// and that takes the lock.
+	previous.Close()
 
 	return attempt
 }
@@ -266,10 +268,23 @@ func (a *snapshotAttempt) Consume(packet *rtp.Packet) {
 	}
 }
 
-func (a *snapshotAttempt) Close() {
+// Start runs the decoder. Its start takes the intercom's only core for a good part
+// of a second, so the source picks the moment; see streamPipelines in internal/app.
+func (a *snapshotAttempt) Start() {
 	if a != nil {
-		a.closeOnce.Do(a.cancel)
+		a.startOnce.Do(func() { go a.run() })
 	}
+}
+
+func (a *snapshotAttempt) Close() {
+	if a == nil {
+		return
+	}
+
+	a.closeOnce.Do(a.cancel)
+	// A capture that never started has no run to clean up after it, and now never
+	// will have one.
+	a.startOnce.Do(a.finish)
 }
 
 // MarkRing makes this capture the doorbell picture too. It is called before the
@@ -285,8 +300,6 @@ func (a *snapshotAttempt) run() {
 
 	ctx, cancel := context.WithTimeout(a.ctx, snapshotCaptureTimeout)
 	defer cancel()
-
-	armed := time.Now()
 
 	process, err := a.manager.runner.Start(ctx)
 	if err != nil {
@@ -309,7 +322,7 @@ func (a *snapshotAttempt) run() {
 			if ok {
 				if a.manager.publish(a, image) {
 					a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
-						"since_arm", time.Since(armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
+						"since_arm", time.Since(a.armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
 						"fed_access_units", fed, "skipped_access_units", accessUnits.skipped,
 						"nal_types_until_keyframe", strings.Join(accessUnits.skippedTypes, " "), "broken_packets", accessUnits.broken)
 				}

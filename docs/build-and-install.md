@@ -439,7 +439,7 @@ Rilevanti solo in modalità download (senza argomento), tranne le ultime due:
 
 | Variabile | Default | Uso |
 |---|---|---|
-| `COMPANION_RELEASE_REPO` | `abeilprincipino/BTicino-GO-Companion` | `r0bb10/BTicino-GO-Companion` per installare dalle release upstream |
+| `COMPANION_RELEASE_REPO` | `abeilprincipino/BTicino-GO-Companion` | repo GitHub da cui scaricare le release (`owner/nome`) |
 | `COMPANION_RELEASE_TAG` | *(vuota → latest)* | tag specifico |
 | `COMPANION_RELEASE_BUNDLE_ASSET` | `companion.tar.gz` | nome asset |
 | `COMPANION_RELEASE_BASE_URL` / `_API` | derivati da repo+tag | mirror o registry alternativo |
