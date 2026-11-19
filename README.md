@@ -18,6 +18,7 @@ and installing a local build see [docs/build-and-install.md](docs/build-and-inst
 - [Installing a Local Build](#installing-a-local-build)
 - [Installer Options](#installer-options)
 - [After Installation](#after-installation)
+- [WebUI behind a reverse proxy](#webui-behind-a-reverse-proxy)
 - [Auxiliary unlock commands](#auxiliary-unlock-commands)
 - [Answering Calls from Home Assistant](#answering-calls-from-home-assistant)
 - [Service Commands](#service-commands)
@@ -185,6 +186,24 @@ Then:
   enabled).
 - In Home Assistant, the companion is discovered over mDNS by
   [BTicino GO Integration](https://github.com/abeilprincipino/BTicino-GO-Integration).
+
+## WebUI behind a reverse proxy
+
+The WebUI can be served through a reverse proxy that terminates HTTPS (Traefik, Caddy, nginx…),
+for example at `https://intercom.example.com` in front of `http://<intercom-ip>:80`.
+
+- The proxy must keep the original `Host` header: Traefik and Caddy do by default, nginx needs
+  `proxy_set_header Host $host;`. The WebUI accepts a request only when the browser's `Origin`
+  names that same host, over `http` or `https`.
+- Keep it on your LAN or VPN. The WebUI is an administration page: it can issue the recovery code
+  that gives access to the doors. Put an IP allow list or an authentication middleware in front of
+  it if the proxy can be reached from anywhere else.
+- After 5 failed logins from one address, logins from that address wait 1 minute, doubling on each
+  further lockout up to 15 minutes. Behind a proxy every client shares the proxy's address and so
+  one budget; direct access on the LAN keeps its own.
+
+The video does not go through the proxy: Home Assistant and HomeKit talk to the API on `:8080` and
+to WebRTC on UDP `8555` directly.
 
 ## Auxiliary unlock commands
 
