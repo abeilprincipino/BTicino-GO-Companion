@@ -69,6 +69,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]session
+	logins   *loginLimiter
 
 	restartMu      sync.Mutex
 	restartPending bool
@@ -123,7 +124,7 @@ func New(store *config.Store, authStore *auth.Store, logger *slog.Logger, restar
 		logger = slog.Default()
 	}
 
-	return &Server{config: store, auth: authStore, logger: logger.With("component", "webui"), restart: restart, reboot: reboot, setLogLevel: setLogLevel, sessions: make(map[string]session), bootTime: time.Now()}
+	return &Server{config: store, auth: authStore, logger: logger.With("component", "webui"), restart: restart, reboot: reboot, setLogLevel: setLogLevel, sessions: make(map[string]session), logins: newLoginLimiter(), bootTime: time.Now()}
 }
 
 func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provider }
@@ -423,6 +424,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	address := loginAddress(r)
+
+	// Checked before the password, so a locked-out address does not cost a
+	// bcrypt comparison either.
+	if wait := s.logins.retryAfter(address); wait > 0 {
+		writeLoginLockout(w, wait)
+		return
+	}
+
 	var request loginRequest
 	if !decodeJSON(w, r, &request) {
 		return
@@ -444,9 +454,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !valid {
+		if lockout := s.logins.fail(address); lockout > 0 {
+			s.logger.Warn("webui login locked out after repeated failures", "client_ip", address, "lockout", lockout)
+		}
+
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
+
 		return
 	}
+
+	s.logins.succeed(address)
 
 	token, err := config.RandomHex(32)
 	if err != nil {
@@ -1021,6 +1038,10 @@ func (s *Server) removeOldestSession() {
 	delete(s.sessions, oldestToken)
 }
 
+// sameOrigin rejects a cross-site request: the browser's Origin must name the
+// host the request was sent to. Both schemes are accepted, so the WebUI also
+// works behind a reverse proxy that terminates HTTPS and keeps the Host header
+// (the default of Traefik, Caddy and nginx's proxy_set_header Host $host).
 func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -1028,7 +1049,7 @@ func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	}
 
 	parsed, err := url.Parse(origin)
-	if err == nil && parsed.Scheme == "http" && parsed.Host == r.Host {
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host == r.Host {
 		return true
 	}
 
@@ -1062,8 +1083,9 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string) {
-	// The WebUI is intentionally LAN-only HTTP, so Secure cookies would be
-	// discarded by browsers and make every post-login request unauthenticated.
+	// The WebUI is served over plain HTTP on the LAN, where browsers discard
+	// Secure cookies and every post-login request would be unauthenticated.
+	// Behind a reverse proxy the companion still sees HTTP, so it cannot tell.
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionIdle.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 
