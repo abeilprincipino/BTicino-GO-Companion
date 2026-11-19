@@ -79,6 +79,61 @@ func TestMapperGivesEveryRingToTheDoorbellEntrypoint(t *testing.T) {
 	}
 }
 
+func TestMapperGivesEachRingToTheDoorbellAtItsAddress(t *testing.T) {
+	// Two external units with a camera, as on a C100X with units at 21 and
+	// 213, and a lock sharing address 22 with nothing that rings.
+	entrypoints := []config.Entrypoint{
+		{ID: "portal6", DevAddr: "213", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "cancello", DevAddr: "22", Capabilities: config.Capabilities{Unlock: true}},
+	}
+
+	tests := []struct {
+		frame string
+		want  core.EntrypointID
+	}{
+		{frame: "*8*1#1#4#21*110##", want: "portal0"},
+		{frame: "*8*1#1#4#213*110##", want: "portal6"},
+		// 22 belongs to a lock, which cannot ring: the first doorbell in
+		// configuration order gets it rather than the ring being dropped.
+		{frame: "*8*1#1#4#22*110##", want: "portal6"},
+		{frame: "*8*1#1#4#99*110##", want: "portal6"},
+	}
+
+	for _, test := range tests {
+		events := NewMapper(entrypoints).Map(Message{System: "OPEN", Raw: test.frame})
+		if len(events) != 1 {
+			t.Fatalf("%s: events = %d, want 1", test.frame, len(events))
+		}
+
+		if ring, ok := events[0].(core.RingStarted); !ok || ring.EntrypointID != test.want {
+			t.Fatalf("%s: event = %#v, want RingStarted for %s", test.frame, events[0], test.want)
+		}
+	}
+}
+
+func TestMapperClearsTheRingOfTheDoorbellThatRang(t *testing.T) {
+	entrypoints := []config.Entrypoint{
+		{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "portal6", DevAddr: "213", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+	}
+
+	mapper := NewMapper(entrypoints)
+
+	if events := mapper.Map(Message{System: "OPEN", Raw: "*8*1#1#4#213*110##"}); len(events) != 1 {
+		t.Fatalf("ring events = %d, want 1", len(events))
+	}
+
+	events := mapper.Map(Message{System: "OPEN", Raw: FrameStop})
+	if len(events) != 1 {
+		t.Fatalf("stop events = %d, want 1", len(events))
+	}
+
+	if cleared, ok := events[0].(core.RingCleared); !ok || cleared.EntrypointID != "portal6" {
+		t.Fatalf("stop event = %#v, want RingCleared for portal6", events[0])
+	}
+}
+
 func TestMapperMapsAudioStateFrames(t *testing.T) {
 	mapper := NewMapper(nil)
 

@@ -355,6 +355,10 @@ sequenceDiagram
   fallback ([`ringwatch.go`](../internal/app/ringwatch.go)): asking earlier only got a NACK while the
   intercom was still powering the camera. The watch logs one timeline line per ring
   ([ring snapshot latency](analysis/2026-10-29-ring-snapshot-latency.md)).
+- With one doorbell per external unit, the ring frame `*8*1#1#4#<unit>*<indoor unit>##` names the
+  unit that rang, and the mapper gives the ring to the doorbell at that address (the first doorbell
+  in configuration order when the address matches none). The SIP call carries no address, so it
+  follows the physical ring, whose frame arrives first.
 
 ### Answer and end of call
 

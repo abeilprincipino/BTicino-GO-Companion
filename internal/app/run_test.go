@@ -135,6 +135,29 @@ func TestResolveInboundEntrypointGivesTheCallToTheStreamingEntrypoint(t *testing
 	}
 }
 
+func TestResolveInboundEntrypointGivesTheCallToTheDoorbellThatRang(t *testing.T) {
+	t.Parallel()
+
+	// One doorbell per external unit: the ring frame, which arrives before the
+	// INVITE, names the unit, and the call follows it.
+	entrypoints := []config.Entrypoint{
+		{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "portal6", DevAddr: "213", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+	}
+
+	projector := core.NewProjector()
+	if _, err := projector.Apply(core.RingStarted{EntrypointID: "portal6"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, projector)
+
+	id, devAddr := resolve()
+	if id != "portal6" || devAddr != "213" {
+		t.Fatalf("resolve() = %q/%q, want portal6/213", id, devAddr)
+	}
+}
+
 func TestServeRunsAPIAndWebUI(t *testing.T) {
 	t.Parallel()
 
