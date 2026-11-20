@@ -143,6 +143,7 @@ func run(
 		return runtime.ringWatch.clip(runtime.ringClips.Start(entrypointID))
 	}, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
 	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
+	runtime.snapshots.SetRingLabel(holder.ringLabel)
 
 	if runtime.inboundSIP {
 		runtime.dialer.SetInboundHandler(runtime.calls)
@@ -240,7 +241,8 @@ func run(
 		}
 	}()
 	go func() {
-		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
+		busEvents := routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent)
+		if err := listener.Run(ctx, busEvents); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
 		}
 	}()
@@ -304,6 +306,7 @@ type applicationRuntime struct {
 	homeKit           *homekit.Manager
 	server            *api.Server
 	ringClips         *media.RingClipRecorder
+	snapshots         *media.SnapshotManager
 	ringWatch         *ringVideoWatch
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
@@ -537,6 +540,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	return &applicationRuntime{
 		projector:         projector,
 		ringClips:         ringClips,
+		snapshots:         snapshots,
 		ringWatch:         ringWatch,
 		trace:             trace,
 		control:           control,
@@ -627,6 +631,36 @@ func (f eventSinkFunc) Publish(event core.Event) { f(event) }
 type ringingPreviewCoordinator interface {
 	PromoteRinging()
 	StopRinging()
+}
+
+// ringCallRetargeter is the part of signaling.Manager a moved ring reaches.
+type ringCallRetargeter interface {
+	RetargetIncoming(from, to core.EntrypointID, devAddr string) bool
+}
+
+// routeRingRetarget passes the bus events on to next and, when a ring moves to
+// the entrypoint that rang, moves its call too. The SIP manager publishes the
+// move again, in order with the call's events, and that is what the ring
+// holder follows: a move that races the INVITE is then never lost.
+func routeRingRetarget(calls ringCallRetargeter, entrypoints func() []config.Entrypoint, next func(core.Event)) func(core.Event) {
+	return func(event core.Event) {
+		next(event)
+
+		moved, ok := event.(core.RingRetargeted)
+		if !ok {
+			return
+		}
+
+		var devAddr string
+
+		for _, entrypoint := range entrypoints() {
+			if core.EntrypointID(entrypoint.ID) == moved.To {
+				devAddr = entrypoint.DevAddr
+			}
+		}
+
+		calls.RetargetIncoming(moved.From, moved.To, devAddr)
+	}
 }
 
 // routeRingingPreview lets the call events move a ringing preview along: the

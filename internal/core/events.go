@@ -11,6 +11,7 @@ type EventType string
 const (
 	EventRingStarted          EventType = "ring.started"
 	EventRingCleared          EventType = "ring.cleared"
+	EventRingRetargeted       EventType = "ring.retargeted"
 	EventIncomingCallStarted  EventType = "call.incoming"
 	EventIncomingCallEnded    EventType = "call.incoming_ended"
 	EventCallAnswered         EventType = "call.answered"
@@ -43,6 +44,18 @@ type RingCleared struct {
 
 func (RingCleared) Type() EventType { return EventRingCleared }
 func (RingCleared) event()          {}
+
+// RingRetargeted moves the ring in progress, and the call, preview and stream
+// that belong to it, from one entrypoint to another. A C100X may send a ring
+// frame with one external unit's address and name the unit whose camera rings
+// in a later frame, so the first attribution can be wrong.
+type RingRetargeted struct {
+	From EntrypointID
+	To   EntrypointID
+}
+
+func (RingRetargeted) Type() EventType { return EventRingRetargeted }
+func (RingRetargeted) event()          {}
 
 type IncomingCallStarted struct {
 	DialogID     DialogID

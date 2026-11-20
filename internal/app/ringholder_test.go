@@ -22,6 +22,25 @@ type fakeHolderCoordinator struct {
 	left     chan *media.StreamLease
 	gate     chan struct{}
 	err      error
+
+	mu        sync.Mutex
+	retargets []string
+}
+
+func (f *fakeHolderCoordinator) RetargetStream(from string, to config.Entrypoint) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.retargets = append(f.retargets, from+">"+to.ID)
+
+	return true
+}
+
+func (f *fakeHolderCoordinator) streamMoves() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.retargets...)
 }
 
 func newFakeHolderCoordinator() *fakeHolderCoordinator {
@@ -56,10 +75,12 @@ type fakeRingClip struct {
 	packets   atomic.Int32
 	closed    chan struct{}
 	closeOnce sync.Once
+	target    atomic.Value
 }
 
-func (c *fakeRingClip) VideoRTP(*rtp.Packet) { c.packets.Add(1) }
-func (c *fakeRingClip) Close()               { c.closeOnce.Do(func() { close(c.closed) }) }
+func (c *fakeRingClip) VideoRTP(*rtp.Packet)         { c.packets.Add(1) }
+func (c *fakeRingClip) Retarget(entrypointID string) { c.target.Store(entrypointID) }
+func (c *fakeRingClip) Close()                       { c.closeOnce.Do(func() { close(c.closed) }) }
 
 type fakeClipStarter struct {
 	started chan *fakeRingClip
@@ -79,6 +100,7 @@ func (s *fakeClipStarter) start(string) ringClip {
 var holderEntrypoints = []config.Entrypoint{
 	{ID: "main", Capabilities: config.Capabilities{Stream: true}},
 	{ID: "gate", Capabilities: config.Capabilities{Unlock: true}},
+	{ID: "side", DevAddr: "213", Capabilities: config.Capabilities{Stream: true, Ring: true}},
 }
 
 func newTestRingHolder(coordinator *fakeHolderCoordinator) *ringHolder {
@@ -287,4 +309,123 @@ func TestRingHolderClosesThePreviousClipOnANewRing(t *testing.T) {
 	route(core.IncomingCallStarted{DialogID: "d2", EntrypointID: "main"})
 
 	waitClipClosed(t, first)
+}
+
+func waitAcquired(t *testing.T, coordinator *fakeHolderCoordinator) {
+	t.Helper()
+
+	select {
+	case <-coordinator.acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the ring holder never acquired the stream")
+	}
+}
+
+// waitStreamMoves waits for the stream moves to be want.
+func waitStreamMoves(t *testing.T, coordinator *fakeHolderCoordinator, want ...string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := coordinator.streamMoves(); len(got) == len(want) {
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("stream moves = %v, want %v", got, want)
+				}
+			}
+
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("stream moves = %v, want %v", coordinator.streamMoves(), want)
+}
+
+func TestRingHolderMovesTheHeldStreamToTheEntrypointThatRang(t *testing.T) {
+	coordinator := newFakeHolderCoordinator()
+	clips := newFakeClipStarter()
+	holder := newTestRingHolderWithClips(coordinator, clips)
+
+	var applied []core.Event
+
+	route := holder.route(func(event core.Event) { applied = append(applied, event) })
+
+	route(core.IncomingCallStarted{DialogID: "d", EntrypointID: "main"})
+	waitAcquired(t, coordinator)
+	clip := waitClip(t, clips)
+
+	// Wait for the holder to keep the lease, which acquire does after the
+	// coordinator returns.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		holder.mu.Lock()
+		held := holder.lease != nil
+		holder.mu.Unlock()
+
+		if held || time.Now().After(deadline) {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	route(core.RingRetargeted{From: "gate", To: "side"})
+
+	if moves := coordinator.streamMoves(); len(moves) != 0 {
+		t.Fatalf("stream moves = %v after another entrypoint's move, want none", moves)
+	}
+
+	route(core.RingRetargeted{From: "main", To: "side"})
+	waitStreamMoves(t, coordinator, "main>side")
+
+	if target, _ := clip.target.Load().(string); target != "side" {
+		t.Fatalf("clip target = %q, want side", target)
+	}
+
+	if label := holder.ringLabel("main"); label != "side" {
+		t.Fatalf("ringLabel(main) = %q, want side", label)
+	}
+
+	if label := holder.ringLabel("gate"); label != "gate" {
+		t.Fatalf("ringLabel(gate) = %q, want gate: not the ring's stream", label)
+	}
+
+	if len(applied) != 3 {
+		t.Fatalf("applied %d events, want 3: every event still reaches the projector", len(applied))
+	}
+
+	// The next ring starts with no move.
+	route(core.CallHungUp{DialogID: "d"})
+	waitLeft(t, coordinator.left)
+	route(core.IncomingCallStarted{DialogID: "d2", EntrypointID: "main"})
+
+	if label := holder.ringLabel("main"); label != "main" {
+		t.Fatalf("ringLabel(main) on the next ring = %q, want main", label)
+	}
+}
+
+func TestRingHolderMovesAStreamThatWasStillStarting(t *testing.T) {
+	coordinator := newFakeHolderCoordinator()
+	coordinator.gate = make(chan struct{})
+	clips := newFakeClipStarter()
+	holder := newTestRingHolderWithClips(coordinator, clips)
+	route := holder.route(func(core.Event) {})
+
+	route(core.IncomingCallStarted{DialogID: "d", EntrypointID: "main"})
+	clip := waitClip(t, clips)
+	route(core.RingRetargeted{From: "main", To: "side"})
+
+	if moves := coordinator.streamMoves(); len(moves) != 0 {
+		t.Fatalf("stream moves = %v before the stream is held, want none", moves)
+	}
+
+	close(coordinator.gate)
+	waitAcquired(t, coordinator)
+	waitStreamMoves(t, coordinator, "main>side")
+
+	if target, _ := clip.target.Load().(string); target != "side" {
+		t.Fatalf("clip target = %q, want side", target)
+	}
 }

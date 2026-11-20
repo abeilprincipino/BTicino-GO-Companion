@@ -514,3 +514,27 @@ func TestNewRingClipRecorderRemovesLeftovers(t *testing.T) {
 		t.Fatalf("leftover still there: %v", err)
 	}
 }
+
+func TestRingClipRecorderWritesARetargetedClipForTheEntrypointThatRang(t *testing.T) {
+	recorder := NewRingClipRecorder(t.TempDir(), nil)
+
+	clip := recorder.Start("portal0")
+	feedTestClip(clip, 60, testClipFrame)
+	clip.Retarget("portal6")
+	clip.Close()
+	waitClipDone(t, clip)
+
+	if recorder.RecordedAt("portal6").IsZero() {
+		t.Fatal("no clip for portal6")
+	}
+
+	if !recorder.RecordedAt("portal0").IsZero() {
+		t.Fatal("a clip for portal0, want none: the ring was portal6's")
+	}
+
+	// A name that is not a safe file name changes nothing.
+	other := recorder.Start("portal0")
+	other.Retarget("../escape")
+	other.Close()
+	waitClipDone(t, other)
+}

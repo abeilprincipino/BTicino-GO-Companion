@@ -103,6 +103,10 @@ func (m *Mapper) Map(message Message) []core.Event {
 		return []core.Event{core.RingStarted{EntrypointID: id}}
 	}
 
+	if address, ok := ParseRingIdentityAddress(raw); ok {
+		return m.retarget(address)
+	}
+
 	if raw == FrameAudioMuted {
 		return []core.Event{core.AudioMuted{}}
 	}
@@ -131,6 +135,27 @@ func (m *Mapper) Map(message Message) []core.Event {
 	}
 
 	return nil
+}
+
+// retarget moves the ring in progress to the doorbell at address, which a
+// ring identity frame names as the external unit whose camera rings. A C100X
+// sends every ring frame with the address of one unit, whichever unit rang,
+// and names the right one only in this later frame. It only applies with
+// several doorbells: a configuration that names one doorbell gets every ring.
+func (m *Mapper) retarget(address string) []core.Event {
+	if m.activeEntrypoint == "" || m.doorbell != "" {
+		return nil
+	}
+
+	id := m.ringers[address]
+	if id == "" || id == m.activeEntrypoint {
+		return nil
+	}
+
+	from := m.activeEntrypoint
+	m.activeEntrypoint = id
+
+	return []core.Event{core.RingRetargeted{From: from, To: id}}
 }
 
 func (m *Mapper) duplicate(raw string, now time.Time) bool {

@@ -22,12 +22,15 @@ const ringHolderStartupTimeout = 15 * time.Second
 type ringHolderCoordinator interface {
 	AcquireRingingPreview(lifecycleCtx, startupCtx context.Context, entrypoint config.Entrypoint, events media.SourceEvents) (*media.StreamLease, error)
 	Leave(*media.StreamLease) bool
+	RetargetStream(from string, to config.Entrypoint) bool
 }
 
 // ringClip is the recording the holder feeds while it holds the stream:
 // *media.RingClip. See docs/superpowers/specs/2026-10-26-ring-clip-design.md.
 type ringClip interface {
 	VideoRTP(*rtp.Packet)
+	// Retarget makes the clip another entrypoint's.
+	Retarget(entrypointID string)
 	Close()
 }
 
@@ -52,6 +55,14 @@ type ringHolder struct {
 	// clip records the ring while the holder has the stream. It is closed with
 	// the lease, so the answer ends the recording.
 	clip ringClip
+	// opened is the entrypoint the ring's stream was opened for, ring the one
+	// the ring belongs to, and streamAt the one the stream and the clip are
+	// labelled with. ring moves when a C100X names the external unit that
+	// rang after the ring frame; see retarget. They keep their values after
+	// the ring, since a picture may still be on its way, until the next ring.
+	opened, ring, streamAt core.EntrypointID
+	// moveMu runs the relabelling of the stream one move at a time.
+	moveMu sync.Mutex
 }
 
 func newRingHolder(coordinator ringHolderCoordinator, startClip func(entrypointID string) ringClip, entrypoints func() []config.Entrypoint, logger *slog.Logger) *ringHolder {
@@ -66,6 +77,8 @@ func (h *ringHolder) route(next func(core.Event)) func(core.Event) {
 		switch event := event.(type) {
 		case core.IncomingCallStarted:
 			h.hold(event.EntrypointID)
+		case core.RingRetargeted:
+			h.retarget(event.From, event.To)
 		case core.CallAnswered, core.IncomingCallEnded, core.CallDeclined, core.CallHungUp:
 			h.release()
 		}
@@ -80,6 +93,7 @@ func (h *ringHolder) hold(entrypointID core.EntrypointID) {
 	generation := h.generation
 	previous, previousClip := h.lease, h.clip
 	h.lease, h.clip = nil, nil
+	h.opened, h.ring, h.streamAt = entrypointID, entrypointID, entrypointID
 	h.mu.Unlock()
 
 	if previousClip != nil {
@@ -129,7 +143,76 @@ func (h *ringHolder) acquire(generation uint64, entrypoint config.Entrypoint) {
 	if !current {
 		clip.Close()
 		h.coordinator.Leave(lease)
+
+		return
 	}
+
+	// The ring may have moved while the stream started.
+	h.move()
+}
+
+// retarget follows the ring from entrypoint from to entrypoint to: a C100X
+// sends the ring frame with one external unit's address and names the unit
+// that rang in a later frame. The stream stays as it is, since the intercom
+// sends the camera that rang, but the clip, the doorbell picture and the
+// stream are labelled with to from now on.
+func (h *ringHolder) retarget(from, to core.EntrypointID) {
+	h.mu.Lock()
+	if h.ring == "" || h.ring != from || to == "" {
+		h.mu.Unlock()
+
+		return
+	}
+
+	h.ring = to
+	streaming := h.lease != nil
+	h.mu.Unlock()
+
+	h.logger.Info("ring moved to the entrypoint that rang", "from_entrypoint_id", from, "entrypoint_id", to, "stream_open", streaming)
+
+	h.move()
+}
+
+// move labels the held stream and its clip with the entrypoint the ring
+// belongs to now. Without a held stream it waits for acquire to call it.
+func (h *ringHolder) move() {
+	h.moveMu.Lock()
+	defer h.moveMu.Unlock()
+
+	h.mu.Lock()
+	lease, clip, target, at := h.lease, h.clip, h.ring, h.streamAt
+	h.mu.Unlock()
+
+	if lease == nil || target == at {
+		return
+	}
+
+	if clip != nil {
+		clip.Retarget(string(target))
+	}
+
+	if entrypoint, ok := h.entrypoint(target); ok && !h.coordinator.RetargetStream(string(at), entrypoint) {
+		h.logger.Debug("ring stream not moved; it is no longer the ring's", "from_entrypoint_id", at, "entrypoint_id", target)
+	}
+
+	h.mu.Lock()
+	if h.lease == lease {
+		h.streamAt = target
+	}
+	h.mu.Unlock()
+}
+
+// ringLabel names the entrypoint a doorbell picture of a stream opened for
+// entrypointID belongs to: the one the ring moved to, if it moved.
+func (h *ringHolder) ringLabel(entrypointID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.ring != "" && string(h.opened) == entrypointID {
+		return string(h.ring)
+	}
+
+	return entrypointID
 }
 
 func (h *ringHolder) release() {

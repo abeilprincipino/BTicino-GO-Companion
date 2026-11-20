@@ -312,3 +312,35 @@ func TestRouteRingingPreviewFollowsTheCall(t *testing.T) {
 		t.Fatalf("applied %d events, want %d — every event still reaches the projector", len(applied), len(events))
 	}
 }
+
+type recordingCallRetargeter struct{ moves []string }
+
+func (r *recordingCallRetargeter) RetargetIncoming(from, to core.EntrypointID, devAddr string) bool {
+	r.moves = append(r.moves, string(from)+">"+string(to)+"@"+devAddr)
+	return true
+}
+
+func TestRouteRingRetargetMovesTheCallAfterTheProjector(t *testing.T) {
+	calls := &recordingCallRetargeter{}
+	entrypoints := []config.Entrypoint{{ID: "portal0", DevAddr: "21"}, {ID: "portal6", DevAddr: "213"}}
+
+	var applied []core.Event
+
+	route := routeRingRetarget(calls, func() []config.Entrypoint { return entrypoints }, func(event core.Event) {
+		applied = append(applied, event)
+		if len(calls.moves) != 0 {
+			t.Fatal("the call moved before the projector saw the move")
+		}
+	})
+
+	route(core.RingStarted{EntrypointID: "portal0"})
+	route(core.RingRetargeted{From: "portal0", To: "portal6"})
+
+	if len(applied) != 2 {
+		t.Fatalf("applied %d events, want 2", len(applied))
+	}
+
+	if len(calls.moves) != 1 || calls.moves[0] != "portal0>portal6@213" {
+		t.Fatalf("call moves = %v, want [portal0>portal6@213]", calls.moves)
+	}
+}

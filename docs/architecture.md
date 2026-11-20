@@ -355,10 +355,19 @@ sequenceDiagram
   fallback ([`ringwatch.go`](../internal/app/ringwatch.go)): asking earlier only got a NACK while the
   intercom was still powering the camera. The watch logs one timeline line per ring
   ([ring snapshot latency](analysis/2026-10-29-ring-snapshot-latency.md)).
-- With one doorbell per external unit, the ring frame `*8*1#1#4#<unit>*<indoor unit>##` names the
-  unit that rang, and the mapper gives the ring to the doorbell at that address (the first doorbell
-  in configuration order when the address matches none). The SIP call carries no address, so it
-  follows the physical ring, whose frame arrives first.
+- With one doorbell per external unit, the mapper gives the ring to the doorbell at the address of
+  the ring frame `*8*1#1#4#<unit>*<indoor unit>##` (the first doorbell in configuration order when
+  the address matches none). The SIP call carries no address, so it follows the physical ring,
+  whose frame arrives first.
+- A Classe 100X with two units was seen sending every ring frame with the address of one of them
+  and naming the unit that rang only in `*8*9#1#4*<unit>##`, 0.3 to 2.5 s later. The mapper then
+  emits `RingRetargeted`. The projector moves the ring, call and preview to the other entrypoint;
+  `routeRingRetarget` moves the SIP call (`Manager.RetargetIncoming`, which publishes the move again
+  in order with the call's events); and the ring holder relabels the stream
+  (`StreamCoordinator.RetargetStream`), the clip and the doorbell picture, which takes its
+  entrypoint when it is ready (`SnapshotManager.SetRingLabel`). The video does not change: the
+  intercom already sends the camera that rang. A picture published before the move stays with the
+  first entrypoint.
 
 ### Answer and end of call
 

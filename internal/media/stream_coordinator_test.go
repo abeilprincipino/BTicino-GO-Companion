@@ -1484,3 +1484,54 @@ func TestStreamCoordinatorReleasedConsumerCannotClaimTheUplink(t *testing.T) {
 		t.Fatal("backchannel did not receive the second consumer's packet")
 	}
 }
+
+func TestStreamCoordinatorRetargetStreamMovesTheRingStream(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &callEndingSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	var observed []StreamSnapshot
+
+	c.SetStateObserver(func(snapshot StreamSnapshot) { observed = append(observed, snapshot) })
+
+	other := config.Entrypoint{ID: "side", DevAddr: "213"}
+
+	if c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() with no stream = true, want false")
+	}
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if c.RetargetStream("elsewhere", other) {
+		t.Fatal("RetargetStream() from another entrypoint = true, want false")
+	}
+
+	observed = nil
+
+	if !c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() = false, want true")
+	}
+
+	if snapshot := c.Snapshot(); snapshot.EntrypointID != "side" || snapshot.DevAddr != "213" {
+		t.Fatalf("snapshot = %+v, want the stream on side", snapshot)
+	}
+
+	if len(observed) != 1 || observed[0].EntrypointID != "side" {
+		t.Fatalf("observed = %+v, want one snapshot on side", observed)
+	}
+
+	// A card of the entrypoint that rang joins the ring stream.
+	joined, err := c.AcquireRingingPreview(context.Background(), context.Background(), other, SourceEvents{})
+	if err != nil {
+		t.Fatalf("AcquireRingingPreview(side) error = %v, want a join", err)
+	}
+
+	if shared.created() != 1 || joined.id != lease.id {
+		t.Fatalf("sources created = %d, joined lease %d of %d, want one shared stream", shared.created(), joined.id, lease.id)
+	}
+
+	c.Leave(joined)
+	c.Leave(lease)
+}
