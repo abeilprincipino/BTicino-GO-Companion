@@ -1,5 +1,7 @@
 package core
 
+import "time"
+
 type EntrypointID string
 
 type DialogID string
@@ -12,6 +14,7 @@ const (
 	EventRingStarted          EventType = "ring.started"
 	EventRingCleared          EventType = "ring.cleared"
 	EventRingRetargeted       EventType = "ring.retargeted"
+	EventRingIdentified       EventType = "ring.identified"
 	EventIncomingCallStarted  EventType = "call.incoming"
 	EventIncomingCallEnded    EventType = "call.incoming_ended"
 	EventCallAnswered         EventType = "call.answered"
@@ -33,6 +36,9 @@ type Event interface {
 
 type RingStarted struct {
 	EntrypointID EntrypointID
+	// FrameAddress is the external unit address the ring frame carried, which
+	// may not be the unit that rang; see RingIdentified.
+	FrameAddress string
 }
 
 func (RingStarted) Type() EventType { return EventRingStarted }
@@ -56,6 +62,29 @@ type RingRetargeted struct {
 
 func (RingRetargeted) Type() EventType { return EventRingRetargeted }
 func (RingRetargeted) event()          {}
+
+// RingIdentified reports the frame naming the external unit that rang, the
+// first one of the ring in progress. It changes no state: a RingRetargeted sent
+// before it moves the ring when Provisional was wrong. EntrypointID is empty
+// when the unit is not a configured doorbell.
+type RingIdentified struct {
+	EntrypointID EntrypointID
+	// Provisional is the entrypoint the ring frame gave the ring to.
+	Provisional EntrypointID
+	// FrameAddress is the address that ring frame carried.
+	FrameAddress string
+	// Delay is how long after the ring frame the unit was named.
+	Delay time.Duration
+}
+
+func (RingIdentified) Type() EventType { return EventRingIdentified }
+func (RingIdentified) event()          {}
+
+// Corrected reports whether the ring frame had given the ring to another
+// doorbell than the one that rang.
+func (e RingIdentified) Corrected() bool {
+	return e.EntrypointID != "" && e.EntrypointID != e.Provisional
+}
 
 type IncomingCallStarted struct {
 	DialogID     DialogID

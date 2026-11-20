@@ -37,7 +37,14 @@ type Mapper struct {
 	lastStop time.Time
 	// ignoreStopsUntil is the end of the stale stop window of a restarted ring.
 	ignoreStopsUntil time.Time
-	now              func() time.Time
+	// ringAt, ringAddress and provisional are the time, the external unit
+	// address and the entrypoint of the ring frame of the ring in progress, and
+	// identified whether its identity frame came.
+	ringAt      time.Time
+	ringAddress string
+	provisional core.EntrypointID
+	identified  bool
+	now         func() time.Time
 }
 
 func NewMapper(entrypoints []config.Entrypoint) *Mapper {
@@ -95,16 +102,17 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		m.activeEntrypoint = id
+		m.ringAt, m.ringAddress, m.provisional, m.identified = now, ringFrameAddress(raw), id, false
 
 		if !m.lastStop.IsZero() && now.Sub(m.lastStop) <= stopBurstBeforeRing {
 			m.ignoreStopsUntil = now.Add(staleStopWindow)
 		}
 
-		return []core.Event{core.RingStarted{EntrypointID: id}}
+		return []core.Event{core.RingStarted{EntrypointID: id, FrameAddress: m.ringAddress}}
 	}
 
 	if address, ok := ParseRingIdentityAddress(raw); ok {
-		return m.retarget(address)
+		return m.identify(address, now)
 	}
 
 	if raw == FrameAudioMuted {
@@ -137,25 +145,41 @@ func (m *Mapper) Map(message Message) []core.Event {
 	return nil
 }
 
-// retarget moves the ring in progress to the doorbell at address, which a
-// ring identity frame names as the external unit whose camera rings. A C100X
-// sends every ring frame with the address of one unit, whichever unit rang,
-// and names the right one only in this later frame. It only applies with
-// several doorbells: a configuration that names one doorbell gets every ring.
-func (m *Mapper) retarget(address string) []core.Event {
-	if m.activeEntrypoint == "" || m.doorbell != "" {
+// identify follows a ring identity frame, which names the external unit at
+// address as the one whose camera rings. A C100X may send the ring frame with
+// another unit's address and name the right one only in this later frame. The
+// ring moves to the doorbell at address, and the first such frame of a ring is
+// reported with RingIdentified. It only applies with several doorbells: a
+// configuration with one, or that names one, gets every ring.
+func (m *Mapper) identify(address string, now time.Time) []core.Event {
+	if m.activeEntrypoint == "" || m.doorbell != "" || len(m.ringerOrder) < 2 {
 		return nil
 	}
+
+	var events []core.Event
 
 	id := m.ringers[address]
-	if id == "" || id == m.activeEntrypoint {
-		return nil
+	if id != "" && id != m.activeEntrypoint {
+		events = append(events, core.RingRetargeted{From: m.activeEntrypoint, To: id})
+		m.activeEntrypoint = id
 	}
 
-	from := m.activeEntrypoint
-	m.activeEntrypoint = id
+	if !m.identified {
+		m.identified = true
+		events = append(events, core.RingIdentified{EntrypointID: id, Provisional: m.provisional, FrameAddress: m.ringAddress, Delay: now.Sub(m.ringAt)})
+	}
 
-	return []core.Event{core.RingRetargeted{From: from, To: id}}
+	return events
+}
+
+// ringFrameAddress is the external unit address a ring frame
+// *8*1#<mode>#4#<unit>*<indoor unit>## carries.
+func ringFrameAddress(frame string) string {
+	if address := extractViewRequestAddress(frame); address != "" {
+		return address
+	}
+
+	return ExtractAddress(frame)
 }
 
 func (m *Mapper) duplicate(raw string, now time.Time) bool {

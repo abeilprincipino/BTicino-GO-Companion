@@ -10,6 +10,7 @@ import (
 	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
+	"bticino-go-companion/internal/ringattribution"
 	"bticino-go-companion/internal/ringersync"
 	"bticino-go-companion/internal/signaling"
 	"bticino-go-companion/internal/system"
@@ -121,7 +122,10 @@ func run(
 
 	go checkUpdates(ctx, updater, server.BroadcastState, logger)
 
-	applyEvent := newEventApplier(projector, homeKit, server, logger)
+	publisher := newEventApplier(projector, homeKit, server, logger)
+	applyEvent := publisher.apply
+	ringAttribution := ringattribution.New(system.CompanionDataDir, ringAttributionSettings(configStore), configuredDoorbells(configStore), logger)
+	webUI.SetRingAttribution(ringAttribution)
 
 	// The sink first, the inbound handler second, and never the other way
 	// round. Manager.SetEvents drops what is published while the sink is still
@@ -241,7 +245,8 @@ func run(
 		}
 	}()
 	go func() {
-		busEvents := routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent)
+		busEvents := routeRingAttribution(ringAttribution, publisher, logger,
+			routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent))
 		if err := listener.Run(ctx, busEvents); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
 		}
@@ -689,17 +694,18 @@ func routeRingingPreview(coordinator ringingPreviewCoordinator, next func(core.E
 	}
 }
 
-func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) func(core.Event) {
-	return func(event core.Event) {
-		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
-			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
-			return
-		}
-
-		homeKit.Sync(projector.Snapshot())
+// newEventApplier is the single publication point: Projector, then HomeKit and
+// the API. Its publishing can be held back while a ring's doorbell settles; see
+// heldPublisher.
+func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) *heldPublisher {
+	return newHeldPublisher(projector, func(state core.State, events []core.EventType) {
+		homeKit.Sync(state)
 		server.BroadcastState()
-		server.BroadcastEvent(map[string]any{"type": event.Type()})
-	}
+
+		for _, event := range events {
+			server.BroadcastEvent(map[string]any{"type": event})
+		}
+	}, logger)
 }
 
 func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Event)) media.StreamStateObserver {

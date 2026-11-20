@@ -221,6 +221,15 @@ companion:
   (`*8*9#1#4*<unit>##`, 0.3 to 2.5 s after the ring). The companion then moves the ring to that
   unit's doorbell, with its call, doorbell picture and ring clip. Home Assistant may show the ring
   on the first doorbell for that short time, and HomeKit rings both doorbells.
+- To report such a ring only once, already on the right doorbell, turn on **Enable doorbell
+  attribution learning** in the Web UI (Management > System). The companion then learns, for each
+  address a ring frame carries, how late the intercom named another unit, and holds the report of
+  a ring with that address for the slowest of the last 20 corrections plus 100 ms, up to the cap
+  you set (1000 ms by default). It stops holding as soon as the intercom names the unit. Only Home
+  Assistant, HomeKit and the Web UI wait: the call, the doorbell picture and the ring clip start at
+  once. An address that never misled is never held, so the first ring that misleads is still
+  corrected after it was reported. What was learned is kept in
+  `/home/bticino/cfg/extra/companion/ring_attribution.json` across restarts; **Reset** forgets it.
 - On a Classe 100X the on-demand view needs the unit in the intercom's own module list
   (`/home/bticino/cfg/extra/.bt_eliot/mymodules`) at that address; the official app can view
   exactly the units listed there.

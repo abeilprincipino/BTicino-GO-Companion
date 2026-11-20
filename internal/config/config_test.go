@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -930,5 +931,66 @@ func TestValidateUnlockSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRingAttributionSettingsLegacyAndRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(legacyConfigWithoutSIP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("load legacy config: %v", err)
+	}
+
+	before := store.Snapshot()
+	if before.System.RingAttribution != (RingAttribution{}) || before.System.RingAttribution.MaxWait() != time.Second {
+		t.Fatalf("legacy ring attribution = %+v, max wait %v, want off with a 1 s cap", before.System.RingAttribution, before.System.RingAttribution.MaxWait())
+	}
+
+	encoded, err := encode(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Contains(encoded, []byte("ring_attribution:")) {
+		t.Fatal("saving default settings wrote ring_attribution, which older builds cannot read")
+	}
+
+	want := RingAttribution{Enabled: true, MaxWaitMS: 800}
+	if err := store.Update(func(cfg *Config) error {
+		cfg.System.RingAttribution = want
+		return nil
+	}); err != nil {
+		t.Fatalf("save ring attribution: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload ring attribution: %v", err)
+	}
+
+	if loaded.System.RingAttribution != want || loaded.System.RingAttribution.MaxWait() != 800*time.Millisecond {
+		t.Fatalf("round-trip ring attribution = %+v, want %+v", loaded.System.RingAttribution, want)
+	}
+}
+
+func TestValidateRingAttributionWait(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Default(Metadata{Model: "C100X", MAC: "00:11:22:33:44:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for wait, valid := range map[int]bool{0: true, 100: true, 1000: true, 5000: true, 99: false, 5001: false, -1: false} {
+		cfg.System.RingAttribution.MaxWaitMS = wait
+		if err := Validate(cfg); (err == nil) != valid {
+			t.Fatalf("Validate(max wait %d ms) error = %v, want valid %v", wait, err, valid)
+		}
 	}
 }

@@ -368,6 +368,13 @@ sequenceDiagram
   entrypoint when it is ready (`SnapshotManager.SetRingLabel`). The video does not change: the
   intercom already sends the camera that rang. A picture published before the move stays with the
   first entrypoint.
+- The mapper also reports the first identity frame of a ring as `RingIdentified` (frame address,
+  first entrypoint, entrypoint named, delay), which changes no state. With
+  `system.ring_attribution.enabled`, `ringattribution.Learner` learns from every corrected ring how
+  late the unit was named, per ring-frame address, and `routeRingAttribution` holds the publishing
+  of a ring with an address that misled before (`heldPublisher`: the projector is updated at once,
+  HomeKit and the API only when the hold ends) until `RingIdentified` or the learned delay, capped
+  by `max_wait_ms`. A ring held while it moves is then published once, on its final entrypoint.
 
 ### Answer and end of call
 

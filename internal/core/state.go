@@ -111,6 +111,8 @@ func apply(state *State, event Event) error {
 		}
 
 		state.PhysicalRing = nil
+	case RingIdentified:
+		// No state: it only tells that the ring's attribution is settled.
 	case RingRetargeted:
 		if err := requireEntrypoint(event.To); err != nil {
 			return err

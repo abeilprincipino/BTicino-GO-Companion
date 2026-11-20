@@ -298,11 +298,47 @@ function renderSystemConfig() {
     document.getElementById('systemRebootEnabled').checked = !!data.reboot_enabled;
     document.getElementById('systemUpdateEnabled').checked = !!data.update_enabled;
     document.getElementById('systemUpdateExposed').checked = !!data.update_exposed;
+    var ringAttribution = data.ring_attribution || {};
+    document.getElementById('systemRingAttributionEnabled').checked = !!ringAttribution.enabled;
+    document.getElementById('systemRingAttributionMaxWait').value = ringAttribution.max_wait_ms || 1000;
+    syncRingAttributionInput();
+    renderRingAttributionLearned(ringAttribution.learned || []);
     setStatus('systemStatus', '');
   }).catch(function(err) { handleApiError(err, 'Failed to load system configuration'); });
 }
 
+function syncRingAttributionInput() {
+  document.getElementById('systemRingAttributionMaxWait').disabled = !document.getElementById('systemRingAttributionEnabled').checked;
+}
+
+function renderRingAttributionLearned(learned) {
+  var text = learned.length === 0 ? 'Nothing learned yet.' : 'Learned: ' + learned.map(function(item) {
+    return 'address ' + item.address + ' held ' + item.hold_ms + ' ms (' + item.corrections + (item.corrections === 1 ? ' correction' : ' corrections') + ')';
+  }).join('; ') + '.';
+  document.getElementById('systemRingAttributionLearned').textContent = text;
+}
+
+function resetRingAttribution() {
+  requestConfirmation('Reset doorbell attribution learning?', 'Companion forgets how long the intercom took to name the entrance that rang, and learns it again from the next rings.', 'Reset', function() {
+    apiPost('/webui/api/management/system/ring-attribution/reset', { confirm: true }).then(function() {
+      toast.show({ kind: 'success', message: 'Doorbell attribution learning reset' });
+      renderRingAttributionLearned([]);
+    }).catch(function(err) {
+      toast.show({ kind: 'error', message: err.message || 'Reset failed' });
+    });
+  });
+}
+
 function saveSystemConfig(button) {
+  var ringAttributionEnabled = document.getElementById('systemRingAttributionEnabled').checked;
+  var maxWait = parseInt(document.getElementById('systemRingAttributionMaxWait').value, 10);
+  if (isNaN(maxWait) || maxWait < 100 || maxWait > 5000) {
+    if (ringAttributionEnabled) {
+      setStatus('systemStatus', 'The longest hold must be 100-5000 ms.', 'var(--danger)');
+      return;
+    }
+    maxWait = 1000;
+  }
   apiPut('/webui/api/management/system', {
     reboot_enabled: document.getElementById('systemRebootEnabled').checked,
     update_enabled: document.getElementById('systemUpdateEnabled').checked,
@@ -310,7 +346,8 @@ function saveSystemConfig(button) {
     services: {
       companion: { enabled: true, exposed: true },
       dropbear: { enabled: true, exposed: true }
-    }
+    },
+    ring_attribution: { enabled: ringAttributionEnabled, max_wait_ms: maxWait }
   }).then(function() { setStatus('systemStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)'); }).catch(function(err) { handleApiError(err); });
 }
 

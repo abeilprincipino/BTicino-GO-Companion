@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +37,13 @@ const (
 	// the OpenWebNet control session's three-second deadline.
 	DefaultUnlockDurationMS = 2000
 	MaxUnlockDurationMS     = 2000
+	// DefaultRingAttributionMaxWaitMS caps how long a ring is kept from Home
+	// Assistant and HomeKit while the intercom names the external unit that
+	// rang; MinRingAttributionMaxWaitMS and MaxRingAttributionMaxWaitMS bound a
+	// cap the user sets.
+	DefaultRingAttributionMaxWaitMS = 1000
+	MinRingAttributionMaxWaitMS     = 100
+	MaxRingAttributionMaxWaitMS     = 5000
 )
 
 var (
@@ -114,11 +122,31 @@ type WebUI struct {
 }
 
 type System struct {
-	RebootEnabled bool               `yaml:"reboot_enabled"`
-	UpdateEnabled bool               `yaml:"update_enabled"`
-	UpdateExposed bool               `yaml:"update_exposed"`
-	UpdateChannel string             `yaml:"update_channel"`
-	Services      map[string]Service `yaml:"services"`
+	RebootEnabled   bool               `yaml:"reboot_enabled"`
+	UpdateEnabled   bool               `yaml:"update_enabled"`
+	UpdateExposed   bool               `yaml:"update_exposed"`
+	UpdateChannel   string             `yaml:"update_channel"`
+	Services        map[string]Service `yaml:"services"`
+	RingAttribution RingAttribution    `yaml:"ring_attribution"`
+}
+
+// RingAttribution lets the companion learn, on an installation with several
+// doorbells, how long the intercom takes to name the external unit that rang
+// when the ring frame carries another unit's address, and hold the ring that
+// long, up to MaxWaitMS, before reporting it. It is off by default.
+type RingAttribution struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled"`
+	// MaxWaitMS is the cap; 0 means DefaultRingAttributionMaxWaitMS.
+	MaxWaitMS int `yaml:"max_wait_ms,omitempty" json:"max_wait_ms"`
+}
+
+// MaxWait is the cap in effect.
+func (r RingAttribution) MaxWait() time.Duration {
+	if r.MaxWaitMS == 0 {
+		return DefaultRingAttributionMaxWaitMS * time.Millisecond
+	}
+
+	return time.Duration(r.MaxWaitMS) * time.Millisecond
 }
 
 type persistedAuth struct {
@@ -132,6 +160,9 @@ type persistedSystem struct {
 	} `yaml:"reboot"`
 	Updates  persistedUpdates   `yaml:"updates"`
 	Services map[string]Service `yaml:"services"`
+	// RingAttribution is left out while it has its default values, so a
+	// config.yaml stays readable by builds older than it.
+	RingAttribution RingAttribution `yaml:"ring_attribution,omitempty"`
 }
 
 // persistedUpdates omits a stable channel: the loader rejects unknown keys, so
@@ -307,7 +338,7 @@ func Load(path string) (Config, error) {
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
 		Logging: persisted.Logging,
-		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, UpdateChannel: persisted.System.Updates.Channel, Services: persisted.System.Services},
+		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, UpdateChannel: persisted.System.Updates.Channel, Services: persisted.System.Services, RingAttribution: persisted.System.RingAttribution},
 		HomeKit: persisted.HomeKit,
 	}
 
@@ -595,6 +626,10 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("invalid update channel %q", channel)
 	}
 
+	if wait := cfg.System.RingAttribution.MaxWaitMS; wait != 0 && (wait < MinRingAttributionMaxWaitMS || wait > MaxRingAttributionMaxWaitMS) {
+		return fmt.Errorf("ring attribution wait must be 0 (default) or %d-%d milliseconds", MinRingAttributionMaxWaitMS, MaxRingAttributionMaxWaitMS)
+	}
+
 	return nil
 }
 
@@ -640,7 +675,7 @@ func encode(cfg Config) ([]byte, error) {
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
 		System: persistedSystem{Reboot: struct {
 			Enabled bool `yaml:"enabled"`
-		}{Enabled: cfg.System.RebootEnabled}, Updates: persistedUpdates{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed, Channel: persistedChannel(cfg.System.UpdateChannel)}, Services: cfg.System.Services},
+		}{Enabled: cfg.System.RebootEnabled}, Updates: persistedUpdates{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed, Channel: persistedChannel(cfg.System.UpdateChannel)}, Services: cfg.System.Services, RingAttribution: cfg.System.RingAttribution},
 		HomeKit: cfg.HomeKit,
 	})
 	if err != nil {

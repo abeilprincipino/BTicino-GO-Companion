@@ -100,7 +100,11 @@ func TestMapperRetargetsARingToTheUnitItsIdentityFrameNames(t *testing.T) {
 				{2173, "*8*9#1#4*21##"}, {2177, "*8*9#1#4*21##"},
 				{11796, FrameStop},
 			},
-			want: []core.Event{core.RingStarted{EntrypointID: "portal0"}, core.RingCleared{EntrypointID: "portal0"}},
+			want: []core.Event{
+				core.RingStarted{EntrypointID: "portal0", FrameAddress: "21"},
+				core.RingIdentified{EntrypointID: "portal0", Provisional: "portal0", FrameAddress: "21", Delay: 2173 * time.Millisecond},
+				core.RingCleared{EntrypointID: "portal0"},
+			},
 		},
 		"another unit": {
 			frames: []frame{
@@ -109,8 +113,9 @@ func TestMapperRetargetsARingToTheUnitItsIdentityFrameNames(t *testing.T) {
 				{8726, "*8*3#1#4*4110##"}, {9128, FrameStop},
 			},
 			want: []core.Event{
-				core.RingStarted{EntrypointID: "portal0"},
+				core.RingStarted{EntrypointID: "portal0", FrameAddress: "21"},
 				core.RingRetargeted{From: "portal0", To: "portal6"},
+				core.RingIdentified{EntrypointID: "portal6", Provisional: "portal0", FrameAddress: "21", Delay: 300 * time.Millisecond},
 				core.RingCleared{EntrypointID: "portal6"},
 			},
 		},
@@ -119,7 +124,26 @@ func TestMapperRetargetsARingToTheUnitItsIdentityFrameNames(t *testing.T) {
 		},
 		"a unit no doorbell is at": {
 			frames: []frame{{0, "*8*1#1#4#21*110##"}, {300, "*8*9#1#4*22##"}, {9000, FrameStop}},
-			want:   []core.Event{core.RingStarted{EntrypointID: "portal0"}, core.RingCleared{EntrypointID: "portal0"}},
+			want: []core.Event{
+				core.RingStarted{EntrypointID: "portal0", FrameAddress: "21"},
+				core.RingIdentified{Provisional: "portal0", FrameAddress: "21", Delay: 300 * time.Millisecond},
+				core.RingCleared{EntrypointID: "portal0"},
+			},
+		},
+		// An installation whose ring frames carry the unit that rang: the
+		// identity frame only confirms it.
+		"a ring frame that is right": {
+			frames: []frame{{0, "*8*1#1#4#213*110##"}, {350, "*8*9#1#4*213##"}, {9000, FrameStop}},
+			want: []core.Event{
+				core.RingStarted{EntrypointID: "portal6", FrameAddress: "213"},
+				core.RingIdentified{EntrypointID: "portal6", Provisional: "portal6", FrameAddress: "213", Delay: 350 * time.Millisecond},
+				core.RingCleared{EntrypointID: "portal6"},
+			},
+		},
+		// An intercom that never names the unit.
+		"no identity frame": {
+			frames: []frame{{0, "*8*1#1#4#21*110##"}, {9000, FrameStop}},
+			want:   []core.Event{core.RingStarted{EntrypointID: "portal0", FrameAddress: "21"}, core.RingCleared{EntrypointID: "portal0"}},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

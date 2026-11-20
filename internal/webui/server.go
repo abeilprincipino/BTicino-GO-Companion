@@ -7,6 +7,7 @@ import (
 	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/httputil"
 	"bticino-go-companion/internal/logging"
+	"bticino-go-companion/internal/ringattribution"
 	"bticino-go-companion/internal/system"
 	"context"
 	"crypto/subtle"
@@ -55,6 +56,13 @@ type HomeKitProvider interface {
 	Reset(dataDir string) error
 }
 
+// RingAttributionProvider is what the companion learned about which doorbell
+// rang; see ringattribution.Learner.
+type RingAttributionProvider interface {
+	Learned() []ringattribution.Learned
+	Reset() error
+}
+
 type Server struct {
 	config      *config.Store
 	auth        *auth.Store
@@ -66,6 +74,7 @@ type Server struct {
 	diagnostics DiagnosticsProvider
 	update      UpdateProvider
 	homeKit     HomeKitProvider
+	ringLearner RingAttributionProvider
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -91,6 +100,17 @@ type editableSystem struct {
 	UpdateEnabled bool                      `json:"update_enabled"`
 	UpdateExposed bool                      `json:"update_exposed"`
 	Services      map[string]config.Service `json:"services"`
+	// RingAttribution is left as it is when a request leaves it out, as an
+	// older page does.
+	RingAttribution *editableRingAttribution `json:"ring_attribution,omitempty"`
+}
+
+type editableRingAttribution struct {
+	Enabled bool `json:"enabled"`
+	// MaxWaitMS is the cap in effect when read; 0 asks for the default.
+	MaxWaitMS int `json:"max_wait_ms"`
+	// Learned is read-only.
+	Learned []ringattribution.Learned `json:"learned,omitempty"`
 }
 
 type editableHomeKit struct {
@@ -130,6 +150,9 @@ func (s *Server) SetFrames(provider FrameProvider)            { s.frames = provi
 func (s *Server) SetDiagnostics(provider DiagnosticsProvider) { s.diagnostics = provider }
 func (s *Server) SetUpdate(provider UpdateProvider)           { s.update = provider }
 func (s *Server) SetHomeKit(provider HomeKitProvider)         { s.homeKit = provider }
+func (s *Server) SetRingAttribution(provider RingAttributionProvider) {
+	s.ringLearner = provider
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -150,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /webui/api/config/homekit/reset", s.requireReady(s.handleHomeKitReset))
 	mux.HandleFunc("GET /webui/api/management/system", s.requireReady(s.handleSystemConfig))
 	mux.HandleFunc("PUT /webui/api/management/system", s.requireReady(s.handleSystemConfig))
+	mux.HandleFunc("POST /webui/api/management/system/ring-attribution/reset", s.requireReady(s.handleRingAttributionReset))
 	mux.HandleFunc("GET /webui/api/management/diagnostics", s.requireReady(s.handleStatus))
 	mux.HandleFunc("GET /webui/api/management/update", s.requireReady(s.handleUpdateStatus))
 	mux.HandleFunc("POST /webui/api/management/update/check", s.requireReady(s.handleUpdateCheck))
@@ -816,7 +840,18 @@ func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, editableSystem{RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed, Services: cfg.System.Services})
+		ringAttribution := &editableRingAttribution{
+			Enabled:   cfg.System.RingAttribution.Enabled,
+			MaxWaitMS: int(cfg.System.RingAttribution.MaxWait().Milliseconds()),
+		}
+		if s.ringLearner != nil {
+			ringAttribution.Learned = s.ringLearner.Learned()
+		}
+
+		writeJSON(w, http.StatusOK, editableSystem{
+			RebootEnabled: cfg.System.RebootEnabled, UpdateEnabled: cfg.System.UpdateEnabled, UpdateExposed: cfg.System.UpdateExposed,
+			Services: cfg.System.Services, RingAttribution: ringAttribution,
+		})
 
 		return
 	}
@@ -836,6 +871,16 @@ func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
 		cfg.System.UpdateExposed = next.UpdateExposed
 		cfg.System.Services = next.Services
 
+		if next.RingAttribution != nil {
+			maxWait := next.RingAttribution.MaxWaitMS
+			// The default is kept as 0, so config.yaml leaves it out.
+			if maxWait == config.DefaultRingAttributionMaxWaitMS {
+				maxWait = 0
+			}
+
+			cfg.System.RingAttribution = config.RingAttribution{Enabled: next.RingAttribution.Enabled, MaxWaitMS: maxWait}
+		}
+
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusBadRequest, "configuration is invalid")
@@ -843,6 +888,38 @@ func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true})
+}
+
+// handleRingAttributionReset forgets what was learned about which doorbell
+// rang. It takes effect at once.
+func (s *Server) handleRingAttributionReset(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+
+	var request confirmationRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+
+	if !request.Confirm {
+		writeError(w, http.StatusBadRequest, "confirmation required")
+		return
+	}
+
+	if s.ringLearner == nil {
+		writeError(w, http.StatusServiceUnavailable, "ring attribution learning is unavailable")
+		return
+	}
+
+	if err := s.ringLearner.Reset(); err != nil {
+		s.logger.Error("reset ring attribution learning", "error", err)
+		writeError(w, http.StatusInternalServerError, "reset failed")
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
