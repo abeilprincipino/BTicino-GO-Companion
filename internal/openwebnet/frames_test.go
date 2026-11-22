@@ -83,6 +83,17 @@ func TestFramePredicatesAndExtractors(t *testing.T) {
 	}
 
 	for frame, want := range map[string]string{
+		"*8*9#1#4*213##": "213",
+		"*8*9#1#4*21##":  "21",
+		"*8*9#5#4*213##": "",
+		"*8*9#1#4*##":    "",
+	} {
+		if address, ok := ParseRingIdentityAddress(frame); address != want || ok != (want != "") {
+			t.Fatalf("ParseRingIdentityAddress(%q) = %q, %t, want %q", frame, address, ok, want)
+		}
+	}
+
+	for frame, want := range map[string]string{
 		"*8*1#1#4#21*11##":   "1 11",
 		" *8*1#1#4#21*11## ": "1 11",
 		"*8*1#5#4#20*11##":   "5 11",

@@ -355,6 +355,26 @@ sequenceDiagram
   fallback ([`ringwatch.go`](../internal/app/ringwatch.go)): asking earlier only got a NACK while the
   intercom was still powering the camera. The watch logs one timeline line per ring
   ([ring snapshot latency](analysis/2026-10-29-ring-snapshot-latency.md)).
+- With one doorbell per external unit, the mapper gives the ring to the doorbell at the address of
+  the ring frame `*8*1#1#4#<unit>*<indoor unit>##` (the first doorbell in configuration order when
+  the address matches none). The SIP call carries no address, so it follows the physical ring,
+  whose frame arrives first.
+- A Classe 100X with two units was seen sending every ring frame with the address of one of them
+  and naming the unit that rang only in `*8*9#1#4*<unit>##`, 0.3 to 2.5 s later. The mapper then
+  emits `RingRetargeted`. The projector moves the ring, call and preview to the other entrypoint;
+  `routeRingRetarget` moves the SIP call (`Manager.RetargetIncoming`, which publishes the move again
+  in order with the call's events); and the ring holder relabels the stream
+  (`StreamCoordinator.RetargetStream`), the clip and the doorbell picture, which takes its
+  entrypoint when it is ready (`SnapshotManager.SetRingLabel`). The video does not change: the
+  intercom already sends the camera that rang. A picture published before the move stays with the
+  first entrypoint.
+- The mapper also reports the first identity frame of a ring as `RingIdentified` (frame address,
+  first entrypoint, entrypoint named, delay), which changes no state. With
+  `system.ring_attribution.enabled`, `ringattribution.Learner` learns from every corrected ring how
+  late the unit was named, per ring-frame address, and `routeRingAttribution` holds the publishing
+  of a ring with an address that misled before (`heldPublisher`: the projector is updated at once,
+  HomeKit and the API only when the hold ends) until `RingIdentified` or the learned delay, capped
+  by `max_wait_ms`. A ring held while it moves is then published once, on its final entrypoint.
 
 ### Answer and end of call
 

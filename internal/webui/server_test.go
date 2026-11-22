@@ -4,6 +4,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/homekit"
+	"bticino-go-companion/internal/ringattribution"
 	"bticino-go-companion/internal/system"
 	"bytes"
 	"context"
@@ -889,5 +890,85 @@ func TestUpdateInstallWithVersionMapsErrors(t *testing.T) {
 		if response.Code != want {
 			t.Fatalf("error %v: status = %d, want %d", err, response.Code, want)
 		}
+	}
+}
+
+type testRingLearner struct {
+	learned []ringattribution.Learned
+	resets  int
+}
+
+func (l *testRingLearner) Learned() []ringattribution.Learned { return l.learned }
+
+func (l *testRingLearner) Reset() error {
+	l.resets++
+	l.learned = nil
+
+	return nil
+}
+
+func TestSystemConfigSavesRingAttributionAndKeepsItForAnOlderPage(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServer(t, nil)
+	learner := &testRingLearner{learned: []ringattribution.Learned{{Address: "21", Corrections: 6, SlowestMS: 661, HoldMS: 761}}}
+	server.SetRingAttribution(learner)
+	cookie := configuredSession(t, server)
+
+	var read editableSystem
+
+	decodeResponse(t, request(t, server, http.MethodGet, "/webui/api/management/system", nil, cookie), &read)
+
+	if read.RingAttribution == nil || read.RingAttribution.Enabled || read.RingAttribution.MaxWaitMS != config.DefaultRingAttributionMaxWaitMS || len(read.RingAttribution.Learned) != 1 {
+		t.Fatalf("read ring attribution = %+v, want off, the default cap and what was learned", read.RingAttribution)
+	}
+
+	read.RingAttribution = &editableRingAttribution{Enabled: true, MaxWaitMS: 1000}
+	if response := request(t, server, http.MethodPut, "/webui/api/management/system", read, cookie); response.Code != http.StatusOK {
+		t.Fatalf("save status = %d: %s", response.Code, response.Body.String())
+	}
+
+	if got := store.Snapshot().System.RingAttribution; got != (config.RingAttribution{Enabled: true}) {
+		t.Fatalf("saved ring attribution = %+v, want on with the default cap kept as 0", got)
+	}
+
+	// A page that knows nothing of ring attribution leaves it as it is.
+	read.RingAttribution = nil
+	if response := request(t, server, http.MethodPut, "/webui/api/management/system", read, cookie); response.Code != http.StatusOK {
+		t.Fatalf("older save status = %d: %s", response.Code, response.Body.String())
+	}
+
+	if got := store.Snapshot().System.RingAttribution; !got.Enabled {
+		t.Fatalf("ring attribution after an older page saved = %+v, want it kept", got)
+	}
+
+	read.RingAttribution = &editableRingAttribution{Enabled: true, MaxWaitMS: 50}
+	if response := request(t, server, http.MethodPut, "/webui/api/management/system", read, cookie); response.Code != http.StatusBadRequest {
+		t.Fatalf("save of a 50 ms cap status = %d, want 400", response.Code)
+	}
+}
+
+func TestRingAttributionResetForgetsWhatWasLearned(t *testing.T) {
+	t.Parallel()
+
+	server, _ := testServer(t, nil)
+	learner := &testRingLearner{learned: []ringattribution.Learned{{Address: "21", Corrections: 1, SlowestMS: 300, HoldMS: 400}}}
+	server.SetRingAttribution(learner)
+	cookie := configuredSession(t, server)
+
+	if response := request(t, server, http.MethodPost, "/webui/api/management/system/ring-attribution/reset", confirmationRequest{}, cookie); response.Code != http.StatusBadRequest {
+		t.Fatalf("reset without confirmation status = %d, want 400", response.Code)
+	}
+
+	if response := request(t, server, http.MethodPost, "/webui/api/management/system/ring-attribution/reset", confirmationRequest{Confirm: true}, cookie); response.Code != http.StatusOK {
+		t.Fatalf("reset status = %d: %s", response.Code, response.Body.String())
+	}
+
+	if learner.resets != 1 {
+		t.Fatalf("resets = %d, want 1", learner.resets)
+	}
+
+	if response := request(t, server, http.MethodPost, "/webui/api/management/system/ring-attribution/reset", confirmationRequest{Confirm: true}, nil); response.Code == http.StatusOK {
+		t.Fatal("reset without a session succeeded")
 	}
 }

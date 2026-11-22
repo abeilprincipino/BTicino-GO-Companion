@@ -368,3 +368,48 @@ func TestProjector_AnswerKeepsAnotherEntrypointsRing(t *testing.T) {
 		t.Fatalf("physical ring = %#v, want the side entrypoint's ring kept", ring)
 	}
 }
+
+func TestProjector_RingRetargetedMovesTheRingAndWhatBelongsToIt(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, RingStarted{EntrypointID: "portal0"})
+	applyEvent(t, projector, IncomingCallStarted{DialogID: testDialogID, EntrypointID: "portal0"})
+	applyEvent(t, projector, PreviewStarted{StreamID: testPreviewID, EntrypointID: "portal0"})
+	applyEvent(t, projector, RingRetargeted{From: "portal0", To: "portal6"})
+
+	assertState(t, projector.Snapshot(), State{
+		Revision:      4,
+		CallState:     CallStateRinging,
+		PhysicalRing:  &PhysicalRing{EntrypointID: "portal6"},
+		IncomingCall:  &IncomingCall{DialogID: testDialogID, EntrypointID: "portal6"},
+		PreviewStream: &PreviewStream{StreamID: testPreviewID, EntrypointID: "portal6"},
+	})
+
+	// A second report of the same move, from the SIP side, changes nothing.
+	applyEvent(t, projector, RingRetargeted{From: "portal0", To: "portal6"})
+
+	if ring := projector.Snapshot().PhysicalRing; ring == nil || ring.EntrypointID != "portal6" {
+		t.Fatalf("ring = %#v, want portal6", ring)
+	}
+
+	if _, err := projector.Apply(RingRetargeted{From: "portal6"}); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("retarget to nothing error = %v, want ErrInvalidTransition", err)
+	}
+}
+
+func TestProjector_PreviewStartedMovesItsOwnStreamOnly(t *testing.T) {
+	t.Parallel()
+
+	projector := NewProjector()
+	applyEvent(t, projector, PreviewStarted{StreamID: testPreviewID, EntrypointID: "portal0"})
+	applyEvent(t, projector, PreviewStarted{StreamID: testPreviewID, EntrypointID: "portal6"})
+
+	if preview := projector.Snapshot().PreviewStream; preview == nil || preview.EntrypointID != "portal6" {
+		t.Fatalf("preview = %#v, want the same stream on portal6", preview)
+	}
+
+	if _, err := projector.Apply(PreviewStarted{StreamID: "preview-2", EntrypointID: "portal0"}); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("second stream error = %v, want ErrInvalidTransition", err)
+	}
+}

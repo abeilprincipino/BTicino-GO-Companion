@@ -28,17 +28,34 @@ type Mapper struct {
 	// doorbell is config.DoorbellEntrypoint, if the configuration names one:
 	// every ring is its, whatever address the frame carries.
 	doorbell core.EntrypointID
+	// ringers are the entrypoints that can ring, by devaddr, and ringerOrder
+	// the same in configuration order. With more than one doorbell, one per
+	// external unit, a ring goes to the one at the frame's address.
+	ringers     map[string]core.EntrypointID
+	ringerOrder []core.EntrypointID
 	// lastStop is the latest stop frame, duplicates included.
 	lastStop time.Time
 	// ignoreStopsUntil is the end of the stale stop window of a restarted ring.
 	ignoreStopsUntil time.Time
-	now              func() time.Time
+	// ringAt, ringAddress and provisional are the time, the external unit
+	// address and the entrypoint of the ring frame of the ring in progress, and
+	// identified whether its identity frame came.
+	ringAt      time.Time
+	ringAddress string
+	provisional core.EntrypointID
+	identified  bool
+	now         func() time.Time
 }
 
 func NewMapper(entrypoints []config.Entrypoint) *Mapper {
-	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time), now: time.Now}
+	m := &Mapper{entrypoints: make(map[string]core.EntrypointID), ringers: make(map[string]core.EntrypointID), recentFrames: make(map[string]time.Time), now: time.Now}
 	for _, entrypoint := range entrypoints {
 		m.entrypoints[entrypoint.DevAddr] = core.EntrypointID(entrypoint.ID)
+
+		if entrypoint.Capabilities.Ring {
+			m.ringers[strings.TrimSpace(entrypoint.DevAddr)] = core.EntrypointID(entrypoint.ID)
+			m.ringerOrder = append(m.ringerOrder, core.EntrypointID(entrypoint.ID))
+		}
 	}
 
 	if doorbell, ok := config.DoorbellEntrypoint(entrypoints); ok {
@@ -85,12 +102,17 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		m.activeEntrypoint = id
+		m.ringAt, m.ringAddress, m.provisional, m.identified = now, ringFrameAddress(raw), id, false
 
 		if !m.lastStop.IsZero() && now.Sub(m.lastStop) <= stopBurstBeforeRing {
 			m.ignoreStopsUntil = now.Add(staleStopWindow)
 		}
 
-		return []core.Event{core.RingStarted{EntrypointID: id}}
+		return []core.Event{core.RingStarted{EntrypointID: id, FrameAddress: m.ringAddress}}
+	}
+
+	if address, ok := ParseRingIdentityAddress(raw); ok {
+		return m.identify(address, now)
 	}
 
 	if raw == FrameAudioMuted {
@@ -123,6 +145,43 @@ func (m *Mapper) Map(message Message) []core.Event {
 	return nil
 }
 
+// identify follows a ring identity frame, which names the external unit at
+// address as the one whose camera rings. A C100X may send the ring frame with
+// another unit's address and name the right one only in this later frame. The
+// ring moves to the doorbell at address, and the first such frame of a ring is
+// reported with RingIdentified. It only applies with several doorbells: a
+// configuration with one, or that names one, gets every ring.
+func (m *Mapper) identify(address string, now time.Time) []core.Event {
+	if m.activeEntrypoint == "" || m.doorbell != "" || len(m.ringerOrder) < 2 {
+		return nil
+	}
+
+	var events []core.Event
+
+	id := m.ringers[address]
+	if id != "" && id != m.activeEntrypoint {
+		events = append(events, core.RingRetargeted{From: m.activeEntrypoint, To: id})
+		m.activeEntrypoint = id
+	}
+
+	if !m.identified {
+		m.identified = true
+		events = append(events, core.RingIdentified{EntrypointID: id, Provisional: m.provisional, FrameAddress: m.ringAddress, Delay: now.Sub(m.ringAt)})
+	}
+
+	return events
+}
+
+// ringFrameAddress is the external unit address a ring frame
+// *8*1#<mode>#4#<unit>*<indoor unit>## carries.
+func ringFrameAddress(frame string) string {
+	if address := extractViewRequestAddress(frame); address != "" {
+		return address
+	}
+
+	return ExtractAddress(frame)
+}
+
 func (m *Mapper) duplicate(raw string, now time.Time) bool {
 	for frame, seen := range m.recentFrames {
 		if now.Sub(seen) > 300*time.Millisecond {
@@ -142,12 +201,25 @@ func (m *Mapper) duplicate(raw string, now time.Time) bool {
 
 // resolveEntrypoint gives a ring frame to the doorbell entrypoint when the
 // configuration names one: an entrypoint that is only a lock or a light may
-// share its devaddr with an address in the frame. Otherwise the frame
-// *8*1#<mode>#4#<a>*<b>## is matched to a configured devaddr, trying <b>, then
-// <a>, which is where a view request carries the external unit.
+// share its devaddr with an address in the frame. With several doorbells, one
+// per external unit, the frame goes to the doorbell at its address, and to the
+// first doorbell in configuration order when the address matches none, so a
+// ring is never dropped. Otherwise the frame *8*1#<mode>#4#<a>*<b>## is matched
+// to a configured devaddr, trying <b>, then <a>, which is where a ring or a
+// view request carries the external unit.
 func (m *Mapper) resolveEntrypoint(frame string) core.EntrypointID {
 	if m.doorbell != "" {
 		return m.doorbell
+	}
+
+	if len(m.ringerOrder) > 0 {
+		for _, address := range []string{ExtractAddress(frame), extractViewRequestAddress(frame)} {
+			if id := m.ringers[address]; id != "" {
+				return id
+			}
+		}
+
+		return m.ringerOrder[0]
 	}
 
 	if id := m.entrypoints[ExtractAddress(frame)]; id != "" {
