@@ -121,6 +121,7 @@ func run(
 	}
 
 	publisher := newEventApplier(projector, homeKit, server, logger)
+	runtime.intercom.setSink(publisher.apply)
 	// The broadcasts that do not go through the publisher (a doorbell
 	// picture, a ring clip, diagnostics, an update check, an API call) wait
 	// for its hold to end too.
@@ -128,7 +129,15 @@ func run(
 
 	go checkUpdates(ctx, updater, server.BroadcastState, logger)
 
-	applyEvent := publisher.apply
+	// A ring, a call or a stream is a use of the intercom: a firmware reload
+	// waits for it to be over for a while.
+	applyEvent := func(event core.Event) {
+		if intercomActivityEvent(event) {
+			runtime.activity.touch()
+		}
+
+		publisher.apply(event)
+	}
 	ringAttribution := ringattribution.New(system.CompanionDataDir, ringAttributionSettings(configStore), configuredDoorbells(configStore), logger)
 	webUI.SetRingAttribution(ringAttribution)
 
@@ -323,6 +332,8 @@ type applicationRuntime struct {
 	ringClips         *media.RingClipRecorder
 	snapshots         *media.SnapshotManager
 	ringWatch         *ringVideoWatch
+	intercom          *intercomWatch
+	activity          *intercomActivity
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
 	dialer            interface {
@@ -516,11 +527,23 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// The display ignores an unmute it sees on the bus, so an unmute from Home
 	// Assistant or HomeKit is followed by a firmware reload once the intercom is
 	// idle. See internal/ringersync.
+	// The reload waits for the intercom to go unused for a while, and the
+	// intercom watch tells Home Assistant the intercom is unavailable until
+	// the firmware answers again.
+	activity := newIntercomActivity()
+	intercom := newIntercomWatch(ctx, func(ctx context.Context) error {
+		_, err := control.AudioMutedStatus(ctx)
+		return err
+	}, logger)
+	reloader := ringersync.NewFirmwareReloader()
 	ringer := ringersync.New(ringersync.Config{
-		Audio:  control,
-		Muted:  func() bool { return projector.Snapshot().Audio.Muted },
-		Busy:   func() bool { return intercomBusy(projector.Snapshot()) },
-		Reload: ringersync.NewFirmwareReloader().Reload,
+		Audio: control,
+		Muted: func() bool { return projector.Snapshot().Audio.Muted },
+		Busy:  func() bool { return activity.busy(intercomBusy(projector.Snapshot())) },
+		Reload: func(ctx context.Context) error {
+			intercom.reloading()
+			return reloader.Reload(ctx)
+		},
 		Delay:  ringerReloadDelay,
 		Poll:   ringerReloadPoll,
 		Logger: logger.With("component", "ringersync"),
@@ -532,7 +555,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	homeKit.SetSnapshotProvider(snapshots)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
-	server.SetEntrypoints(control)
+	server.SetEntrypoints(watchedEntrypoints{unlock: control.Unlock, watch: intercom, touched: activity.touch})
 	server.SetAudio(ringer)
 	server.SetVoicemail(control)
 	server.SetWebRTC(webrtc)
@@ -557,6 +580,8 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 		ringClips:         ringClips,
 		snapshots:         snapshots,
 		ringWatch:         ringWatch,
+		intercom:          intercom,
+		activity:          activity,
 		trace:             trace,
 		control:           control,
 		rtspServer:        rtspServer,

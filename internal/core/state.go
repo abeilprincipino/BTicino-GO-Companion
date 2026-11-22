@@ -59,7 +59,25 @@ type State struct {
 	PreviewStream       *PreviewStream   `json:"preview_stream,omitempty"`
 	Audio               AudioState       `json:"audio"`
 	Voicemail           *VoicemailState  `json:"voicemail,omitempty"`
+	// IntercomUnavailable is set while the intercom firmware does not answer,
+	// to why; empty while it does.
+	IntercomUnavailable IntercomUnavailableReason `json:"intercom_unavailable,omitempty"`
 }
+
+// ErrIntercomUnavailable refuses a command while the intercom firmware does
+// not answer.
+var ErrIntercomUnavailable = errors.New("the intercom is restarting; try again in a few seconds")
+
+// IntercomUnavailableReason says why the intercom firmware does not answer.
+type IntercomUnavailableReason string
+
+const (
+	// IntercomReloading: the companion reloads the firmware, which stops it
+	// for about 25 s (see internal/ringersync).
+	IntercomReloading IntercomUnavailableReason = "firmware_reload"
+	// IntercomUnreachable: the bus refuses commands for another reason.
+	IntercomUnreachable IntercomUnavailableReason = "unreachable"
+)
 
 type Projector struct {
 	mu    sync.RWMutex
@@ -221,6 +239,14 @@ func apply(state *State, event Event) error {
 		state.Voicemail = &VoicemailState{Enabled: false}
 	case VoicemailUnavailable:
 		state.Voicemail = nil
+	case IntercomUnavailable:
+		if event.Reason == "" {
+			return transitionError("an intercom unavailable reason is required")
+		}
+
+		state.IntercomUnavailable = event.Reason
+	case IntercomAvailable:
+		state.IntercomUnavailable = ""
 	default:
 		return transitionError("unsupported event %T", event)
 	}

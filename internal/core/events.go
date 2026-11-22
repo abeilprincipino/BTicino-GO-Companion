@@ -27,6 +27,8 @@ const (
 	EventVoicemailEnabled     EventType = "voicemail.enabled"
 	EventVoicemailDisabled    EventType = "voicemail.disabled"
 	EventVoicemailUnavailable EventType = "voicemail.unavailable"
+	EventIntercomUnavailable  EventType = "intercom.unavailable"
+	EventIntercomAvailable    EventType = "intercom.available"
 )
 
 type Event interface {
@@ -172,3 +174,19 @@ type VoicemailUnavailable struct{}
 
 func (VoicemailUnavailable) Type() EventType { return EventVoicemailUnavailable }
 func (VoicemailUnavailable) event()          {}
+
+// IntercomUnavailable reports that the intercom firmware does not answer:
+// no unlock, stream or ring works until IntercomAvailable. Reason names why,
+// see IntercomUnavailableReason.
+type IntercomUnavailable struct {
+	Reason IntercomUnavailableReason
+}
+
+func (IntercomUnavailable) Type() EventType { return EventIntercomUnavailable }
+func (IntercomUnavailable) event()          {}
+
+// IntercomAvailable reports that the intercom firmware answers again.
+type IntercomAvailable struct{}
+
+func (IntercomAvailable) Type() EventType { return EventIntercomAvailable }
+func (IntercomAvailable) event()          {}

@@ -159,6 +159,10 @@ func writeCommandError(w http.ResponseWriter, err error) {
 	code := "command_failed"
 
 	switch {
+	case errors.Is(err, core.ErrIntercomUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "intercom_unavailable", core.ErrIntercomUnavailable.Error())
+
+		return
 	case errors.Is(err, system.ErrRuntimeUnavailable), errors.Is(err, system.ErrUpdateUnavailable), errors.Is(err, system.ErrServiceNotAllowed), errors.Is(err, media.ErrSnapshotUnavailable):
 		status = http.StatusServiceUnavailable
 		code = "unavailable"

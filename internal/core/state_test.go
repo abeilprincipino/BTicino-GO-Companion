@@ -413,3 +413,27 @@ func TestProjector_PreviewStartedMovesItsOwnStreamOnly(t *testing.T) {
 		t.Fatalf("second stream error = %v, want ErrInvalidTransition", err)
 	}
 }
+
+func TestProjectorTracksIntercomAvailability(t *testing.T) {
+	projector := NewProjector()
+
+	if _, err := projector.Apply(IntercomUnavailable{}); err == nil {
+		t.Fatal("Apply(IntercomUnavailable{}) without a reason succeeded")
+	}
+
+	if _, err := projector.Apply(IntercomUnavailable{Reason: IntercomReloading}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := projector.Snapshot().IntercomUnavailable; got != IntercomReloading {
+		t.Fatalf("IntercomUnavailable = %q, want %q", got, IntercomReloading)
+	}
+
+	if _, err := projector.Apply(IntercomAvailable{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := projector.Snapshot().IntercomUnavailable; got != "" {
+		t.Fatalf("IntercomUnavailable = %q after IntercomAvailable, want empty", got)
+	}
+}

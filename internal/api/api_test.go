@@ -1196,6 +1196,34 @@ func newSetupRequiredTestServer(t *testing.T) (*Server, *config.Store) {
 
 type failingConn struct{}
 
+// An unlock refused while the intercom restarts answers 503 with the reason,
+// which Home Assistant shows to the user.
+func TestServer_UnlockWhileTheIntercomIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server, store := newTestServer(t)
+	server.SetEntrypoints(failingUnlock{err: core.ErrIntercomUnavailable})
+
+	token, err := auth.NewStore(store).RotateBearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v3/entrypoints/main/unlock", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "intercom_unavailable") {
+		t.Fatalf("unlock response = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+type failingUnlock struct{ err error }
+
+func (f failingUnlock) Unlock(context.Context, core.EntrypointID) error { return f.err }
+
 type unlockRecorder struct {
 	entrypoint core.EntrypointID
 }
