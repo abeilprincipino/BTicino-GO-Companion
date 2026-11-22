@@ -842,7 +842,9 @@ function entrypointCardHTML(ep, idx) {
     + '<div class="form-check-row">'
       + checkboxHTML('ep-doorbell-' + idx, 'ep-has-doorbell', 'Doorbell (ring + stream)', isDoorbell(ep))
       + checkboxHTML('ep-unlock-' + idx, 'ep-has-unlock', 'Unlock', !!(ep.capabilities && ep.capabilities.unlock))
+      + checkboxHTML('ep-repeat-ring-' + idx, 'ep-ignore-repeat-ring', 'Ignore repeated call', !!ep.ignore_repeat_ring)
     + '</div>'
+    + '<div class="form-hint">Ignore repeated call: for a street panel that ends an unanswered call by itself and calls again a moment later. The second call is hidden, and declined if the door was already opened.</div>'
     + '</div>';
 }
 
@@ -906,6 +908,7 @@ function collectEntrypoints() {
     // Leave defaults absent so an unchanged door remains readable by older builds.
     if (modeInput.value !== 'door') entrypoint.unlock_mode = modeInput.value;
     if (duration !== 2000) entrypoint.unlock_duration_ms = duration;
+    if (card.querySelector('.ep-ignore-repeat-ring').checked) entrypoint.ignore_repeat_ring = true;
     out.push(entrypoint);
   }
   return out;

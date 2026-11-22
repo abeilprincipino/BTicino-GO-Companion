@@ -165,11 +165,7 @@ func TestHeldPublisherIgnoresTheTimerOfAnEndedHold(t *testing.T) {
 	publisher.hold(time.Hour)
 	time.Sleep(80 * time.Millisecond)
 
-	publisher.mu.Lock()
-	held := publisher.held
-	publisher.mu.Unlock()
-
-	if !held {
+	if !publisher.isHeld() {
 		t.Fatal("the first hold's timer ended the second hold")
 	}
 

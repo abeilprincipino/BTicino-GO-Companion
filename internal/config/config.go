@@ -84,6 +84,10 @@ type Entrypoint struct {
 	Capabilities     Capabilities `yaml:"capabilities" json:"capabilities"`
 	UnlockMode       string       `yaml:"unlock_mode,omitempty" json:"unlock_mode,omitempty"`
 	UnlockDurationMS int          `yaml:"unlock_duration_ms,omitempty" json:"unlock_duration_ms,omitempty"`
+	// IgnoreRepeatRing hides the call some street panels make again by
+	// themselves a moment after ending an unanswered one, and declines it when
+	// the door was already opened. See docs/superpowers/specs/2026-11-22-repeat-ring-design.md.
+	IgnoreRepeatRing bool `yaml:"ignore_repeat_ring,omitempty" json:"ignore_repeat_ring,omitempty"`
 }
 
 type Capabilities struct {

@@ -16,24 +16,38 @@ import (
 // announced once, settled. Everything inside the companion keeps working on
 // the projector meanwhile: the inbound call is attributed, and the ring's
 // stream, picture and clip start, without waiting.
+//
+// More than one hold can run at once, each with its owner: the ring
+// attribution's (hold, release) and the repeat ring guard's. Publishing
+// resumes when the last one ends.
 type heldPublisher struct {
 	projector *core.Projector
 	publish   func(state core.State, events []core.EventType)
 	logger    *slog.Logger
 
 	mu sync.Mutex
-	// held is set while publishing is held back, pending the events applied
-	// meanwhile, and generation names the hold, so a late timer of an old one
-	// cannot end a newer one.
-	held       bool
+	// holds are the running holds by owner, and pending the events applied
+	// while any runs. generation names each hold, so a late timer of an old
+	// one cannot end a newer one.
+	holds      map[string]*publicationHold
 	pending    []core.EventType
+	generation uint64
+}
+
+type publicationHold struct {
 	generation uint64
 	heldAt     time.Time
 	timer      *time.Timer
 }
 
+// The owners of a hold.
+const (
+	holdRingAttribution = "ring_attribution"
+	holdRepeatRing      = "repeat_ring"
+)
+
 func newHeldPublisher(projector *core.Projector, publish func(core.State, []core.EventType), logger *slog.Logger) *heldPublisher {
-	return &heldPublisher{projector: projector, publish: publish, logger: logger.With("component", "ring_attribution")}
+	return &heldPublisher{projector: projector, publish: publish, logger: logger.With("component", "ring_attribution"), holds: map[string]*publicationHold{}}
 }
 
 func (p *heldPublisher) apply(event core.Event) {
@@ -43,7 +57,7 @@ func (p *heldPublisher) apply(event core.Event) {
 	}
 
 	p.mu.Lock()
-	if p.held {
+	if len(p.holds) > 0 {
 		p.pending = append(p.pending, event.Type())
 		p.mu.Unlock()
 
@@ -54,9 +68,16 @@ func (p *heldPublisher) apply(event core.Event) {
 	p.publish(p.projector.Snapshot(), []core.EventType{event.Type()})
 }
 
-// hold holds publishing back for up to wait. A hold already running keeps its
-// own end.
-func (p *heldPublisher) hold(wait time.Duration) {
+// hold holds publishing back for up to wait, for the ring attribution. A hold
+// already running keeps its own end.
+func (p *heldPublisher) hold(wait time.Duration) { p.holdAs(holdRingAttribution, wait) }
+
+// release ends the ring attribution's hold.
+func (p *heldPublisher) release(reason string) { p.releaseAs(holdRingAttribution, reason, nil) }
+
+// holdAs holds publishing back for up to wait on behalf of owner. A hold of
+// the same owner already running keeps its own end.
+func (p *heldPublisher) holdAs(owner string, wait time.Duration) {
 	if wait <= 0 {
 		return
 	}
@@ -64,42 +85,76 @@ func (p *heldPublisher) hold(wait time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.held {
+	if _, held := p.holds[owner]; held {
 		return
 	}
 
-	p.held = true
 	p.generation++
-	p.heldAt = time.Now()
 	generation := p.generation
-	p.timer = time.AfterFunc(wait, func() { p.end(generation, "timeout") })
+	p.holds[owner] = &publicationHold{
+		generation: generation,
+		heldAt:     time.Now(),
+		timer:      time.AfterFunc(wait, func() { p.end(owner, generation, "timeout", nil) }),
+	}
 }
 
-// release publishes what was held back, if anything is.
-func (p *heldPublisher) release(reason string) {
+// releaseAs ends owner's hold. drop, if set, takes out the events held back
+// so far that are not to be told; the state is published as it is.
+func (p *heldPublisher) releaseAs(owner, reason string, drop func(core.EventType) bool) {
 	p.mu.Lock()
-	generation := p.generation
+	hold, held := p.holds[owner]
 	p.mu.Unlock()
 
-	p.end(generation, reason)
+	if held {
+		p.end(owner, hold.generation, reason, drop)
+	}
 }
 
-func (p *heldPublisher) end(generation uint64, reason string) {
+func (p *heldPublisher) isHeld() bool {
 	p.mu.Lock()
-	if !p.held || p.generation != generation {
+	defer p.mu.Unlock()
+
+	return len(p.holds) > 0
+}
+
+func (p *heldPublisher) end(owner string, generation uint64, reason string, drop func(core.EventType) bool) {
+	p.mu.Lock()
+
+	hold, held := p.holds[owner]
+	if !held || hold.generation != generation {
 		p.mu.Unlock()
 		return
 	}
 
-	p.held = false
+	delete(p.holds, owner)
+	hold.timer.Stop()
+
+	if drop != nil {
+		kept := p.pending[:0]
+
+		for _, event := range p.pending {
+			if !drop(event) {
+				kept = append(kept, event)
+			}
+		}
+
+		p.pending = kept
+	}
+
+	heldFor := time.Since(hold.heldAt)
+
+	if len(p.holds) > 0 {
+		p.mu.Unlock()
+		p.logger.Debug("ring report hold ended; another still holds it", "owner", owner, "reason", reason, "held_ms", heldFor.Milliseconds())
+
+		return
+	}
+
 	pending := p.pending
 	p.pending = nil
-	heldFor := time.Since(p.heldAt)
-
-	p.timer.Stop()
 	p.mu.Unlock()
 
-	p.logger.Debug("ring report released", "reason", reason, "held_ms", heldFor.Milliseconds(), "events", len(pending))
+	p.logger.Debug("ring report released", "owner", owner, "reason", reason, "held_ms", heldFor.Milliseconds(), "events", len(pending))
 	p.publish(p.projector.Snapshot(), pending)
 }
 

@@ -146,7 +146,11 @@ func run(
 	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(entrypointID string) ringClip {
 		return runtime.ringWatch.clip(runtime.ringClips.Start(entrypointID))
 	}, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
-	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
+	// The repeat ring guard sees a call before the rest, so it can hold back
+	// the report of a street panel that calls twice for one visitor.
+	repeatRing := newRepeatRingGuard(func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints },
+		publisher, runtime.calls.Hangup, logger)
+	runtime.calls.SetEvents(eventSinkFunc(repeatRing.routeCalls(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent)))))
 	runtime.snapshots.SetRingLabel(holder.ringLabel)
 
 	if runtime.inboundSIP {
@@ -181,6 +185,7 @@ func run(
 		}
 
 		call.observeFrame(frame)
+		repeatRing.observeFrame(frame)
 		runtime.ringWatch.observeFrame(frame)
 
 		switch {
@@ -245,8 +250,8 @@ func run(
 		}
 	}()
 	go func() {
-		busEvents := routeRingAttribution(ringAttribution, publisher, logger,
-			routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent))
+		busEvents := repeatRing.routeBus(routeRingAttribution(ringAttribution, publisher, logger,
+			routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent)))
 		if err := listener.Run(ctx, busEvents); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
 		}
