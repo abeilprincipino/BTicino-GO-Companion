@@ -25,15 +25,29 @@ type fakeHolderCoordinator struct {
 
 	mu        sync.Mutex
 	retargets []string
+	// unreserved makes RetargetStream find no stream to move, as before
+	// AcquireRingingPreview reserves one.
+	unreserved bool
 }
 
 func (f *fakeHolderCoordinator) RetargetStream(from string, to config.Entrypoint) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.unreserved {
+		return false
+	}
+
 	f.retargets = append(f.retargets, from+">"+to.ID)
 
 	return true
+}
+
+func (f *fakeHolderCoordinator) setUnreserved(unreserved bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.unreserved = unreserved
 }
 
 func (f *fakeHolderCoordinator) streamMoves() []string {
@@ -406,7 +420,11 @@ func TestRingHolderMovesTheHeldStreamToTheEntrypointThatRang(t *testing.T) {
 	}
 }
 
-func TestRingHolderMovesAStreamThatWasStillStarting(t *testing.T) {
+// The coordinator reserves the stream as the acquire starts, long before it is
+// up. A card of the entrypoint that rang joins a stream labelled with its own
+// entrypoint and is refused one labelled with another, so the stream must move
+// at once, not when the holder has it.
+func TestRingHolderMovesAStreamThatIsStillStarting(t *testing.T) {
 	coordinator := newFakeHolderCoordinator()
 	coordinator.gate = make(chan struct{})
 	clips := newFakeClipStarter()
@@ -417,15 +435,59 @@ func TestRingHolderMovesAStreamThatWasStillStarting(t *testing.T) {
 	clip := waitClip(t, clips)
 	route(core.RingRetargeted{From: "main", To: "side"})
 
-	if moves := coordinator.streamMoves(); len(moves) != 0 {
-		t.Fatalf("stream moves = %v before the stream is held, want none", moves)
+	if moves := coordinator.streamMoves(); len(moves) != 1 || moves[0] != "main>side" {
+		t.Fatalf("stream moves = %v while the stream starts, want [main>side]", moves)
+	}
+
+	if target, _ := clip.target.Load().(string); target != "" {
+		t.Fatalf("clip target = %q before the holder has the clip, want none", target)
 	}
 
 	close(coordinator.gate)
 	waitAcquired(t, coordinator)
-	waitStreamMoves(t, coordinator, "main>side")
+	waitClipTarget(t, clip, "side")
 
-	if target, _ := clip.target.Load().(string); target != "side" {
-		t.Fatalf("clip target = %q, want side", target)
+	if moves := coordinator.streamMoves(); len(moves) != 1 {
+		t.Fatalf("stream moves = %v once the stream is up, want the one move", moves)
+	}
+}
+
+// A move that comes before the acquire reserved the stream finds nothing to
+// relabel: the holder moves the stream once it has it.
+func TestRingHolderMovesAStreamReservedAfterTheMove(t *testing.T) {
+	coordinator := newFakeHolderCoordinator()
+	coordinator.gate = make(chan struct{})
+	coordinator.setUnreserved(true)
+	clips := newFakeClipStarter()
+	holder := newTestRingHolderWithClips(coordinator, clips)
+	route := holder.route(func(core.Event) {})
+
+	route(core.IncomingCallStarted{DialogID: "d", EntrypointID: "main"})
+	clip := waitClip(t, clips)
+	route(core.RingRetargeted{From: "main", To: "side"})
+
+	if moves := coordinator.streamMoves(); len(moves) != 0 {
+		t.Fatalf("stream moves = %v before the stream is reserved, want none", moves)
+	}
+
+	coordinator.setUnreserved(false)
+	close(coordinator.gate)
+	waitAcquired(t, coordinator)
+	waitStreamMoves(t, coordinator, "main>side")
+	waitClipTarget(t, clip, "side")
+}
+
+func waitClipTarget(t *testing.T, clip *fakeRingClip, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if target, _ := clip.target.Load().(string); target == want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("clip target = %q, want %q", target, want)
+		}
+
+		time.Sleep(5 * time.Millisecond)
 	}
 }

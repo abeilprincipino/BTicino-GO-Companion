@@ -56,11 +56,12 @@ type ringHolder struct {
 	// the lease, so the answer ends the recording.
 	clip ringClip
 	// opened is the entrypoint the ring's stream was opened for, ring the one
-	// the ring belongs to, and streamAt the one the stream and the clip are
-	// labelled with. ring moves when a C100X names the external unit that
-	// rang after the ring frame; see retarget. They keep their values after
-	// the ring, since a picture may still be on its way, until the next ring.
-	opened, ring, streamAt core.EntrypointID
+	// the ring belongs to, and streamAt and clipAt the ones the stream and the
+	// clip are labelled with. ring moves when a C100X names the external unit
+	// that rang after the ring frame; see retarget. They keep their values
+	// after the ring, since a picture may still be on its way, until the next
+	// ring.
+	opened, ring, streamAt, clipAt core.EntrypointID
 	// moveMu runs the relabelling of the stream one move at a time.
 	moveMu sync.Mutex
 }
@@ -93,7 +94,7 @@ func (h *ringHolder) hold(entrypointID core.EntrypointID) {
 	generation := h.generation
 	previous, previousClip := h.lease, h.clip
 	h.lease, h.clip = nil, nil
-	h.opened, h.ring, h.streamAt = entrypointID, entrypointID, entrypointID
+	h.opened, h.ring, h.streamAt, h.clipAt = entrypointID, entrypointID, entrypointID, entrypointID
 	h.mu.Unlock()
 
 	if previousClip != nil {
@@ -173,31 +174,50 @@ func (h *ringHolder) retarget(from, to core.EntrypointID) {
 	h.move()
 }
 
-// move labels the held stream and its clip with the entrypoint the ring
-// belongs to now. Without a held stream it waits for acquire to call it.
+// move labels the ring's stream and its clip with the entrypoint the ring
+// belongs to now. The stream is relabelled as soon as the coordinator has it,
+// even while it is still starting: until then a card of the entrypoint that
+// rang finds the stream labelled with another entrypoint and is refused as
+// busy, which on a C100X is the whole startup of the stream, two seconds and
+// more. The clip, which acquire keeps only once the stream is up, is
+// relabelled when the holder has it; acquire calls move again for that, and
+// for a stream the coordinator had not reserved yet.
 func (h *ringHolder) move() {
 	h.moveMu.Lock()
 	defer h.moveMu.Unlock()
 
 	h.mu.Lock()
-	lease, clip, target, at := h.lease, h.clip, h.ring, h.streamAt
+	generation := h.generation
+	lease, clip, target, streamAt, clipAt := h.lease, h.clip, h.ring, h.streamAt, h.clipAt
 	h.mu.Unlock()
 
-	if lease == nil || target == at {
-		return
+	if target != streamAt {
+		entrypoint, ok := h.entrypoint(target)
+		moved := ok && h.coordinator.RetargetStream(string(streamAt), entrypoint)
+
+		switch {
+		case moved:
+			streamAt = target
+		case lease != nil:
+			// The holder has the stream and it is not labelled with
+			// streamAt: it is no longer the ring's, and nothing is left to
+			// move.
+			h.logger.Debug("ring stream not moved; it is no longer the ring's", "from_entrypoint_id", streamAt, "entrypoint_id", target)
+
+			streamAt = target
+		}
 	}
 
-	if clip != nil {
+	if clip != nil && target != clipAt {
 		clip.Retarget(string(target))
-	}
 
-	if entrypoint, ok := h.entrypoint(target); ok && !h.coordinator.RetargetStream(string(at), entrypoint) {
-		h.logger.Debug("ring stream not moved; it is no longer the ring's", "from_entrypoint_id", at, "entrypoint_id", target)
+		clipAt = target
 	}
 
 	h.mu.Lock()
-	if h.lease == lease {
-		h.streamAt = target
+	// A new ring resets both labels, and an ended one needs them no more.
+	if h.generation == generation {
+		h.streamAt, h.clipAt = streamAt, clipAt
 	}
 	h.mu.Unlock()
 }

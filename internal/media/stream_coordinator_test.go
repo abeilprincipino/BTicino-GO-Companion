@@ -1535,3 +1535,86 @@ func TestStreamCoordinatorRetargetStreamMovesTheRingStream(t *testing.T) {
 	c.Leave(joined)
 	c.Leave(lease)
 }
+
+// A ring stream moved while it still starts serves the entrypoint that rang at
+// once: that entrypoint's card waits for the startup and joins, and the
+// observer hears the new entrypoint when the stream is up.
+func TestStreamCoordinatorRetargetStreamWhileStartingLetsTheNewEntrypointJoin(t *testing.T) {
+	source := newRingingPreviewSource()
+	source.startGate = make(chan struct{})
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	var (
+		mu       sync.Mutex
+		observed []StreamSnapshot
+	)
+
+	c.SetStateObserver(func(snapshot StreamSnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		observed = append(observed, snapshot)
+	})
+
+	type result struct {
+		lease *StreamLease
+		err   error
+	}
+
+	firstDone, secondDone := make(chan result, 1), make(chan result, 1)
+	other := config.Entrypoint{ID: "side", DevAddr: "213"}
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		firstDone <- result{lease, err}
+	}()
+
+	waitSignal(t, source.started, "source Start")
+
+	if !c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() while starting = false, want true")
+	}
+
+	mu.Lock()
+	for _, snapshot := range observed {
+		if snapshot.EntrypointID == "side" {
+			t.Fatalf("observed %+v before the stream is up", snapshot)
+		}
+	}
+	mu.Unlock()
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), other, SourceEvents{})
+		secondDone <- result{lease, err}
+	}()
+
+	select {
+	case second := <-secondDone:
+		t.Fatalf("the card of side returned before the stream had started: %+v", second)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(source.startGate)
+
+	first, second := <-firstDone, <-secondDone
+	if first.err != nil || second.err != nil {
+		t.Fatalf("errors first=%v second=%v, want side to join", first.err, second.err)
+	}
+
+	if first.lease.id != second.lease.id {
+		t.Fatalf("leases %d and %d, want one shared stream", first.lease.id, second.lease.id)
+	}
+
+	mu.Lock()
+	last := observed[len(observed)-1]
+	mu.Unlock()
+
+	if last.EntrypointID != "side" || last.DevAddr != "213" {
+		t.Fatalf("last observed snapshot = %+v, want the stream on side", last)
+	}
+
+	c.Leave(second.lease)
+	c.Leave(first.lease)
+}
