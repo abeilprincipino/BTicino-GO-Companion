@@ -18,6 +18,7 @@ and installing a local build see [docs/build-and-install.md](docs/build-and-inst
 - [Installing a Local Build](#installing-a-local-build)
 - [Installer Options](#installer-options)
 - [After Installation](#after-installation)
+- [Several external units with a camera](#several-external-units-with-a-camera)
 - [Auxiliary unlock commands](#auxiliary-unlock-commands)
 - [Answering Calls from Home Assistant](#answering-calls-from-home-assistant)
 - [Service Commands](#service-commands)
@@ -185,6 +186,44 @@ Then:
   enabled).
 - In Home Assistant, the companion is discovered over mDNS by
   [BTicino GO Integration](https://github.com/abeilprincipino/BTicino-GO-Integration).
+
+## Several external units with a camera
+
+An installation with more than one external unit can have one doorbell entrypoint (ring + stream)
+per unit, each with the unit's address as `devaddr`:
+
+```yaml
+companion:
+  entrypoints:
+    - id: portal0
+      label: Portal 0
+      devaddr: "21"
+      capabilities:
+        stream: true
+        unlock: true
+        ring: true
+    - id: portal6
+      label: Portal 6
+      devaddr: "213"
+      capabilities:
+        stream: true
+        unlock: true
+        ring: true
+```
+
+- Each one gets its own camera in Home Assistant and HomeKit and its own RTSP path
+  (`doorbell-<id>`).
+- The intercom streams one unit at a time: while one camera is on, opening another is refused
+  until the first one stops.
+- A ring goes to the doorbell at the address its ring frame carries, or to the first doorbell in
+  the list when that address matches none. A Classe 100X can send every ring frame with the
+  address of one unit, whichever unit rang, and name the unit that rang in a later frame
+  (`*8*9#1#4*<unit>##`, 0.3 to 2.5 s after the ring). The companion then moves the ring to that
+  unit's doorbell, with its call, doorbell picture and ring clip. Home Assistant may show the ring
+  on the first doorbell for that short time, and HomeKit rings both doorbells.
+- On a Classe 100X the on-demand view needs the unit in the intercom's own module list
+  (`/home/bticino/cfg/extra/.bt_eliot/mymodules`) at that address; the official app can view
+  exactly the units listed there.
 
 ## Auxiliary unlock commands
 

@@ -1484,3 +1484,137 @@ func TestStreamCoordinatorReleasedConsumerCannotClaimTheUplink(t *testing.T) {
 		t.Fatal("backchannel did not receive the second consumer's packet")
 	}
 }
+
+func TestStreamCoordinatorRetargetStreamMovesTheRingStream(t *testing.T) {
+	shared := &sharedFactory{build: func() ManagedSource { return &callEndingSource{} }}
+	c := NewStreamCoordinator(nil, shared.factory())
+
+	var observed []StreamSnapshot
+
+	c.SetStateObserver(func(snapshot StreamSnapshot) { observed = append(observed, snapshot) })
+
+	other := config.Entrypoint{ID: "side", DevAddr: "213"}
+
+	if c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() with no stream = true, want false")
+	}
+
+	lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if c.RetargetStream("elsewhere", other) {
+		t.Fatal("RetargetStream() from another entrypoint = true, want false")
+	}
+
+	observed = nil
+
+	if !c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() = false, want true")
+	}
+
+	if snapshot := c.Snapshot(); snapshot.EntrypointID != "side" || snapshot.DevAddr != "213" {
+		t.Fatalf("snapshot = %+v, want the stream on side", snapshot)
+	}
+
+	if len(observed) != 1 || observed[0].EntrypointID != "side" {
+		t.Fatalf("observed = %+v, want one snapshot on side", observed)
+	}
+
+	// A card of the entrypoint that rang joins the ring stream.
+	joined, err := c.AcquireRingingPreview(context.Background(), context.Background(), other, SourceEvents{})
+	if err != nil {
+		t.Fatalf("AcquireRingingPreview(side) error = %v, want a join", err)
+	}
+
+	if shared.created() != 1 || joined.id != lease.id {
+		t.Fatalf("sources created = %d, joined lease %d of %d, want one shared stream", shared.created(), joined.id, lease.id)
+	}
+
+	c.Leave(joined)
+	c.Leave(lease)
+}
+
+// A ring stream moved while it still starts serves the entrypoint that rang at
+// once: that entrypoint's card waits for the startup and joins, and the
+// observer hears the new entrypoint when the stream is up.
+func TestStreamCoordinatorRetargetStreamWhileStartingLetsTheNewEntrypointJoin(t *testing.T) {
+	source := newRingingPreviewSource()
+	source.startGate = make(chan struct{})
+	c := NewStreamCoordinator(nil, func(config.Entrypoint, SourceEvents) (ManagedSource, func(), error) {
+		return source, nil, nil
+	})
+
+	var (
+		mu       sync.Mutex
+		observed []StreamSnapshot
+	)
+
+	c.SetStateObserver(func(snapshot StreamSnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		observed = append(observed, snapshot)
+	})
+
+	type result struct {
+		lease *StreamLease
+		err   error
+	}
+
+	firstDone, secondDone := make(chan result, 1), make(chan result, 1)
+	other := config.Entrypoint{ID: "side", DevAddr: "213"}
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), testEntrypoint, SourceEvents{})
+		firstDone <- result{lease, err}
+	}()
+
+	waitSignal(t, source.started, "source Start")
+
+	if !c.RetargetStream(testEntrypoint.ID, other) {
+		t.Fatal("RetargetStream() while starting = false, want true")
+	}
+
+	mu.Lock()
+	for _, snapshot := range observed {
+		if snapshot.EntrypointID == "side" {
+			t.Fatalf("observed %+v before the stream is up", snapshot)
+		}
+	}
+	mu.Unlock()
+
+	go func() {
+		lease, err := c.AcquireRingingPreview(context.Background(), context.Background(), other, SourceEvents{})
+		secondDone <- result{lease, err}
+	}()
+
+	select {
+	case second := <-secondDone:
+		t.Fatalf("the card of side returned before the stream had started: %+v", second)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(source.startGate)
+
+	first, second := <-firstDone, <-secondDone
+	if first.err != nil || second.err != nil {
+		t.Fatalf("errors first=%v second=%v, want side to join", first.err, second.err)
+	}
+
+	if first.lease.id != second.lease.id {
+		t.Fatalf("leases %d and %d, want one shared stream", first.lease.id, second.lease.id)
+	}
+
+	mu.Lock()
+	last := observed[len(observed)-1]
+	mu.Unlock()
+
+	if last.EntrypointID != "side" || last.DevAddr != "213" {
+		t.Fatalf("last observed snapshot = %+v, want the stream on side", last)
+	}
+
+	c.Leave(second.lease)
+	c.Leave(first.lease)
+}

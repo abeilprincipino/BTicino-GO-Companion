@@ -609,6 +609,35 @@ func (c *StreamCoordinator) finishStart(lease *StreamLease) {
 	}
 }
 
+// RetargetStream moves the current stream from entrypoint from to entrypoint
+// to: it was opened for a ring that turned out to be another external unit's.
+// The video stays as it is, since the intercom sends the camera of the unit
+// that rang; consumers of to join the stream from now on, and the observer
+// hears the new entrypoint, at once or, for a stream still starting, when it
+// is up. It reports whether the current stream was from's.
+func (c *StreamCoordinator) RetargetStream(from string, to config.Entrypoint) bool {
+	c.mu.Lock()
+
+	if from == "" || to.ID == "" || from == to.ID || c.leaseID == 0 || c.stopping ||
+		c.snapshot.Owner != StreamOwnerCompanion || c.snapshot.EntrypointID != from {
+		c.mu.Unlock()
+
+		return false
+	}
+
+	c.snapshot.EntrypointID, c.snapshot.DevAddr = to.ID, to.DevAddr
+	snapshot, observer, starting := c.snapshot, c.observer, c.starting
+	c.mu.Unlock()
+
+	c.logger.Info("stream retargeted", "lease_id", snapshot.LeaseID, "from_entrypoint_id", from, "entrypoint_id", to.ID)
+
+	if observer != nil && !starting {
+		observer(snapshot)
+	}
+
+	return true
+}
+
 func (c *StreamCoordinator) watch(ctx context.Context, lease *StreamLease) {
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()

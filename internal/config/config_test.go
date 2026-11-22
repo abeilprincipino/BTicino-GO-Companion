@@ -248,11 +248,12 @@ func TestStoreUpdateKeepsStreamAndRingExclusive(t *testing.T) {
 		t.Fatalf("one doorbell entrypoint rejected: %v", err)
 	}
 
+	// One doorbell per external unit with a camera.
 	second := lights
-	second.Capabilities = Capabilities{Stream: true, Ring: true}
+	second.Capabilities = Capabilities{Stream: true, Unlock: true, Ring: true}
 
-	if err := set(doorbell, second); !errors.Is(err, ErrExclusiveCapability) {
-		t.Fatalf("second doorbell: error = %v, want %v", err, ErrExclusiveCapability)
+	if err := set(doorbell, second); err != nil {
+		t.Fatalf("second doorbell rejected: %v", err)
 	}
 
 	for _, capabilities := range []Capabilities{{Stream: true}, {Ring: true}} {

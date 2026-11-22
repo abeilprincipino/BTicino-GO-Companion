@@ -34,7 +34,11 @@ const (
 
 var (
 	voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
-	ringIdentityFrameRegexp    = regexp.MustCompile(`^\*8\*9#1#4\*([^#*]+)#2##$`)
+	// ringIdentityFrameRegexp matches the frame naming the external unit whose
+	// camera a ring connects: *8*9#1#4*<a>#2##, or *8*9#1#4*<a>## on a C100X,
+	// which sends it 0.3 to 2.5 s after a ring frame that may carry another
+	// unit's address.
+	ringIdentityFrameRegexp = regexp.MustCompile(`^\*8\*9#1#4\*([^#*]+)(?:#2)?##$`)
 )
 
 func BuildUnlockOpen(devAddr string) string {

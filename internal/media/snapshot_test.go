@@ -559,3 +559,31 @@ func newTestSnapshotManager(t *testing.T, dir string, logger *slog.Logger, runne
 
 	return manager
 }
+
+func TestSnapshotManagerGivesARingPictureToTheEntrypointTheRingMovedTo(t *testing.T) {
+	image := []byte{0xff, 0xd8, 9, 0xff, 0xd9}
+	manager := newTestSnapshotManager(t, t.TempDir(), nil, &fakeSnapshotRunner{output: image})
+	manager.SetRingLabel(func(entrypointID string) string {
+		if entrypointID == "portal0" {
+			return "portal6"
+		}
+
+		return entrypointID
+	})
+
+	attempt := armAndStart(manager, "portal0")
+	attempt.MarkRing()
+	feedSnapshotKeyframe(attempt, 0, 0)
+
+	if got := waitForRingSnapshot(t, manager, "portal6"); string(got) != string(image) {
+		t.Fatalf("LatestRing(portal6) = %v, want %v", got, image)
+	}
+
+	if _, err := manager.LatestRing("portal0"); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Fatalf("LatestRing(portal0) error = %v, want ErrSnapshotNotFound", err)
+	}
+
+	// A live view keeps its own entrypoint: only a ring moves.
+	feedSnapshotKeyframe(armAndStart(manager, "portal0"), 0, 0)
+	waitForSnapshot(t, manager, "portal0")
+}

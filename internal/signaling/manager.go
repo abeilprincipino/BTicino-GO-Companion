@@ -87,6 +87,10 @@ type Manager struct {
 	// activeEntrypoint is the entrypoint the answered inbound call belongs to,
 	// kept because Answer clears incomingEntrypoint.
 	activeEntrypoint core.EntrypointID
+	// retargetedFrom is the entrypoint the inbound call was first given to,
+	// when RetargetIncoming moved it. The ring stream opened for that one is
+	// still the same ring's, so it may still borrow the call.
+	retargetedFrom core.EntrypointID
 
 	// hungUp runs after Hangup has ended a call; see SetHangupObserver.
 	hungUp func()
@@ -218,6 +222,7 @@ func (m *Manager) OnInvite(ctx context.Context, dialog IncomingDialog) error {
 	m.incoming = dialog
 	m.incomingDevAddr = devAddr
 	m.incomingEntrypoint = entrypointID
+	m.retargetedFrom = ""
 	m.startIncomingExpiryLocked(dialog)
 	m.publishLocked(core.IncomingCallStarted{DialogID: dialog.ID(), EntrypointID: entrypointID})
 
@@ -562,19 +567,56 @@ func (m *Manager) HasRingingInboundCall() bool {
 // entrypointID is the entrypoint the preview is for, not a devaddr: the media
 // layer may replace its own devaddr (a C100X module ID), so only the ID is
 // shared. Another entrypoint's ring is not its call to borrow: on an install
-// with several, its preview would show the wrong door.
+// with several, its preview would show the wrong door. The entrypoint a
+// retargeted call was first given to is the exception: its stream was opened
+// for this very ring, and the intercom sends the camera that rang.
 func (m *Manager) AdoptRingingCall(entrypointID core.EntrypointID) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	mine := func(owner core.EntrypointID) bool {
+		return entrypointID == owner || (m.retargetedFrom != "" && entrypointID == m.retargetedFrom)
+	}
+
 	switch {
-	case m.incoming != nil && entrypointID == m.incomingEntrypoint:
+	case m.incoming != nil && mine(m.incomingEntrypoint):
 		return false, nil
-	case m.active != nil && m.activeIncoming && entrypointID == m.activeEntrypoint:
+	case m.active != nil && m.activeIncoming && mine(m.activeEntrypoint):
 		return true, nil
 	default:
 		return false, ErrNoInboundCall
 	}
+}
+
+// RetargetIncoming moves the inbound call of entrypoint from to entrypoint to,
+// whose devaddr devAddr the answer then carries: the ring that started it
+// turned out to be another external unit's. The move is published as a
+// core.RingRetargeted in commit order with the call's other events, so a move
+// racing the INVITE still reaches the projector after IncomingCallStarted. It
+// reports whether there was a call to move.
+func (m *Manager) RetargetIncoming(from, to core.EntrypointID, devAddr string) bool {
+	m.mu.Lock()
+
+	switch {
+	case from == "" || to == "" || from == to:
+	case m.incoming != nil && m.incomingEntrypoint == from:
+		m.incomingEntrypoint = to
+		m.incomingDevAddr = devAddr
+		m.retargetedFrom = from
+		m.publishLocked(core.RingRetargeted{From: from, To: to})
+
+		return true
+	case m.active != nil && m.activeIncoming && m.activeEntrypoint == from:
+		m.activeEntrypoint = to
+		m.retargetedFrom = from
+		m.publishLocked(core.RingRetargeted{From: from, To: to})
+
+		return true
+	}
+
+	m.mu.Unlock()
+
+	return false
 }
 
 // EndIncoming clears a pending inbound call that will never be answered here.
