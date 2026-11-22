@@ -128,7 +128,17 @@ func (s *Server) handleMessage(client *client, request *http.Request, message Me
 	}
 }
 
+// SetStateHold makes BroadcastState skip the state while held reports true:
+// the publisher holding it back sends the state when the hold ends, and a
+// broadcast in between would tell the clients a state the hold hides, such
+// as a ring that ended for a moment.
+func (s *Server) SetStateHold(held func() bool) { s.stateHeld.Store(&held) }
+
 func (s *Server) BroadcastState() {
+	if held := s.stateHeld.Load(); held != nil && (*held)() {
+		return
+	}
+
 	s.broadcast(Message{Type: "state", Payload: mustJSON(s.currentPayload())})
 }
 

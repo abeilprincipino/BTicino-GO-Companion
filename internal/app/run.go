@@ -120,9 +120,14 @@ func run(
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	publisher := newEventApplier(projector, homeKit, server, logger)
+	// The broadcasts that do not go through the publisher (a doorbell
+	// picture, a ring clip, diagnostics, an update check, an API call) wait
+	// for its hold to end too.
+	server.SetStateHold(publisher.isHeld)
+
 	go checkUpdates(ctx, updater, server.BroadcastState, logger)
 
-	publisher := newEventApplier(projector, homeKit, server, logger)
 	applyEvent := publisher.apply
 	ringAttribution := ringattribution.New(system.CompanionDataDir, ringAttributionSettings(configStore), configuredDoorbells(configStore), logger)
 	webUI.SetRingAttribution(ringAttribution)

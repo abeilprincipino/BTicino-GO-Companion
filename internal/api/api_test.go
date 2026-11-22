@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -980,6 +981,33 @@ func TestServer_SlowClientWriteFailureDisconnects(t *testing.T) {
 
 	if len(server.clients.all()) != 0 {
 		t.Fatal("failed client remained registered")
+	}
+}
+
+// While the publisher holds the state back, a broadcast from elsewhere (a ring
+// clip saved, a doorbell picture) sends nothing: it would show the clients
+// the ring the hold hides as ended.
+func TestServer_BroadcastStateWaitsForTheStateHold(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newTestServer(t)
+
+	var held atomic.Bool
+
+	held.Store(true)
+	server.SetStateHold(held.Load)
+	server.clients.add(&client{conn: failingConn{}})
+	server.BroadcastState()
+
+	if len(server.clients.all()) != 1 {
+		t.Fatal("the state was written while held")
+	}
+
+	held.Store(false)
+	server.BroadcastState()
+
+	if len(server.clients.all()) != 0 {
+		t.Fatal("the state was not written once the hold ended")
 	}
 }
 
