@@ -44,7 +44,10 @@ type Mapper struct {
 	ringAddress string
 	provisional core.EntrypointID
 	identified  bool
-	now         func() time.Time
+	// callEnded is set once the bus ends the ring's call (*8*3#1#...), before
+	// the stop frame that clears the ring: a ring frame then is a new call.
+	callEnded bool
+	now       func() time.Time
 }
 
 func NewMapper(entrypoints []config.Entrypoint) *Mapper {
@@ -91,24 +94,47 @@ func (m *Mapper) Map(message Message) []core.Event {
 		return nil
 	}
 
+	if callType, _, _, ok := ParseCallEnd(raw); ok {
+		if callType == "1" && m.activeEntrypoint != "" {
+			m.callEnded = true
+		}
+
+		return nil
+	}
+
 	if IsRingStart(raw) {
+		var events []core.Event
+
 		if m.activeEntrypoint != "" {
-			return nil
+			// A ring frame during a ring is one of its repeats, unless the bus
+			// has ended the ring's call. A street panel that calls again right
+			// after ending its own call (see the repeat ring guard) can send
+			// the new ring frame 35 ms before the stop frame that clears the
+			// old ring: on a C100X on 2026-11-23 that ring was lost, and its
+			// INVITE was answered busy, with no ring to resolve it to. The old
+			// ring ends here, and its late stop frames are ignored.
+			if !m.callEnded {
+				return nil
+			}
+
+			events = append(events, core.RingCleared{EntrypointID: m.activeEntrypoint})
+			m.activeEntrypoint = ""
+			m.ignoreStopsUntil = now.Add(staleStopWindow)
 		}
 
 		id := m.resolveEntrypoint(raw)
 		if id == "" {
-			return nil
+			return events
 		}
 
-		m.activeEntrypoint = id
+		m.activeEntrypoint, m.callEnded = id, false
 		m.ringAt, m.ringAddress, m.provisional, m.identified = now, ringFrameAddress(raw), id, false
 
 		if !m.lastStop.IsZero() && now.Sub(m.lastStop) <= stopBurstBeforeRing {
 			m.ignoreStopsUntil = now.Add(staleStopWindow)
 		}
 
-		return []core.Event{core.RingStarted{EntrypointID: id, FrameAddress: m.ringAddress}}
+		return append(events, core.RingStarted{EntrypointID: id, FrameAddress: m.ringAddress})
 	}
 
 	if address, ok := ParseRingIdentityAddress(raw); ok {
@@ -137,7 +163,7 @@ func (m *Mapper) Map(message Message) []core.Event {
 		}
 
 		events := []core.Event{core.RingCleared{EntrypointID: m.activeEntrypoint}}
-		m.activeEntrypoint = ""
+		m.activeEntrypoint, m.callEnded = "", false
 
 		return events
 	}

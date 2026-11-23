@@ -188,3 +188,82 @@ func TestMapperKeepsEveryRingOnTheNamedDoorbell(t *testing.T) {
 		t.Fatalf("identity events = %#v, want none: the only doorbell keeps the ring", events)
 	}
 }
+
+// The frames of a C100X on 2026-11-23 at 18:46:55, when a Sfera panel ended its
+// own call and called again with its new ring frame before the stop frame of
+// the old ring.
+func TestMapperStartsTheRingOfACallThatFollowsTheBusCallEnd(t *testing.T) {
+	t.Parallel()
+
+	const ringFrame = "*8*1#1#4#21*110##"
+
+	start := time.Date(2026, time.November, 23, 18, 46, 46, 91_000_000, time.UTC)
+	mapper := NewMapper([]config.Entrypoint{{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Ring: true}}})
+
+	at := func(milliseconds int, raw string) []core.Event {
+		mapper.now = func() time.Time { return start.Add(time.Duration(milliseconds) * time.Millisecond) }
+		return mapper.Map(Message{System: "open", Raw: raw})
+	}
+
+	if events := at(0, ringFrame); len(events) != 1 {
+		t.Fatalf("first ring events = %#v, want exactly one", events)
+	}
+
+	// A repeat of the ring frame while the call is up is the same ring.
+	if events := at(401, ringFrame); len(events) != 0 {
+		t.Fatalf("repeated ring frame events = %#v, want none", events)
+	}
+
+	if events := at(9751, "*8*3#1#3*421##"); len(events) != 0 {
+		t.Fatalf("call end events = %#v, want none", events)
+	}
+
+	events := at(10000, ringFrame)
+	if len(events) != 2 {
+		t.Fatalf("new call events = %#v, want the old ring cleared and the new one started", events)
+	}
+
+	if _, ok := events[0].(core.RingCleared); !ok {
+		t.Fatalf("first event = %#v, want RingCleared", events[0])
+	}
+
+	if started, ok := events[1].(core.RingStarted); !ok || started.EntrypointID != "portal0" {
+		t.Fatalf("second event = %#v, want RingStarted on portal0", events[1])
+	}
+
+	// The old ring's late stop frames do not clear the new ring.
+	for _, milliseconds := range []int{35, 531, 532, 576} {
+		if events := at(10000+milliseconds, FrameStop); len(events) != 0 {
+			t.Fatalf("stale stop at +%d ms events = %#v, want none", milliseconds, events)
+		}
+	}
+
+	if events := at(19800, FrameStop); len(events) != 1 {
+		t.Fatalf("new ring stop events = %#v, want exactly one", events)
+	}
+
+	// Once that ring is over, a ring frame is a new ring, as always.
+	if events := at(40000, ringFrame); len(events) != 1 {
+		t.Fatalf("next ring events = %#v, want exactly one", events)
+	}
+}
+
+// An indoor unit's hangup of a view (type 5) does not end a ring.
+func TestMapperKeepsTheRingThroughTheEndOfAView(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.November, 23, 18, 47, 40, 0, time.UTC)
+	mapper := NewMapper([]config.Entrypoint{{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Ring: true}}})
+
+	at := func(milliseconds int, raw string) []core.Event {
+		mapper.now = func() time.Time { return start.Add(time.Duration(milliseconds) * time.Millisecond) }
+		return mapper.Map(Message{System: "open", Raw: raw})
+	}
+
+	at(0, "*8*1#1#4#21*110##")
+	at(500, "*8*3#5#4*4110##")
+
+	if events := at(2000, "*8*1#1#4#21*110##"); len(events) != 0 {
+		t.Fatalf("ring frame after a view end events = %#v, want none: still the same ring", events)
+	}
+}
