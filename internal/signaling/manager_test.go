@@ -2054,3 +2054,71 @@ func TestManager_HangupDeclinesARingingCallOnTheBusFirst(t *testing.T) {
 		})
 	}
 }
+
+func TestManager_RetargetIncomingMovesTheCallToTheEntrypointThatRang(t *testing.T) {
+	t.Parallel()
+
+	dialog := &fakeIncomingDialog{id: testDialogID}
+	events := &syncEventSink{}
+	manager := NewManager("192.0.2.10", &fakeDialer{}, events, testResolver("portal0", "21"))
+
+	if manager.RetargetIncoming("portal0", "portal6", "213") {
+		t.Fatal("RetargetIncoming() with no call = true, want false")
+	}
+
+	if err := manager.OnInvite(context.Background(), dialog); err != nil {
+		t.Fatal(err)
+	}
+
+	if manager.RetargetIncoming("other", "portal6", "213") {
+		t.Fatal("RetargetIncoming() from another entrypoint = true, want false")
+	}
+
+	if !manager.RetargetIncoming("portal0", "portal6", "213") {
+		t.Fatal("RetargetIncoming() = false, want true")
+	}
+
+	got := events.waitForEvents(t, 2)
+	if want := (core.RingRetargeted{From: "portal0", To: "portal6"}); got[1] != want {
+		t.Fatalf("events = %#v, want IncomingCallStarted then %#v", got, want)
+	}
+
+	for _, entrypointID := range []core.EntrypointID{"portal6", "portal0"} {
+		if _, err := manager.AdoptRingingCall(entrypointID); err != nil {
+			t.Fatalf("AdoptRingingCall(%s) error = %v, want the moved call: the stream of either is this ring's", entrypointID, err)
+		}
+	}
+
+	if _, err := manager.AdoptRingingCall("other"); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall(other) error = %v, want ErrNoInboundCall", err)
+	}
+
+	if err := manager.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if body := dialog.responses[len(dialog.responses)-1].body; !strings.Contains(body, "a=DEVADDR:213") {
+		t.Fatalf("answer SDP = %s, want the devaddr of portal6", body)
+	}
+
+	if answered, err := manager.AdoptRingingCall("portal6"); err != nil || !answered {
+		t.Fatalf("AdoptRingingCall(portal6) after Answer = (%v, %v), want (true, nil)", answered, err)
+	}
+
+	if err := manager.HangupCall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next call starts afresh: the former entrypoint was this call's only.
+	if err := manager.OnInvite(context.Background(), &fakeIncomingDialog{id: "dialog-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdoptRingingCall("portal0"); err != nil {
+		t.Fatalf("AdoptRingingCall(portal0) on the next call error = %v", err)
+	}
+
+	if _, err := manager.AdoptRingingCall("portal6"); !errors.Is(err, ErrNoInboundCall) {
+		t.Fatalf("AdoptRingingCall(portal6) on the next call error = %v, want ErrNoInboundCall", err)
+	}
+}

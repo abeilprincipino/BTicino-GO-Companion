@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,10 @@ type (
 )
 
 type Server struct {
+	// stateHeld, when set, reports whether the publication of the state is
+	// held back; see SetStateHold.
+	stateHeld atomic.Pointer[func() bool]
+
 	auth             *auth.Store
 	config           *config.Store
 	state            StateProvider

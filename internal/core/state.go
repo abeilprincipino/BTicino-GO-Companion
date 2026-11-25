@@ -59,7 +59,25 @@ type State struct {
 	PreviewStream       *PreviewStream   `json:"preview_stream,omitempty"`
 	Audio               AudioState       `json:"audio"`
 	Voicemail           *VoicemailState  `json:"voicemail,omitempty"`
+	// IntercomUnavailable is set while the intercom firmware does not answer,
+	// to why; empty while it does.
+	IntercomUnavailable IntercomUnavailableReason `json:"intercom_unavailable,omitempty"`
 }
+
+// ErrIntercomUnavailable refuses a command while the intercom firmware does
+// not answer.
+var ErrIntercomUnavailable = errors.New("the intercom is restarting; try again in a few seconds")
+
+// IntercomUnavailableReason says why the intercom firmware does not answer.
+type IntercomUnavailableReason string
+
+const (
+	// IntercomReloading: the companion reloads the firmware, which stops it
+	// for about 25 s (see internal/ringersync).
+	IntercomReloading IntercomUnavailableReason = "firmware_reload"
+	// IntercomUnreachable: the bus refuses commands for another reason.
+	IntercomUnreachable IntercomUnavailableReason = "unreachable"
+)
 
 type Projector struct {
 	mu    sync.RWMutex
@@ -111,6 +129,14 @@ func apply(state *State, event Event) error {
 		}
 
 		state.PhysicalRing = nil
+	case RingIdentified:
+		// No state: it only tells that the ring's attribution is settled.
+	case RingRetargeted:
+		if err := requireEntrypoint(event.To); err != nil {
+			return err
+		}
+
+		retargetRing(state, event.From, event.To)
 	case IncomingCallStarted:
 		if err := requireDialogAndEntrypoint(event.DialogID, event.EntrypointID); err != nil {
 			return err
@@ -181,6 +207,13 @@ func apply(state *State, event Event) error {
 			return transitionError("preview stream and entrypoint are required")
 		}
 
+		// The same stream may report a new entrypoint: a ring stream moved to
+		// the entrypoint that actually rang.
+		if state.PreviewStream != nil && state.PreviewStream.StreamID == event.StreamID {
+			state.PreviewStream.EntrypointID = event.EntrypointID
+			return nil
+		}
+
 		if state.PreviewStream != nil {
 			return transitionError("a preview stream already exists")
 		}
@@ -206,6 +239,14 @@ func apply(state *State, event Event) error {
 		state.Voicemail = &VoicemailState{Enabled: false}
 	case VoicemailUnavailable:
 		state.Voicemail = nil
+	case IntercomUnavailable:
+		if event.Reason == "" {
+			return transitionError("an intercom unavailable reason is required")
+		}
+
+		state.IntercomUnavailable = event.Reason
+	case IntercomAvailable:
+		state.IntercomUnavailable = ""
 	default:
 		return transitionError("unsupported event %T", event)
 	}
@@ -247,6 +288,30 @@ func transitionError(format string, args ...any) error {
 
 // clearRingOf ends the physical ring of the entrypoint whose call this
 // companion answered or hung up, ahead of the bus frame that would clear it.
+// retargetRing moves to to whatever in state belongs to from: the ring, the
+// call it started and the preview of its stream.
+func retargetRing(state *State, from, to EntrypointID) {
+	if from == "" || from == to {
+		return
+	}
+
+	if state.PhysicalRing != nil && state.PhysicalRing.EntrypointID == from {
+		state.PhysicalRing.EntrypointID = to
+	}
+
+	if state.IncomingCall != nil && state.IncomingCall.EntrypointID == from {
+		state.IncomingCall.EntrypointID = to
+	}
+
+	if state.ActiveCall != nil && state.ActiveCall.EntrypointID == from {
+		state.ActiveCall.EntrypointID = to
+	}
+
+	if state.PreviewStream != nil && state.PreviewStream.EntrypointID == from {
+		state.PreviewStream.EntrypointID = to
+	}
+}
+
 func clearRingOf(state *State, entrypointID EntrypointID) {
 	if state.PhysicalRing != nil && state.PhysicalRing.EntrypointID == entrypointID {
 		state.PhysicalRing = nil

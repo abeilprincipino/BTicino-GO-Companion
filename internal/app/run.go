@@ -10,6 +10,7 @@ import (
 	"bticino-go-companion/internal/homekit"
 	"bticino-go-companion/internal/media"
 	"bticino-go-companion/internal/openwebnet"
+	"bticino-go-companion/internal/ringattribution"
 	"bticino-go-companion/internal/ringersync"
 	"bticino-go-companion/internal/signaling"
 	"bticino-go-companion/internal/system"
@@ -119,9 +120,26 @@ func run(
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	publisher := newEventApplier(projector, homeKit, server, logger)
+	runtime.intercom.setSink(publisher.apply)
+	// The broadcasts that do not go through the publisher (a doorbell
+	// picture, a ring clip, diagnostics, an update check, an API call) wait
+	// for its hold to end too.
+	server.SetStateHold(publisher.isHeld)
+
 	go checkUpdates(ctx, updater, server.BroadcastState, logger)
 
-	applyEvent := newEventApplier(projector, homeKit, server, logger)
+	// A ring, a call or a stream is a use of the intercom: a firmware reload
+	// waits for it to be over for a while.
+	applyEvent := func(event core.Event) {
+		if intercomActivityEvent(event) {
+			runtime.activity.touch()
+		}
+
+		publisher.apply(event)
+	}
+	ringAttribution := ringattribution.New(system.CompanionDataDir, ringAttributionSettings(configStore), configuredDoorbells(configStore), logger)
+	webUI.SetRingAttribution(ringAttribution)
 
 	// The sink first, the inbound handler second, and never the other way
 	// round. Manager.SetEvents drops what is published while the sink is still
@@ -142,7 +160,12 @@ func run(
 	holder := newRingHolder(runtime.rtspServer.Coordinator(), func(entrypointID string) ringClip {
 		return runtime.ringWatch.clip(runtime.ringClips.Start(entrypointID))
 	}, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, logger)
-	runtime.calls.SetEvents(eventSinkFunc(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent))))
+	// The repeat ring guard sees a call before the rest, so it can hold back
+	// the report of a street panel that calls twice for one visitor.
+	repeatRing := newRepeatRingGuard(func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints },
+		publisher, runtime.calls.Hangup, logger)
+	runtime.calls.SetEvents(eventSinkFunc(repeatRing.routeCalls(routeRingingPreview(runtime.rtspServer.Coordinator(), holder.route(applyEvent)))))
+	runtime.snapshots.SetRingLabel(holder.ringLabel)
 
 	if runtime.inboundSIP {
 		runtime.dialer.SetInboundHandler(runtime.calls)
@@ -176,6 +199,7 @@ func run(
 		}
 
 		call.observeFrame(frame)
+		repeatRing.observeFrame(frame)
 		runtime.ringWatch.observeFrame(frame)
 
 		switch {
@@ -240,7 +264,9 @@ func run(
 		}
 	}()
 	go func() {
-		if err := listener.Run(ctx, applyEvent); err != nil && ctx.Err() == nil {
+		busEvents := repeatRing.routeBus(routeRingAttribution(ringAttribution, publisher, logger,
+			routeRingRetarget(runtime.calls, func() []config.Entrypoint { return configStore.Snapshot().Companion.Entrypoints }, applyEvent)))
+		if err := listener.Run(ctx, busEvents); err != nil && ctx.Err() == nil {
 			logger.Error("openwebnet listener stopped", "component", "openwebnet.listener", "error", err)
 		}
 	}()
@@ -304,7 +330,10 @@ type applicationRuntime struct {
 	homeKit           *homekit.Manager
 	server            *api.Server
 	ringClips         *media.RingClipRecorder
+	snapshots         *media.SnapshotManager
 	ringWatch         *ringVideoWatch
+	intercom          *intercomWatch
+	activity          *intercomActivity
 	diagnosticService *diagnostics.Service
 	runtime           *system.RuntimeControl
 	dialer            interface {
@@ -498,11 +527,23 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	// The display ignores an unmute it sees on the bus, so an unmute from Home
 	// Assistant or HomeKit is followed by a firmware reload once the intercom is
 	// idle. See internal/ringersync.
+	// The reload waits for the intercom to go unused for a while, and the
+	// intercom watch tells Home Assistant the intercom is unavailable until
+	// the firmware answers again.
+	activity := newIntercomActivity()
+	intercom := newIntercomWatch(ctx, func(ctx context.Context) error {
+		_, err := control.AudioMutedStatus(ctx)
+		return err
+	}, logger)
+	reloader := ringersync.NewFirmwareReloader()
 	ringer := ringersync.New(ringersync.Config{
-		Audio:  control,
-		Muted:  func() bool { return projector.Snapshot().Audio.Muted },
-		Busy:   func() bool { return intercomBusy(projector.Snapshot()) },
-		Reload: ringersync.NewFirmwareReloader().Reload,
+		Audio: control,
+		Muted: func() bool { return projector.Snapshot().Audio.Muted },
+		Busy:  func() bool { return activity.busy(intercomBusy(projector.Snapshot())) },
+		Reload: func(ctx context.Context) error {
+			intercom.reloading()
+			return reloader.Reload(ctx)
+		},
 		Delay:  ringerReloadDelay,
 		Poll:   ringerReloadPoll,
 		Logger: logger.With("component", "ringersync"),
@@ -514,7 +555,7 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	homeKit.SetSnapshotProvider(snapshots)
 
 	server := api.NewServer(authStore, configStore, projector, logger)
-	server.SetEntrypoints(control)
+	server.SetEntrypoints(watchedEntrypoints{unlock: control.Unlock, watch: intercom, touched: activity.touch})
 	server.SetAudio(ringer)
 	server.SetVoicemail(control)
 	server.SetWebRTC(webrtc)
@@ -537,7 +578,10 @@ func newRuntime(ctx context.Context, configStore *config.Store, logger *slog.Log
 	return &applicationRuntime{
 		projector:         projector,
 		ringClips:         ringClips,
+		snapshots:         snapshots,
 		ringWatch:         ringWatch,
+		intercom:          intercom,
+		activity:          activity,
 		trace:             trace,
 		control:           control,
 		rtspServer:        rtspServer,
@@ -629,6 +673,36 @@ type ringingPreviewCoordinator interface {
 	StopRinging()
 }
 
+// ringCallRetargeter is the part of signaling.Manager a moved ring reaches.
+type ringCallRetargeter interface {
+	RetargetIncoming(from, to core.EntrypointID, devAddr string) bool
+}
+
+// routeRingRetarget passes the bus events on to next and, when a ring moves to
+// the entrypoint that rang, moves its call too. The SIP manager publishes the
+// move again, in order with the call's events, and that is what the ring
+// holder follows: a move that races the INVITE is then never lost.
+func routeRingRetarget(calls ringCallRetargeter, entrypoints func() []config.Entrypoint, next func(core.Event)) func(core.Event) {
+	return func(event core.Event) {
+		next(event)
+
+		moved, ok := event.(core.RingRetargeted)
+		if !ok {
+			return
+		}
+
+		var devAddr string
+
+		for _, entrypoint := range entrypoints() {
+			if core.EntrypointID(entrypoint.ID) == moved.To {
+				devAddr = entrypoint.DevAddr
+			}
+		}
+
+		calls.RetargetIncoming(moved.From, moved.To, devAddr)
+	}
+}
+
 // routeRingingPreview lets the call events move a ringing preview along: the
 // answer promotes it in place, every way the ring ends without that answer
 // stops it. The companion closes the preview on its own rather than relying on
@@ -655,17 +729,18 @@ func routeRingingPreview(coordinator ringingPreviewCoordinator, next func(core.E
 	}
 }
 
-func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) func(core.Event) {
-	return func(event core.Event) {
-		if _, err := projector.Apply(event); err != nil && !errors.Is(err, core.ErrInvalidTransition) {
-			logger.Warn("openwebnet event apply failed", "event_type", event.Type(), "error", err)
-			return
-		}
-
-		homeKit.Sync(projector.Snapshot())
+// newEventApplier is the single publication point: Projector, then HomeKit and
+// the API. Its publishing can be held back while a ring's doorbell settles; see
+// heldPublisher.
+func newEventApplier(projector *core.Projector, homeKit *homekit.Manager, server *api.Server, logger *slog.Logger) *heldPublisher {
+	return newHeldPublisher(projector, func(state core.State, events []core.EventType) {
+		homeKit.Sync(state)
 		server.BroadcastState()
-		server.BroadcastEvent(map[string]any{"type": event.Type()})
-	}
+
+		for _, event := range events {
+			server.BroadcastEvent(map[string]any{"type": event})
+		}
+	}, logger)
 }
 
 func newStreamStateObserver(projector *core.Projector, applyEvent func(core.Event)) media.StreamStateObserver {

@@ -228,6 +228,11 @@ a:hover { color: var(--primary-hover); }
 .form-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-light); }
 .form-check input { width: 16px; height: 16px; accent-color: var(--primary); }
 .form-check-row { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 4px; }
+.setting-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.setting-inline-group { display: inline-flex; align-items: center; gap: 6px; }
+.setting-inline .input-ms { width: 110px; }
+.setting-unit { font-size: 13px; color: var(--text-light); }
+.form-input:disabled { background: #fafafa; color: var(--text-muted); cursor: not-allowed; }
 .input-toggle-wrap { position: relative; }
 .input-toggle-wrap .form-input { padding-right: 36px; }
 .toggle-vis {

@@ -248,4 +248,5 @@ func (c *testClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 type nopRingClip struct{}
 
 func (nopRingClip) VideoRTP(*rtp.Packet) {}
+func (nopRingClip) Retarget(string)      {}
 func (nopRingClip) Close()               {}

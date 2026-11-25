@@ -246,6 +246,12 @@
         <label class="form-check"><input id="systemRebootEnabled" type="checkbox"> Allow intercom reboot</label>
         <label class="form-check"><input id="systemUpdateEnabled" type="checkbox"> Enable updates</label>
         <label class="form-check"><input id="systemUpdateExposed" type="checkbox"> Expose update control</label>
+        <div class="setting-inline">
+          <label class="form-check"><input id="systemRingAttributionEnabled" type="checkbox" onchange="syncRingAttributionInput()"> Enable doorbell attribution learning</label>
+          <span class="setting-inline-group"><input id="systemRingAttributionMaxWait" class="form-input input-ms" type="number" min="100" max="5000" step="100" value="1000" title="Longest hold of a ring report" disabled> <span class="setting-unit">ms</span></span>
+          <button class="btn btn-secondary btn-sm" type="button" onclick="resetRingAttribution()">Reset</button>
+        </div>
+        <p class="form-hint">With several doorbells, holds a ring up to this long while the intercom names the entrance that rang, learning how long from past rings. <span id="systemRingAttributionLearned"></span></p>
         <div class="flex-between"><span id="systemStatus" class="form-status"></span><button class="btn btn-primary" onclick="saveSystemConfig(this)">Save</button></div>
       </div>
     </div>

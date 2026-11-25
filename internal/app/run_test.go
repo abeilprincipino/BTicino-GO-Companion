@@ -135,6 +135,29 @@ func TestResolveInboundEntrypointGivesTheCallToTheStreamingEntrypoint(t *testing
 	}
 }
 
+func TestResolveInboundEntrypointGivesTheCallToTheDoorbellThatRang(t *testing.T) {
+	t.Parallel()
+
+	// One doorbell per external unit: the ring frame, which arrives before the
+	// INVITE, names the unit, and the call follows it.
+	entrypoints := []config.Entrypoint{
+		{ID: "portal0", DevAddr: "21", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+		{ID: "portal6", DevAddr: "213", Capabilities: config.Capabilities{Stream: true, Unlock: true, Ring: true}},
+	}
+
+	projector := core.NewProjector()
+	if _, err := projector.Apply(core.RingStarted{EntrypointID: "portal6"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := newInboundEntrypointResolver(func() []config.Entrypoint { return entrypoints }, projector)
+
+	id, devAddr := resolve()
+	if id != "portal6" || devAddr != "213" {
+		t.Fatalf("resolve() = %q/%q, want portal6/213", id, devAddr)
+	}
+}
+
 func TestServeRunsAPIAndWebUI(t *testing.T) {
 	t.Parallel()
 
@@ -287,5 +310,37 @@ func TestRouteRingingPreviewFollowsTheCall(t *testing.T) {
 
 	if len(applied) != len(events) {
 		t.Fatalf("applied %d events, want %d — every event still reaches the projector", len(applied), len(events))
+	}
+}
+
+type recordingCallRetargeter struct{ moves []string }
+
+func (r *recordingCallRetargeter) RetargetIncoming(from, to core.EntrypointID, devAddr string) bool {
+	r.moves = append(r.moves, string(from)+">"+string(to)+"@"+devAddr)
+	return true
+}
+
+func TestRouteRingRetargetMovesTheCallAfterTheProjector(t *testing.T) {
+	calls := &recordingCallRetargeter{}
+	entrypoints := []config.Entrypoint{{ID: "portal0", DevAddr: "21"}, {ID: "portal6", DevAddr: "213"}}
+
+	var applied []core.Event
+
+	route := routeRingRetarget(calls, func() []config.Entrypoint { return entrypoints }, func(event core.Event) {
+		applied = append(applied, event)
+		if len(calls.moves) != 0 {
+			t.Fatal("the call moved before the projector saw the move")
+		}
+	})
+
+	route(core.RingStarted{EntrypointID: "portal0"})
+	route(core.RingRetargeted{From: "portal0", To: "portal6"})
+
+	if len(applied) != 2 {
+		t.Fatalf("applied %d events, want 2", len(applied))
+	}
+
+	if len(calls.moves) != 1 || calls.moves[0] != "portal0>portal6@213" {
+		t.Fatalf("call moves = %v, want [portal0>portal6@213]", calls.moves)
 	}
 }

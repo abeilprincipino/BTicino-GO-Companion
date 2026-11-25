@@ -66,6 +66,9 @@ type SnapshotManager struct {
 	active     *snapshotAttempt
 	nextID     uint64
 	onCaptured func()
+	// ringLabel names the entrypoint a doorbell picture belongs to; see
+	// SetRingLabel.
+	ringLabel func(entrypointID string) string
 	// pictures holds the pictures published since the start, by file path.
 	pictures map[string]snapshotPicture
 	// writeMu runs the file writes one at a time, each with the newest picture
@@ -140,6 +143,20 @@ func (s *SnapshotManager) SetOnCaptured(callback func()) {
 
 	s.mu.Lock()
 	s.onCaptured = callback
+	s.mu.Unlock()
+}
+
+// SetRingLabel registers label, which names the entrypoint a doorbell picture
+// belongs to from the one its stream was opened for: the ring may have moved
+// to another entrypoint since. It is asked when the picture is ready, so it
+// must not call back into the manager.
+func (s *SnapshotManager) SetRingLabel(label func(entrypointID string) string) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.ringLabel = label
 	s.mu.Unlock()
 }
 
@@ -320,8 +337,8 @@ func (a *snapshotAttempt) run() {
 			return
 		case image, ok := <-process.Picture():
 			if ok {
-				if a.manager.publish(a, image) {
-					a.manager.logger.Debug("snapshot captured", "entrypoint_id", a.entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
+				if entrypointID, ok := a.manager.publish(a, image); ok {
+					a.manager.logger.Debug("snapshot captured", "entrypoint_id", entrypointID, "generation", a.id, "bytes", len(image), "ring", a.ring.Load(),
 						"since_arm", time.Since(a.armed), "since_first_packet", time.Since(firstPacket), "decode", time.Since(decodeStarted),
 						"fed_access_units", fed, "skipped_access_units", accessUnits.skipped,
 						"nal_types_until_keyframe", strings.Join(accessUnits.skippedTypes, " "), "broken_packets", accessUnits.broken)
@@ -487,19 +504,32 @@ func (a *snapshotAttempt) finish() {
 	a.manager.mu.Unlock()
 }
 
-func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
+// publish stores image as the picture of the attempt's entrypoint, or of the
+// one its ring moved to, and returns that entrypoint.
+func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) (string, bool) {
+	s.mu.Lock()
+	label := s.ringLabel
+	s.mu.Unlock()
+
+	entrypointID := attempt.entrypointID
+	if attempt.ring.Load() && label != nil {
+		if moved := label(entrypointID); moved != "" {
+			entrypointID = moved
+		}
+	}
+
 	s.mu.Lock()
 	// A closed attempt stays active until its run returns, and its picture may
 	// be ready together with the cancellation.
 	if s.active != attempt || attempt.ctx.Err() != nil {
 		s.mu.Unlock()
-		return false
+		return "", false
 	}
 
-	path, ok := s.path(attempt.entrypointID)
+	path, ok := s.path(entrypointID)
 	if !ok {
 		s.mu.Unlock()
-		return false
+		return "", false
 	}
 
 	// Round strips the monotonic reading: the time is compared with the files'.
@@ -510,7 +540,7 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 	// The doorbell picture has its own file, written only by a stream born as a
 	// ringing preview, so a live view never looks like a new ring.
 	if attempt.ring.Load() {
-		if ringPath, ok := s.ringPath(attempt.entrypointID); ok {
+		if ringPath, ok := s.ringPath(entrypointID); ok {
 			s.pictures[ringPath] = picture
 			paths = append(paths, ringPath)
 		}
@@ -525,7 +555,7 @@ func (s *SnapshotManager) publish(attempt *snapshotAttempt, image []byte) bool {
 		callback()
 	}
 
-	return true
+	return entrypointID, true
 }
 
 // persist writes the newest picture of each path to its file, dated with the

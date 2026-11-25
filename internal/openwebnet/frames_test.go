@@ -83,6 +83,17 @@ func TestFramePredicatesAndExtractors(t *testing.T) {
 	}
 
 	for frame, want := range map[string]string{
+		"*8*9#1#4*213##": "213",
+		"*8*9#1#4*21##":  "21",
+		"*8*9#5#4*213##": "",
+		"*8*9#1#4*##":    "",
+	} {
+		if address, ok := ParseRingIdentityAddress(frame); address != want || ok != (want != "") {
+			t.Fatalf("ParseRingIdentityAddress(%q) = %q, %t, want %q", frame, address, ok, want)
+		}
+	}
+
+	for frame, want := range map[string]string{
 		"*8*1#1#4#21*11##":   "1 11",
 		" *8*1#1#4#21*11## ": "1 11",
 		"*8*1#5#4#20*11##":   "5 11",
@@ -147,5 +158,28 @@ func TestParseVoicemailStatus(t *testing.T) {
 
 	if _, _, ok := ParseVoicemailStatus("*#8**40*2*0##"); ok {
 		t.Fatal("invalid voicemail status must be rejected")
+	}
+}
+
+func TestParseCallEnd(t *testing.T) {
+	cases := []struct {
+		frame, callType, mode, address string
+		ok                             bool
+	}{
+		{"*8*3#1#3*421##", "1", "3", "21", true},
+		{"*8*3#1#3*4213##", "1", "3", "213", true},
+		{"*8*3#1#4*4110##", "1", "4", "110", true},
+		{"*8*3#5#4*4110##", "5", "4", "110", true},
+		{"*8*3#1#4*110##", "", "", "", false},
+		{"*8*3#1*421##", "", "", "", false},
+		{"*8*2#1#4*110##", "", "", "", false},
+		{"*8*3#1#3*4##", "", "", "", false},
+	}
+
+	for _, tc := range cases {
+		callType, mode, address, ok := ParseCallEnd(tc.frame)
+		if callType != tc.callType || mode != tc.mode || address != tc.address || ok != tc.ok {
+			t.Errorf("ParseCallEnd(%q) = %q, %q, %q, %v; want %q, %q, %q, %v", tc.frame, callType, mode, address, ok, tc.callType, tc.mode, tc.address, tc.ok)
+		}
 	}
 }
