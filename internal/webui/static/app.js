@@ -844,7 +844,7 @@ function entrypointCardHTML(ep, idx) {
       + checkboxHTML('ep-unlock-' + idx, 'ep-has-unlock', 'Unlock', !!(ep.capabilities && ep.capabilities.unlock))
       + checkboxHTML('ep-repeat-ring-' + idx, 'ep-ignore-repeat-ring', 'Ignore repeated call', !!ep.ignore_repeat_ring)
     + '</div>'
-    + '<div class="form-hint">Ignore repeated call: for a street panel that ends an unanswered call by itself and calls again a moment later. The second call is hidden, and declined if the door was already opened.</div>'
+    + '<div class="form-hint">Ignore repeated call: for an entrypoint whose panel ends an unanswered call by itself and calls again a moment later. The second call is hidden, and declined if the door was already opened.</div>'
     + '</div>';
 }
 

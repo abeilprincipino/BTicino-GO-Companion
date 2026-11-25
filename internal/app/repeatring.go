@@ -158,7 +158,7 @@ func (g *repeatRingGuard) callEnded(mode, address string) {
 	opened := g.opened
 	g.mu.Unlock()
 
-	g.logger.Info("street panel ended its call; holding the report for a repeated call", "entrypoint_id", entrypoint.ID, "door_opened", opened)
+	g.logger.Info("entrypoint ended its own call; holding the report for a repeated call", "entrypoint_id", entrypoint.ID, "door_opened", opened)
 	g.publication.holdAs(holdRepeatRing, repeatRingWindow)
 }
 
@@ -203,13 +203,13 @@ func (g *repeatRingGuard) routeCalls(next func(core.Event)) func(core.Event) {
 		next(event)
 
 		if !decline {
-			g.logger.Info("street panel called again; the call goes on as the first one", "entrypoint_id", entrypoint, "dialog_id", started.DialogID)
+			g.logger.Info("entrypoint called again; the call goes on as the first one", "entrypoint_id", entrypoint, "dialog_id", started.DialogID)
 			g.publication.releaseAs(holdRepeatRing, "repeat merged", isRingRestart)
 
 			return
 		}
 
-		g.logger.Info("street panel called again after the door was opened; declining the call", "entrypoint_id", entrypoint, "dialog_id", started.DialogID)
+		g.logger.Info("entrypoint called again after its door was opened; declining the call", "entrypoint_id", entrypoint, "dialog_id", started.DialogID)
 
 		go g.decline(entrypoint)
 	}
