@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +37,13 @@ const (
 	// the OpenWebNet control session's three-second deadline.
 	DefaultUnlockDurationMS = 2000
 	MaxUnlockDurationMS     = 2000
+	// DefaultRingAttributionMaxWaitMS caps how long a ring is kept from Home
+	// Assistant and HomeKit while the intercom names the external unit that
+	// rang; MinRingAttributionMaxWaitMS and MaxRingAttributionMaxWaitMS bound a
+	// cap the user sets.
+	DefaultRingAttributionMaxWaitMS = 1000
+	MinRingAttributionMaxWaitMS     = 100
+	MaxRingAttributionMaxWaitMS     = 5000
 )
 
 var (
@@ -76,6 +84,10 @@ type Entrypoint struct {
 	Capabilities     Capabilities `yaml:"capabilities" json:"capabilities"`
 	UnlockMode       string       `yaml:"unlock_mode,omitempty" json:"unlock_mode,omitempty"`
 	UnlockDurationMS int          `yaml:"unlock_duration_ms,omitempty" json:"unlock_duration_ms,omitempty"`
+	// IgnoreRepeatRing hides the call some street panels make again by
+	// themselves a moment after ending an unanswered one, and declines it when
+	// the door was already opened. See docs/superpowers/specs/2026-11-22-repeat-ring-design.md.
+	IgnoreRepeatRing bool `yaml:"ignore_repeat_ring,omitempty" json:"ignore_repeat_ring,omitempty"`
 }
 
 type Capabilities struct {
@@ -114,11 +126,31 @@ type WebUI struct {
 }
 
 type System struct {
-	RebootEnabled bool               `yaml:"reboot_enabled"`
-	UpdateEnabled bool               `yaml:"update_enabled"`
-	UpdateExposed bool               `yaml:"update_exposed"`
-	UpdateChannel string             `yaml:"update_channel"`
-	Services      map[string]Service `yaml:"services"`
+	RebootEnabled   bool               `yaml:"reboot_enabled"`
+	UpdateEnabled   bool               `yaml:"update_enabled"`
+	UpdateExposed   bool               `yaml:"update_exposed"`
+	UpdateChannel   string             `yaml:"update_channel"`
+	Services        map[string]Service `yaml:"services"`
+	RingAttribution RingAttribution    `yaml:"ring_attribution"`
+}
+
+// RingAttribution lets the companion learn, on an installation with several
+// doorbells, how long the intercom takes to name the external unit that rang
+// when the ring frame carries another unit's address, and hold the ring that
+// long, up to MaxWaitMS, before reporting it. It is off by default.
+type RingAttribution struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled"`
+	// MaxWaitMS is the cap; 0 means DefaultRingAttributionMaxWaitMS.
+	MaxWaitMS int `yaml:"max_wait_ms,omitempty" json:"max_wait_ms"`
+}
+
+// MaxWait is the cap in effect.
+func (r RingAttribution) MaxWait() time.Duration {
+	if r.MaxWaitMS == 0 {
+		return DefaultRingAttributionMaxWaitMS * time.Millisecond
+	}
+
+	return time.Duration(r.MaxWaitMS) * time.Millisecond
 }
 
 type persistedAuth struct {
@@ -132,6 +164,9 @@ type persistedSystem struct {
 	} `yaml:"reboot"`
 	Updates  persistedUpdates   `yaml:"updates"`
 	Services map[string]Service `yaml:"services"`
+	// RingAttribution is left out while it has its default values, so a
+	// config.yaml stays readable by builds older than it.
+	RingAttribution RingAttribution `yaml:"ring_attribution,omitempty"`
 }
 
 // persistedUpdates omits a stable channel: the loader rejects unknown keys, so
@@ -307,7 +342,7 @@ func Load(path string) (Config, error) {
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
 		Logging: persisted.Logging,
-		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, UpdateChannel: persisted.System.Updates.Channel, Services: persisted.System.Services},
+		System:  System{RebootEnabled: persisted.System.Reboot.Enabled, UpdateEnabled: persisted.System.Updates.Enabled, UpdateExposed: persisted.System.Updates.Exposed, UpdateChannel: persisted.System.Updates.Channel, Services: persisted.System.Services, RingAttribution: persisted.System.RingAttribution},
 		HomeKit: persisted.HomeKit,
 	}
 
@@ -433,7 +468,7 @@ func (s *Store) Update(update func(*Config) error) error {
 	if !slices.Equal(s.cfg.Companion.Entrypoints, next.Companion.Entrypoints) {
 		assignDefaultDoorbell(next.Companion.Entrypoints)
 
-		if err := validateExclusiveCapabilities(next.Companion.Entrypoints); err != nil {
+		if err := validateDoorbells(next.Companion.Entrypoints); err != nil {
 			return err
 		}
 	}
@@ -456,9 +491,10 @@ func (s *Store) ApplyMetadata(metadata Metadata) error {
 }
 
 // DoorbellEntrypoint returns the entrypoint every ring and inbound call belongs
-// to: the only one that can stream, since the call is only useful where its
-// picture is, or else the only one that can ring. It reports false when
-// neither is unique, and the caller must then fall back to the frame address.
+// to when there is a single doorbell: the only one that can stream, since the
+// call is only useful where its picture is, or else the only one that can ring.
+// It reports false when neither is unique, as with one doorbell per external
+// unit, and the caller must then fall back to the frame address.
 func DoorbellEntrypoint(entrypoints []Entrypoint) (Entrypoint, bool) {
 	for _, capable := range []func(Capabilities) bool{
 		func(c Capabilities) bool { return c.Stream },
@@ -488,16 +524,10 @@ func DoorbellEntrypoint(entrypoints []Entrypoint) (Entrypoint, bool) {
 	return Entrypoint{}, false
 }
 
-var (
-	// ErrExclusiveCapability rejects a second doorbell entrypoint: the intercom
-	// has one camera and one doorbell call, so either would become ambiguous.
-	ErrExclusiveCapability = errors.New("only one entrypoint may be the doorbell")
-
-	// ErrSplitDoorbell rejects ring without stream or stream without ring: the
-	// ringing preview adopts the call of the entrypoint it streams, so the two
-	// only work together.
-	ErrSplitDoorbell = errors.New("stream and ring must be enabled together")
-)
+// ErrSplitDoorbell rejects ring without stream or stream without ring: the
+// ringing preview adopts the call of the entrypoint it streams, so the two
+// only work together.
+var ErrSplitDoorbell = errors.New("stream and ring must be enabled together")
 
 // DefaultDoorbellDevAddr is the address of the main external unit on a BTicino
 // installation, the one the seeded entrypoint uses.
@@ -524,23 +554,16 @@ func assignDefaultDoorbell(entrypoints []Entrypoint) {
 	}
 }
 
-// validateExclusiveCapabilities runs on save only, not in Validate: a
-// config.yaml written before the rule existed must still load.
-func validateExclusiveCapabilities(entrypoints []Entrypoint) error {
-	doorbells := 0
-
+// validateDoorbells runs on save only, not in Validate: a config.yaml written
+// before the rule existed must still load. More than one entrypoint may be a
+// doorbell, one per external unit with a camera: the stream coordinator serves
+// one of them at a time, and a ring goes to the one whose address the ring
+// frame carries.
+func validateDoorbells(entrypoints []Entrypoint) error {
 	for _, entrypoint := range entrypoints {
 		if entrypoint.Capabilities.Stream != entrypoint.Capabilities.Ring {
 			return fmt.Errorf("entrypoint %q: %w", entrypoint.ID, ErrSplitDoorbell)
 		}
-
-		if entrypoint.Capabilities.Ring {
-			doorbells++
-		}
-	}
-
-	if doorbells > 1 {
-		return ErrExclusiveCapability
 	}
 
 	return nil
@@ -607,6 +630,10 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("invalid update channel %q", channel)
 	}
 
+	if wait := cfg.System.RingAttribution.MaxWaitMS; wait != 0 && (wait < MinRingAttributionMaxWaitMS || wait > MaxRingAttributionMaxWaitMS) {
+		return fmt.Errorf("ring attribution wait must be 0 (default) or %d-%d milliseconds", MinRingAttributionMaxWaitMS, MaxRingAttributionMaxWaitMS)
+	}
+
 	return nil
 }
 
@@ -652,7 +679,7 @@ func encode(cfg Config) ([]byte, error) {
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
 		System: persistedSystem{Reboot: struct {
 			Enabled bool `yaml:"enabled"`
-		}{Enabled: cfg.System.RebootEnabled}, Updates: persistedUpdates{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed, Channel: persistedChannel(cfg.System.UpdateChannel)}, Services: cfg.System.Services},
+		}{Enabled: cfg.System.RebootEnabled}, Updates: persistedUpdates{Enabled: cfg.System.UpdateEnabled, Exposed: cfg.System.UpdateExposed, Channel: persistedChannel(cfg.System.UpdateChannel)}, Services: cfg.System.Services, RingAttribution: cfg.System.RingAttribution},
 		HomeKit: cfg.HomeKit,
 	})
 	if err != nil {

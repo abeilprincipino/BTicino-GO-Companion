@@ -298,11 +298,47 @@ function renderSystemConfig() {
     document.getElementById('systemRebootEnabled').checked = !!data.reboot_enabled;
     document.getElementById('systemUpdateEnabled').checked = !!data.update_enabled;
     document.getElementById('systemUpdateExposed').checked = !!data.update_exposed;
+    var ringAttribution = data.ring_attribution || {};
+    document.getElementById('systemRingAttributionEnabled').checked = !!ringAttribution.enabled;
+    document.getElementById('systemRingAttributionMaxWait').value = ringAttribution.max_wait_ms || 1000;
+    syncRingAttributionInput();
+    renderRingAttributionLearned(ringAttribution.learned || []);
     setStatus('systemStatus', '');
   }).catch(function(err) { handleApiError(err, 'Failed to load system configuration'); });
 }
 
+function syncRingAttributionInput() {
+  document.getElementById('systemRingAttributionMaxWait').disabled = !document.getElementById('systemRingAttributionEnabled').checked;
+}
+
+function renderRingAttributionLearned(learned) {
+  var text = learned.length === 0 ? 'Nothing learned yet.' : 'Learned: ' + learned.map(function(item) {
+    return 'address ' + item.address + ' held ' + item.hold_ms + ' ms (' + item.corrections + (item.corrections === 1 ? ' correction' : ' corrections') + ')';
+  }).join('; ') + '.';
+  document.getElementById('systemRingAttributionLearned').textContent = text;
+}
+
+function resetRingAttribution() {
+  requestConfirmation('Reset doorbell attribution learning?', 'Companion forgets how long the intercom took to name the entrance that rang, and learns it again from the next rings.', 'Reset', function() {
+    apiPost('/webui/api/management/system/ring-attribution/reset', { confirm: true }).then(function() {
+      toast.show({ kind: 'success', message: 'Doorbell attribution learning reset' });
+      renderRingAttributionLearned([]);
+    }).catch(function(err) {
+      toast.show({ kind: 'error', message: err.message || 'Reset failed' });
+    });
+  });
+}
+
 function saveSystemConfig(button) {
+  var ringAttributionEnabled = document.getElementById('systemRingAttributionEnabled').checked;
+  var maxWait = parseInt(document.getElementById('systemRingAttributionMaxWait').value, 10);
+  if (isNaN(maxWait) || maxWait < 100 || maxWait > 5000) {
+    if (ringAttributionEnabled) {
+      setStatus('systemStatus', 'The longest hold must be 100-5000 ms.', 'var(--danger)');
+      return;
+    }
+    maxWait = 1000;
+  }
   apiPut('/webui/api/management/system', {
     reboot_enabled: document.getElementById('systemRebootEnabled').checked,
     update_enabled: document.getElementById('systemUpdateEnabled').checked,
@@ -310,7 +346,8 @@ function saveSystemConfig(button) {
     services: {
       companion: { enabled: true, exposed: true },
       dropbear: { enabled: true, exposed: true }
-    }
+    },
+    ring_attribution: { enabled: ringAttributionEnabled, max_wait_ms: maxWait }
   }).then(function() { setStatus('systemStatus', 'Saved. Restart Companion to apply changes.', 'var(--success)'); }).catch(function(err) { handleApiError(err); });
 }
 
@@ -765,26 +802,13 @@ function renderEntrypointsConfig() {
   var html = '';
   for (var i = 0; i < list.length; i++) html += entrypointCardHTML(list[i], i);
   document.getElementById('entrypointsList').innerHTML = html || '<div class="card dummy-content"><h2>No Entrypoints</h2><p>Add one to expose a gate.</p></div>';
-  syncExclusiveCapabilities();
   setStatus('entrypointsStatus', '');
 }
 
-// Doorbell (ring and stream together) belongs to one entrypoint only: while one
-// card has it checked, the box is disabled elsewhere.
-var EXCLUSIVE_CAPABILITIES = ['ep-has-doorbell'];
+// Doorbell (ring and stream together) may be set on several entrypoints, one per
+// external unit with a camera: the companion streams one of them at a time and
+// gives each ring to the one at the address the ring frame carries.
 var DEFAULT_DOORBELL_DEVADDR = '20';
-
-function syncExclusiveCapabilities() {
-  EXCLUSIVE_CAPABILITIES.forEach(function(cls) {
-    var boxes = Array.prototype.slice.call(document.querySelectorAll('.entrypoint-card .' + cls));
-    var holder = boxes.filter(function(box) { return box.checked; })[0];
-    boxes.forEach(function(box) {
-      var locked = !!holder && box !== holder && !box.checked;
-      box.disabled = locked;
-      box.title = locked ? 'Already assigned to another entrypoint' : '';
-    });
-  });
-}
 
 // isDoorbell also accepts a config saved before ring and stream were merged,
 // where only one of the two may be set; saving then sets both.
@@ -818,13 +842,14 @@ function entrypointCardHTML(ep, idx) {
     + '<div class="form-check-row">'
       + checkboxHTML('ep-doorbell-' + idx, 'ep-has-doorbell', 'Doorbell (ring + stream)', isDoorbell(ep))
       + checkboxHTML('ep-unlock-' + idx, 'ep-has-unlock', 'Unlock', !!(ep.capabilities && ep.capabilities.unlock))
+      + checkboxHTML('ep-repeat-ring-' + idx, 'ep-ignore-repeat-ring', 'Ignore repeated call', !!ep.ignore_repeat_ring)
     + '</div>'
+    + '<div class="form-hint">Ignore repeated call: for an entrypoint whose panel ends an unanswered call by itself and calls again a moment later. The second call is hidden, and declined if the door was already opened.</div>'
     + '</div>';
 }
 
 function checkboxHTML(id, cls, label, checked) {
-  var sync = EXCLUSIVE_CAPABILITIES.indexOf(cls) >= 0 ? ' onchange="syncExclusiveCapabilities()"' : '';
-  return '<div class="form-check"><input type="checkbox" class="' + cls + '" id="' + id + '"' + (checked ? ' checked' : '') + sync + '><label for="' + id + '">' + label + '</label></div>';
+  return '<div class="form-check"><input type="checkbox" class="' + cls + '" id="' + id + '"' + (checked ? ' checked' : '') + '><label for="' + id + '">' + label + '</label></div>';
 }
 
 function addEntrypointCard() {
@@ -883,6 +908,7 @@ function collectEntrypoints() {
     // Leave defaults absent so an unchanged door remains readable by older builds.
     if (modeInput.value !== 'door') entrypoint.unlock_mode = modeInput.value;
     if (duration !== 2000) entrypoint.unlock_duration_ms = duration;
+    if (card.querySelector('.ep-ignore-repeat-ring').checked) entrypoint.ignore_repeat_ring = true;
     out.push(entrypoint);
   }
   return out;
@@ -902,10 +928,6 @@ function saveEntrypointsConfig(saveBtn) {
       setStatus('entrypointsStatus', 'ID, label, and device address are required.', 'var(--danger)');
       return;
     }
-  }
-  if (cfg.entrypoints.filter(isDoorbell).length > 1) {
-    setStatus('entrypointsStatus', 'Only one entrypoint may be the doorbell.', 'var(--danger)');
-    return;
   }
   // Mirrors the server: with no doorbell, the entrypoint at address 20 becomes it.
   if (!cfg.entrypoints.some(isDoorbell)) {

@@ -34,7 +34,11 @@ const (
 
 var (
 	voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
-	ringIdentityFrameRegexp    = regexp.MustCompile(`^\*8\*9#1#4\*([^#*]+)#2##$`)
+	// ringIdentityFrameRegexp matches the frame naming the external unit whose
+	// camera a ring connects: *8*9#1#4*<a>#2##, or *8*9#1#4*<a>## on a C100X,
+	// which sends it 0.3 to 2.5 s after a ring frame that may carry another
+	// unit's address.
+	ringIdentityFrameRegexp = regexp.MustCompile(`^\*8\*9#1#4\*([^#*]+)(?:#2)?##$`)
 )
 
 func BuildUnlockOpen(devAddr string) string {
@@ -109,6 +113,31 @@ func IsCallAnswer(frame string) bool {
 // IsCallEnd reports a door-entry call end *8*3#<type>#4*4<called>##.
 func IsCallEnd(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*3#")
+}
+
+// ParseCallEnd reads a door-entry call end *8*3#<type>#<mode>*4<address>##.
+// The indoor unit ending a ring sends mode 4 with its own address, as
+// BuildCallEnd does; a street panel ending its own unanswered call sends mode 3
+// with the panel's address: *8*3#1#3*421## for the external unit 21.
+func ParseCallEnd(frame string) (callType, mode, address string, ok bool) {
+	trimmed := strings.TrimSpace(frame)
+	if !strings.HasPrefix(trimmed, "*8*3#") || !strings.HasSuffix(trimmed, "##") {
+		return "", "", "", false
+	}
+
+	fields := strings.TrimSuffix(strings.TrimPrefix(trimmed, "*8*3#"), "##")
+
+	head, where, found := strings.Cut(fields, "*")
+	if !found || !strings.HasPrefix(where, "4") || len(where) < 2 || strings.ContainsAny(where, "#*") {
+		return "", "", "", false
+	}
+
+	callType, mode, found = strings.Cut(head, "#")
+	if !found || callType == "" || mode == "" || strings.Contains(mode, "#") {
+		return "", "", "", false
+	}
+
+	return callType, mode, where[1:], true
 }
 
 // BuildCallEnd closes the door-entry call on the bus, which a SIP BYE or 603

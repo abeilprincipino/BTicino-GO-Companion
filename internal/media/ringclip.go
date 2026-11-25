@@ -53,7 +53,10 @@ type RingClipRecorder struct {
 
 // RingClip is the recording of one ring. Its methods are safe on a nil clip.
 type RingClip struct {
-	recorder     *RingClipRecorder
+	recorder *RingClipRecorder
+	// mu guards entrypointID and path, which Retarget may change while the
+	// clip records.
+	mu           sync.Mutex
 	entrypointID string
 	path         string
 	packets      chan *rtp.Packet
@@ -207,6 +210,31 @@ func (c *RingClip) VideoRTP(packet *rtp.Packet) {
 	}
 }
 
+// Retarget makes the clip entrypointID's: its ring turned out to be that
+// entrypoint's. A clip already written stays where it is.
+func (c *RingClip) Retarget(entrypointID string) {
+	if c == nil {
+		return
+	}
+
+	path, ok := c.recorder.path(entrypointID)
+	if !ok {
+		return
+	}
+
+	c.mu.Lock()
+	c.entrypointID, c.path = entrypointID, path
+	c.mu.Unlock()
+}
+
+// target is the entrypoint the clip belongs to and the file it is written to.
+func (c *RingClip) target() (string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.entrypointID, c.path
+}
+
 // Close ends the clip: what was recorded is written, or discarded when too
 // short. It returns at once.
 func (c *RingClip) Close() {
@@ -234,7 +262,8 @@ func (c *RingClip) run(writer *clipWriter) {
 			}
 
 			if !started && writer.started {
-				c.recorder.logger.Debug("ring clip first keyframe", "entrypoint_id", c.entrypointID,
+				entrypointID, _ := c.target()
+				c.recorder.logger.Debug("ring clip first keyframe", "entrypoint_id", entrypointID,
 					"dropped_access_units", writer.droppedAccessUnits, "since_first_packet", time.Since(firstPacket))
 			}
 		case <-c.closed:
@@ -264,24 +293,25 @@ func (c *RingClip) finish(writer *clipWriter) {
 	}
 	recorder.mu.Unlock()
 
+	entrypointID, path := c.target()
 	duration := writer.duration()
 	if duration < ringClipMinDuration {
-		recorder.logger.Debug("ring clip discarded; too short", "entrypoint_id", c.entrypointID, "duration", duration,
+		recorder.logger.Debug("ring clip discarded; too short", "entrypoint_id", entrypointID, "duration", duration,
 			"rejected_packets", writer.rejectedPackets, "dropped_access_units", writer.droppedAccessUnits)
 
 		return
 	}
 
-	if !recorder.hasRoomFor(c.path, writer.size) {
+	if !recorder.hasRoomFor(path, writer.size) {
 		return
 	}
 
-	if err := writeFileAtomicFunc(c.path, ringClipTemporaryPattern, writer.recordedAt, writer.marshalTo); err != nil {
-		recorder.logger.Warn("publish ring clip", "entrypoint_id", c.entrypointID, "error", err)
+	if err := writeFileAtomicFunc(path, ringClipTemporaryPattern, writer.recordedAt, writer.marshalTo); err != nil {
+		recorder.logger.Warn("publish ring clip", "entrypoint_id", entrypointID, "error", err)
 		return
 	}
 
-	recorder.logger.Debug("ring clip saved", "entrypoint_id", c.entrypointID, "duration", duration, "bytes", writer.size,
+	recorder.logger.Debug("ring clip saved", "entrypoint_id", entrypointID, "duration", duration, "bytes", writer.size,
 		"rejected_packets", writer.rejectedPackets, "dropped_access_units", writer.droppedAccessUnits)
 
 	recorder.mu.Lock()
